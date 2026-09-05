@@ -12,20 +12,29 @@
             include {{NGINX_GB_DIR}}/{{DOMAIN}}/auth.conf;
             try_files $uri =404;
             include snippets/getbible/headers.conf;
-            add_header Cache-Control "public, max-age={{CACHE_TTL}}, stale-while-revalidate=86400, stale-if-error=86400" always;
+{{#IF TOKEN_ACCESS}}            add_header Cache-Control "private, no-store" always;
+            add_header Vary "Authorization" always;
+{{/IF}}{{#UNLESS TOKEN_ACCESS}}            add_header Cache-Control "public, max-age={{CACHE_TTL}}, stale-while-revalidate=86400, stale-if-error=86400" always;
+{{/UNLESS}}
         }
 {{/IF}}{{#IF HAS_SHA}}
         location ~* ^/{{LABEL}}/.+\.sha$ {
             include {{NGINX_GB_DIR}}/{{DOMAIN}}/auth.conf;
             try_files $uri =404;
             include snippets/getbible/headers.conf;
-            add_header Cache-Control "public, max-age={{SHA_CACHE_TTL}}, stale-while-revalidate=3600, stale-if-error=86400" always;
+{{#IF TOKEN_ACCESS}}            add_header Cache-Control "private, no-store" always;
+            add_header Vary "Authorization" always;
+{{/IF}}{{#UNLESS TOKEN_ACCESS}}            add_header Cache-Control "public, max-age={{SHA_CACHE_TTL}}, stale-while-revalidate=3600, stale-if-error=86400" always;
+{{/UNLESS}}
         }
 {{/IF}}{{#IF HAS_HTML}}
         location ~* ^/{{LABEL}}/.+\.html$ {
             include {{NGINX_GB_DIR}}/{{DOMAIN}}/auth.conf;
             try_files $uri =404;
-            include snippets/getbible/headers-html.conf;
+{{#IF TOKEN_ACCESS}}            include snippets/getbible/headers-html-private.conf;
+            add_header Vary "Authorization" always;
+{{/IF}}{{#UNLESS TOKEN_ACCESS}}            include snippets/getbible/headers-html.conf;
+{{/UNLESS}}
         }
 {{/IF}}
         return 404;

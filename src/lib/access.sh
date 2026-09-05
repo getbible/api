@@ -74,6 +74,16 @@ tokens_render_map() {
     fi
 }
 
+tokens_render_validity_map() {
+    local domain="$1" output="$2" file
+    file="$(ep_tokens_file "$domain")"
+    if [[ -f "$file" ]]; then
+        tokens_cmd "$file" render-validity-map "$domain" > "$output"
+    else
+        : > "$output"
+    fi
+}
+
 tokens_list() { tokens_cmd "$(ep_tokens_file "$1")" list; }
 tokens_count() {
     local file

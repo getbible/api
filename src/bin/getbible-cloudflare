@@ -8,6 +8,7 @@ Usage:
   getbible-cloudflare dns DOMAIN --proxied true|false [--ipv4 A] [--ipv6 AAAA]
   getbible-cloudflare host-rules DOMAIN --cache bypass|respect [--security api|default]
   getbible-cloudflare host-rules-remove DOMAIN
+  getbible-cloudflare protect-access DOMAIN
   getbible-cloudflare zone-settings DOMAIN [--http3 on] [--brotli on] [--min-tls 1.2] [--always-https on]
   getbible-cloudflare bot-fight DOMAIN on|off
   getbible-cloudflare origin-pulls DOMAIN on|off
@@ -160,6 +161,8 @@ def cmd_host_rules(domain: str, args: list[str]) -> dict:
             security = args.pop(0)
         else:
             raise CloudflareError(f"unknown option {item}")
+    if cache not in {"bypass", "respect"} or security not in {"api", "default"}:
+        raise CloudflareError("cache must be bypass|respect and security must be api|default")
     zone = find_zone(domain)
     expression = f'(http.host eq "{domain}")'
     description = f"getbible:{domain}"
@@ -202,6 +205,22 @@ def cmd_host_rules(domain: str, args: list[str]) -> dict:
     except SystemExit as error:
         out["waf_skip"] = f"not applied ({error})"
     return out
+
+
+def cmd_protect_access(domain: str) -> dict:
+    """Stop shared caching before evicting formerly public content for a host.
+
+    This deliberately never falls back to purging the entire zone: other
+    applications can share it. Missing Cache Purge permission is an error.
+    """
+    zone = find_zone(domain)
+    rule = {
+        "action": "set_cache_settings", "expression": f'(http.host eq "{domain}")', "enabled": True,
+        "action_parameters": {"cache": False},
+    }
+    replace_rule(zone["id"], "http_request_cache_settings", f"getbible:{domain}", rule)
+    request("POST", f"/zones/{zone['id']}/purge_cache", {"hosts": [domain]})
+    return {"zone": zone["name"], "host": domain, "cache": "bypass", "purged": True}
 
 
 def cmd_host_rules_remove(domain: str) -> dict:
@@ -277,6 +296,8 @@ def main(argv: list[str]) -> int:
         out = cmd_host_rules(rest[0], rest[1:])
     elif command == "host-rules-remove":
         out = cmd_host_rules_remove(rest[0])
+    elif command == "protect-access":
+        out = cmd_protect_access(rest[0])
     elif command == "zone-settings":
         out = cmd_zone_settings(rest[0], rest[1:])
     elif command == "bot-fight":
