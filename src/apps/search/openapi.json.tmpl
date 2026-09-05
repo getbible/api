@@ -1,0 +1,117 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "getBible search endpoint",
+    "version": "{{VERSION}}",
+    "description": "Full-text scripture search. The search string is the last path segment; filters travel as query parameters or as a JSON body (GET or POST). Precedence: path, then query string, then body, then defaults. A search string that is a scripture reference returns that scripture.",
+    "contact": {"name": "getBible", "url": "https://getbible.net"}
+  },
+  "servers": [{"url": "https://{{DOMAIN}}"}],
+  "paths": {
+    "/{{VERSION}}/{translation}/{search}": {
+      "get": {
+        "summary": "Search a translation",
+        "operationId": "search",
+        "parameters": [
+          {"name": "translation", "in": "path", "required": true, "schema": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,29}$"}},
+          {"name": "search", "in": "path", "required": true, "description": "Words to find, or a scripture reference", "schema": {"type": "string", "maxLength": 500}},
+          {"$ref": "#/components/parameters/words"}, {"$ref": "#/components/parameters/match"},
+          {"$ref": "#/components/parameters/case_sensitive"}, {"$ref": "#/components/parameters/scope"},
+          {"$ref": "#/components/parameters/book"}, {"$ref": "#/components/parameters/books"},
+          {"$ref": "#/components/parameters/diacritics"}, {"$ref": "#/components/parameters/exclude"},
+          {"$ref": "#/components/parameters/proximity"}, {"$ref": "#/components/parameters/sort"},
+          {"$ref": "#/components/parameters/limit"}, {"$ref": "#/components/parameters/offset"}
+        ],
+        "responses": {"200": {"$ref": "#/components/responses/SearchResult"}, "400": {"$ref": "#/components/responses/Problem"}, "401": {"$ref": "#/components/responses/Problem"}, "404": {"$ref": "#/components/responses/Problem"}, "429": {"$ref": "#/components/responses/Problem"}, "503": {"$ref": "#/components/responses/Problem"}}
+      },
+      "post": {
+        "summary": "Search a translation with filters in a JSON body",
+        "operationId": "searchWithBody",
+        "parameters": [
+          {"name": "translation", "in": "path", "required": true, "schema": {"type": "string"}},
+          {"name": "search", "in": "path", "required": true, "schema": {"type": "string", "maxLength": 500}}
+        ],
+        "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/SearchRequest"}}}},
+        "responses": {"200": {"$ref": "#/components/responses/SearchResult"}, "400": {"$ref": "#/components/responses/Problem"}, "415": {"$ref": "#/components/responses/Problem"}}
+      }
+    },
+    "/{{VERSION}}/{translation}": {
+      "get": {
+        "summary": "Search with the string in the q parameter",
+        "operationId": "searchQuery",
+        "parameters": [{"name": "translation", "in": "path", "required": true, "schema": {"type": "string"}}, {"$ref": "#/components/parameters/q"}],
+        "responses": {"200": {"$ref": "#/components/responses/SearchResult"}, "301": {"description": "When the segment is not a translation it is taken as the search string: Location: /{{VERSION}}/{{DEFAULT_TRANSLATION}}/{segment}"}, "400": {"$ref": "#/components/responses/Problem"}}
+      },
+      "post": {
+        "summary": "Search with everything in the JSON body",
+        "operationId": "searchQueryBody",
+        "parameters": [{"name": "translation", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SearchRequest"}}}},
+        "responses": {"200": {"$ref": "#/components/responses/SearchResult"}, "400": {"$ref": "#/components/responses/Problem"}}
+      }
+    },
+    "/{{VERSION}}": {
+      "get": {
+        "summary": "Search the default translation ({{DEFAULT_TRANSLATION}}) or the one given in `translation`",
+        "operationId": "searchDefault",
+        "parameters": [{"$ref": "#/components/parameters/q"}, {"name": "translation", "in": "query", "schema": {"type": "string"}}],
+        "responses": {"200": {"$ref": "#/components/responses/SearchResult"}, "400": {"$ref": "#/components/responses/Problem"}}
+      },
+      "post": {
+        "summary": "Search with everything in the JSON body, translation included",
+        "operationId": "searchDefaultBody",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SearchRequest"}}}},
+        "responses": {"200": {"$ref": "#/components/responses/SearchResult"}, "400": {"$ref": "#/components/responses/Problem"}}
+      }
+    },
+    "/healthz": {"get": {"summary": "Liveness", "operationId": "health", "responses": {"200": {"description": "{\"status\":\"ok\"}"}}}}
+  },
+  "components": {
+    "parameters": {
+      "q": {"name": "q", "in": "query", "description": "The search string (when it is not in the path)", "schema": {"type": "string", "maxLength": 500}},
+      "words": {"name": "words", "in": "query", "schema": {"type": "string", "enum": ["all", "any", "phrase"], "default": "all"}},
+      "match": {"name": "match", "in": "query", "schema": {"type": "string", "enum": ["whole_word", "substring"], "default": "whole_word"}},
+      "case_sensitive": {"name": "case_sensitive", "in": "query", "schema": {"type": "boolean", "default": false}},
+      "scope": {"name": "scope", "in": "query", "schema": {"type": "string", "enum": ["bible", "old_testament", "new_testament", "deuterocanon"], "default": "bible"}},
+      "book": {"name": "book", "in": "query", "description": "Repeatable book name or number", "schema": {"type": "array", "items": {"type": "string"}}, "style": "form", "explode": true},
+      "books": {"name": "books", "in": "query", "description": "Comma separated book names or numbers", "schema": {"type": "string"}},
+      "diacritics": {"name": "diacritics", "in": "query", "schema": {"type": "string", "enum": ["fold", "exact"], "default": "fold"}},
+      "exclude": {"name": "exclude", "in": "query", "description": "Repeatable word that must not occur", "schema": {"type": "array", "items": {"type": "string"}}, "style": "form", "explode": true},
+      "proximity": {"name": "proximity", "in": "query", "schema": {"type": "integer", "minimum": 0, "maximum": 100}},
+      "sort": {"name": "sort", "in": "query", "schema": {"type": "string", "enum": ["canonical", "relevance"], "default": "canonical"}},
+      "limit": {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 100}},
+      "offset": {"name": "offset", "in": "query", "schema": {"type": "integer", "minimum": 0, "maximum": 10000, "default": 0}}
+    },
+    "schemas": {
+      "SearchRequest": {
+        "type": "object",
+        "properties": {
+          "q": {"type": "string"}, "translation": {"type": "string"}, "words": {"type": "string"}, "match": {"type": "string"},
+          "case_sensitive": {"type": "boolean"}, "scope": {"type": "string"}, "book": {"type": "array", "items": {"type": "string"}},
+          "books": {"type": "string"}, "diacritics": {"type": "string"}, "exclude": {"type": "array", "items": {"type": "string"}},
+          "proximity": {"type": "integer"}, "sort": {"type": "string"}, "limit": {"type": "integer"}, "offset": {"type": "integer"}
+        },
+        "additionalProperties": false
+      },
+      "SearchResult": {
+        "type": "object",
+        "properties": {
+          "query": {"type": "object", "description": "Normalised criteria, kind (search or reference), translation, sha, total, offset, limit, returned, has_more, cache state, analysis and cost"},
+          "results": {"type": "object", "description": "Chapter-keyed scripture object, same shape as the query endpoint"},
+          "matches": {"type": "array", "items": {"type": "object", "properties": {"reference": {"type": "string"}, "book_nr": {"type": "integer"}, "chapter": {"type": "integer"}, "verse": {"type": "integer"}, "score": {"type": "number"}, "occurrences": {"type": "integer"}, "terms": {"type": "array", "items": {"type": "string"}}}}}
+        }
+      },
+      "Problem": {
+        "type": "object",
+        "properties": {"type": {"type": "string", "format": "uri"}, "title": {"type": "string"}, "status": {"type": "integer"}, "code": {"type": "string"}, "detail": {"type": "string"}, "instance": {"type": "string"}},
+        "required": ["type", "title", "status", "code", "detail"]
+      }
+    },
+    "responses": {
+      "SearchResult": {"description": "Search result envelope", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SearchResult"}}}},
+      "Problem": {"description": "Error", "content": {"application/problem+json": {"schema": {"$ref": "#/components/schemas/Problem"}}}}
+    },
+    "securitySchemes": {"bearer": {"type": "http", "scheme": "bearer", "description": "Optional bearer token; token holders are not rate limited."}}
+  }{{#IF TOKEN_REQUIRED}},
+  "security": [{"bearer": []}]{{/IF}}
+}

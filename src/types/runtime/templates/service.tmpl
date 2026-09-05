@@ -1,0 +1,63 @@
+[Unit]
+Description=getBible {{KIND}} endpoint ({{DOMAIN}})
+Documentation=https://{{DOMAIN}}/
+After=network-online.target {{UNIT}}.socket
+Wants=network-online.target
+Requires={{UNIT}}.socket
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=notify
+User={{USER}}
+Group={{USER}}
+SupplementaryGroups={{READERS_GROUP}}
+WorkingDirectory={{RELEASE}}
+EnvironmentFile={{ENV_FILE}}
+Environment=PYTHONUNBUFFERED=1
+CacheDirectory=getbible/{{KIND}}
+CacheDirectoryMode=0750
+LogsDirectory=getbible/{{DOMAIN}}/app
+LogsDirectoryMode=0750
+ExecStartPre={{RELEASE}}/.venv/bin/python -m {{CHECK}}
+ExecStart={{RELEASE}}/.venv/bin/gunicorn --config {{RELEASE}}/gunicorn.conf.py {{WSGI}}
+ExecReload=/bin/kill -HUP $MAINPID
+KillSignal=SIGQUIT
+TimeoutStartSec={{TIMEOUT_START}}
+TimeoutStopSec={{TIMEOUT_STOP}}
+Restart=on-failure
+RestartSec=3
+OOMPolicy=stop
+UMask=0027
+
+# Isolation: code and the scripture mirror are read-only; only the cache and
+# the application log directory are writable.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/dev/shm
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier={{UNIT}}
+
+[Install]
+WantedBy=multi-user.target

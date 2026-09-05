@@ -1,0 +1,11 @@
+# Resource ceilings for the getBible {{KIND}} endpoint (from its manifest).
+[Service]
+MemoryAccounting=yes
+MemoryHigh={{MEMORY_HIGH}}
+MemoryMax={{MEMORY_MAX}}
+MemorySwapMax=0
+CPUAccounting=yes
+CPUQuota={{CPU_QUOTA}}
+TasksAccounting=yes
+TasksMax={{TASKS_MAX}}
+LimitNOFILE={{NOFILE}}
