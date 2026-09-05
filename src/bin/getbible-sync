@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+# Sync one version of a static getBible endpoint from its git repository.
+#
+# Runs as the endpoint's own sync user from a systemd timer. Nothing here
+# needs root and nothing here reloads nginx: a release is exported into a new
+# directory that hard-links every unchanged file from the previous release,
+# verified, and then made live by replacing one symlink.
+#
+# Configuration arrives through the environment (rendered into the unit):
+#   GB_SYNC_DOMAIN GB_SYNC_VERSION GB_SYNC_REPO GB_SYNC_REF GB_SYNC_SUBPATH
+#   GB_SYNC_EXTENSIONS GB_SYNC_HOME GB_SYNC_DATA GB_SYNC_KEEP GB_SYNC_FORCE
+#   GB_NOTIFY GB_VERIFY
+
+set -Eeuo pipefail
+IFS=$'\n\t'
+umask 027
+
+: "${GB_SYNC_DOMAIN:?}" "${GB_SYNC_VERSION:?}" "${GB_SYNC_REPO:?}" "${GB_SYNC_REF:?}"
+: "${GB_SYNC_HOME:?}" "${GB_SYNC_DATA:?}"
+GB_SYNC_SUBPATH="${GB_SYNC_SUBPATH:-.}"
+GB_SYNC_EXTENSIONS="${GB_SYNC_EXTENSIONS:-json,sha,txt}"
+GB_SYNC_KEEP="${GB_SYNC_KEEP:-2}"
+GB_SYNC_FORCE="${GB_SYNC_FORCE:-0}"
+GB_NOTIFY="${GB_NOTIFY:-/usr/local/lib/getbible/getbible-notify}"
+GB_VERIFY="${GB_VERIFY:-/usr/local/lib/getbible/getbible-verify-tree}"
+
+LABEL="$GB_SYNC_DOMAIN $GB_SYNC_VERSION"
+CHECKOUT="$GB_SYNC_HOME/repos/$GB_SYNC_VERSION"
+STATE_DIR="$GB_SYNC_HOME/state"
+STATE="$STATE_DIR/$GB_SYNC_VERSION.conf"
+LOCK="$GB_SYNC_HOME/lock-$GB_SYNC_VERSION"
+RELEASES="$GB_SYNC_DATA/releases/$GB_SYNC_VERSION"
+CURRENT="$GB_SYNC_DATA/$GB_SYNC_VERSION"
+STEP="start"
+
+log() { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
+notify() { [[ -x "$GB_NOTIFY" ]] && "$GB_NOTIFY" "$@" || true; }
+state_get() { local v=""; [[ -f "$STATE" ]] && v="$(grep -E "^$1=" "$STATE" | tail -1 | cut -d= -f2-)" || true; printf '%s' "$v"; }
+state_set() {
+    mkdir -p "$STATE_DIR"
+    { [[ -f "$STATE" ]] && grep -vE "^$1=" "$STATE" || true; printf '%s=%s\n' "$1" "$2"; } > "$STATE.tmp"
+    mv -f "$STATE.tmp" "$STATE"
+}
+
+on_error() {
+    local code=$?
+    log "FAILED during $STEP (exit $code)"
+    notify fail "Sync failed: $LABEL" "Failed during: $STEP. The previous release stays live. See: journalctl -u getbible-sync-$(printf '%s' "$GB_SYNC_DOMAIN" | tr -c 'a-z0-9\n' '_')-$GB_SYNC_VERSION"
+    exit "$code"
+}
+trap on_error ERR
+
+mkdir -p "$GB_SYNC_HOME/repos" "$STATE_DIR" "$RELEASES"
+exec 9>"$LOCK"
+flock -n 9 || { log "another sync for $LABEL is running"; exit 0; }
+
+export GIT_SSH_COMMAND="ssh -i $GB_SYNC_HOME/.ssh/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=$GB_SYNC_HOME/.ssh/known_hosts -o StrictHostKeyChecking=yes -o BatchMode=yes"
+export GIT_TERMINAL_PROMPT=0
+export HOME="$GB_SYNC_HOME"
+
+# --- 1. Is there anything new? ----------------------------------------------
+STEP="ls-remote"
+log "checking $GB_SYNC_REPO ($GB_SYNC_REF) for $LABEL"
+REMOTE_SHA="$(git ls-remote "$GB_SYNC_REPO" "refs/heads/$GB_SYNC_REF" "refs/tags/$GB_SYNC_REF" 2>/dev/null | head -1 | cut -f1 || true)"
+if [[ -z "$REMOTE_SHA" ]]; then
+    REMOTE_SHA="$(git ls-remote "$GB_SYNC_REPO" "$GB_SYNC_REF" | head -1 | cut -f1)"
+fi
+[[ -n "$REMOTE_SHA" ]] || { log "reference $GB_SYNC_REF not found on $GB_SYNC_REPO"; false; }
+LAST_SHA="$(state_get LAST_SHA)"
+if [[ "$REMOTE_SHA" == "$LAST_SHA" && -L "$CURRENT" && "$GB_SYNC_FORCE" != 1 ]]; then
+    log "up to date at ${REMOTE_SHA:0:12}"
+    state_set LAST_CHECK "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    exit 0
+fi
+
+log "update detected: ${LAST_SHA:0:12} -> ${REMOTE_SHA:0:12}"
+notify start "Update started: $LABEL" "Repository: $GB_SYNC_REPO
+Reference: $GB_SYNC_REF
+Commit: ${REMOTE_SHA:0:12}"
+
+# --- 2. Fetch into the persistent checkout -----------------------------------
+STEP="fetch"
+if [[ ! -d "$CHECKOUT/.git" ]]; then
+    rm -rf "$CHECKOUT"
+    git clone --quiet --depth 1 --branch "$GB_SYNC_REF" --single-branch "$GB_SYNC_REPO" "$CHECKOUT"
+else
+    git -C "$CHECKOUT" fetch --quiet --depth 1 origin "$GB_SYNC_REF"
+    git -C "$CHECKOUT" reset --quiet --hard FETCH_HEAD
+    git -C "$CHECKOUT" clean -fdq
+fi
+HEAD_SHA="$(git -C "$CHECKOUT" rev-parse HEAD)"
+SOURCE="$CHECKOUT"
+[[ "$GB_SYNC_SUBPATH" == "." ]] || SOURCE="$CHECKOUT/$GB_SYNC_SUBPATH"
+[[ -d "$SOURCE" ]] || { log "source path $GB_SYNC_SUBPATH does not exist in the repository"; false; }
+
+# --- 3. Export a new release, hard-linking unchanged files -------------------
+STEP="export"
+RELEASE="$RELEASES/$(date -u +%Y%m%dT%H%M%SZ)-${HEAD_SHA:0:7}"
+PREVIOUS=""
+if [[ -L "$CURRENT" ]]; then
+    PREVIOUS="$(readlink -f "$CURRENT" || true)"
+fi
+RSYNC=(rsync -a --prune-empty-dirs "--chmod=D750,F640" "--exclude=.*" "--include=*/")
+IFS=',' read -r -a EXTS <<< "$GB_SYNC_EXTENSIONS"
+for ext in "${EXTS[@]}"; do
+    ext="${ext// /}"
+    [[ -n "$ext" ]] && RSYNC+=(--include="*.$ext")
+done
+RSYNC+=(--exclude='*')
+[[ -n "$PREVIOUS" && -d "$PREVIOUS" ]] && RSYNC+=(--link-dest="$PREVIOUS")
+mkdir -p "$RELEASE"
+"${RSYNC[@]}" "$SOURCE/" "$RELEASE/"
+FILES="$(find "$RELEASE" -type f | wc -l)"
+if [[ -n "$PREVIOUS" && -d "$PREVIOUS" ]]; then
+    CHANGED="$(find "$RELEASE" -type f -links 1 | wc -l)"
+else
+    CHANGED="$FILES"
+fi
+(( FILES > 0 )) || { log "the export contains no files; refusing to publish an empty version"; rm -rf "$RELEASE"; false; }
+
+# --- 4. Verify before anything goes live -------------------------------------
+STEP="verify"
+if [[ -x "$GB_VERIFY" ]]; then
+    "$GB_VERIFY" "$RELEASE" || { rm -rf "$RELEASE"; false; }
+fi
+
+# --- 5. Flip the symlink: atomic for the whole tree ---------------------------
+STEP="publish"
+ln -sfn "releases/$GB_SYNC_VERSION/$(basename "$RELEASE")" "$GB_SYNC_DATA/.$GB_SYNC_VERSION.tmp"
+mv -Tf "$GB_SYNC_DATA/.$GB_SYNC_VERSION.tmp" "$CURRENT"
+printf '%s\n' "$HEAD_SHA" > "$RELEASE/.revision"
+chmod 0640 "$RELEASE/.revision"
+
+# --- 6. Retire old releases ---------------------------------------------------
+STEP="prune"
+KEEP_NAME="$(basename "$RELEASE")"
+find "$RELEASES" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -r | tail -n +"$((GB_SYNC_KEEP + 1))" | while read -r old; do
+    [[ "$old" == "$KEEP_NAME" ]] && continue
+    rm -rf -- "${RELEASES:?}/$old"
+    log "removed old release $old"
+done
+
+STEP="record"
+state_set LAST_SHA "$HEAD_SHA"
+state_set LAST_SYNC "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+state_set LAST_CHECK "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+state_set LAST_RELEASE "$KEEP_NAME"
+state_set FILES "$FILES"
+state_set CHANGED "$CHANGED"
+
+log "live: $LABEL at ${HEAD_SHA:0:12} ($FILES files, $CHANGED changed) -> $KEEP_NAME"
+notify ok "Update live: $LABEL" "Commit: ${HEAD_SHA:0:12} ($GB_SYNC_REF)
+Files: $FILES, changed: $CHANGED
+Release: $KEEP_NAME"

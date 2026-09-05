@@ -1,0 +1,37 @@
+    location = /healthz {
+        access_log off;
+        include snippets/getbible/proxy.conf;
+        proxy_pass http://unix:{{SOCKET}}:;
+    }
+
+    location = /readyz {
+        access_log off;
+        include snippets/getbible/proxy.conf;
+        proxy_pass http://unix:{{SOCKET}}:;
+    }
+
+    location = /openapi.json {
+        root {{WWW_DIR}};
+        try_files /openapi.json =404;
+        include snippets/getbible/headers.conf;
+        add_header Cache-Control "public, max-age=300" always;
+    }
+
+    location / {
+        include {{NGINX_GB_DIR}}/{{DOMAIN}}/auth.conf;
+        include snippets/getbible/proxy.conf;
+        proxy_cache gb_{{SLUG}}_cache;
+        proxy_cache_methods GET HEAD;
+        proxy_cache_key "$scheme$request_method$host$request_uri";
+        proxy_cache_valid 200 {{CACHE_TTL}}s;
+        proxy_cache_valid 301 302 300s;
+        proxy_cache_valid 404 10s;
+        proxy_cache_min_uses 2;
+        proxy_cache_lock on;
+        proxy_cache_lock_timeout 10s;
+        proxy_cache_background_update on;
+        proxy_cache_use_stale error timeout updating http_500 http_502 http_503 http_504;
+        add_header X-Cache-Status $upstream_cache_status always;
+        include snippets/getbible/headers.conf;
+        proxy_pass http://unix:{{SOCKET}}:;
+    }

@@ -1,0 +1,6 @@
+# Libraries are sourced into getbible.sh; variables defined in one file are used in others.
+disable=SC2034
+external-sources=true
+source-path=SCRIPTDIR
+# A && B || C with side-effect-free B is used deliberately for one-line status output.
+disable=SC2015

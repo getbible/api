@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""Verify a synced getBible tree before it goes live.
+
+Usage: getbible-verify-tree ROOT
+
+Two independent checks, both optional per file:
+  * every *.sha file with a sibling *.json of the same name must hold the
+    SHA-1 of that JSON file's bytes (the scripture API convention);
+  * every hashes.json manifest ({"algorithm": "sha256", "files": {...}})
+    found in the tree must describe existing files with matching digests
+    (the study API convention).
+Exit status 0 when everything verifies; 1 with a listing otherwise. Prints a
+JSON summary on stdout.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import sys
+
+
+def digest(path: str, algorithm: str) -> str:
+    hasher = hashlib.new(algorithm)
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            hasher.update(block)
+    return hasher.hexdigest()
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) != 2:
+        sys.stderr.write(__doc__)
+        return 2
+    root = os.path.abspath(argv[1])
+    if not os.path.isdir(root):
+        sys.stderr.write(f"not a directory: {root}\n")
+        return 2
+
+    problems: list[str] = []
+    files = 0
+    sha_checked = 0
+    manifest_checked = 0
+
+    for directory, dirnames, filenames in os.walk(root):
+        dirnames.sort()
+        for name in filenames:
+            files += 1
+            path = os.path.join(directory, name)
+            if name.endswith(".sha"):
+                sibling = os.path.join(directory, name[:-4] + ".json")
+                if not os.path.isfile(sibling):
+                    continue
+                with open(path, encoding="utf-8", errors="replace") as handle:
+                    expected = handle.read().strip().lower()
+                if len(expected) != 40:
+                    problems.append(f"invalid checksum text: {os.path.relpath(path, root)}")
+                    continue
+                if digest(sibling, "sha1") != expected:
+                    problems.append(f"sha1 mismatch: {os.path.relpath(sibling, root)}")
+                sha_checked += 1
+            elif name == "hashes.json":
+                try:
+                    with open(path, encoding="utf-8") as handle:
+                        manifest = json.load(handle)
+                except (OSError, ValueError):
+                    problems.append(f"unreadable manifest: {os.path.relpath(path, root)}")
+                    continue
+                algorithm = str(manifest.get("algorithm", "")).lower()
+                listed = manifest.get("files") or {}
+                if algorithm not in hashlib.algorithms_available or not isinstance(listed, dict):
+                    problems.append(f"unsupported manifest: {os.path.relpath(path, root)}")
+                    continue
+                for relative, expected in sorted(listed.items()):
+                    if ".." in relative.split("/") or relative.startswith("/"):
+                        problems.append(f"unsafe manifest path: {relative}")
+                        continue
+                    target = os.path.join(directory, relative)
+                    if not os.path.isfile(target):
+                        problems.append(f"missing: {os.path.relpath(target, root)}")
+                        continue
+                    if digest(target, algorithm) != str(expected).lower():
+                        problems.append(f"{algorithm} mismatch: {os.path.relpath(target, root)}")
+                    manifest_checked += 1
+
+    summary = {
+        "root": root,
+        "files": files,
+        "sha_checked": sha_checked,
+        "manifest_checked": manifest_checked,
+        "problems": len(problems),
+    }
+    print(json.dumps(summary))
+    if problems:
+        for problem in problems[:50]:
+            sys.stderr.write(problem + "\n")
+        if len(problems) > 50:
+            sys.stderr.write(f"... and {len(problems) - 50} more\n")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

@@ -1,0 +1,6 @@
+# getBible API - ACME http-01 challenges for Let's Encrypt (webroot mode).
+location ^~ /.well-known/acme-challenge/ {
+    root {{ACME_ROOT}};
+    default_type text/plain;
+    allow all;
+}

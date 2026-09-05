@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+"""Render a text template with {{VAR}}, {{#IF VAR}}...{{/IF}} and {{#UNLESS VAR}}...{{/UNLESS}}.
+
+Usage: getbible-render TEMPLATE [KEY=VALUE ...] [--env PREFIX]
+
+Variables come from KEY=VALUE arguments. With --env PREFIX, every environment
+variable starting with PREFIX is also available with the prefix removed.
+A value is "true" for IF blocks when it is non-empty and not one of
+false/0/off/no. Unknown variables render as empty strings. Rendering is
+deliberately dumb: no code execution, no includes, no escaping surprises.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import sys
+
+_FALSE = {"", "false", "0", "off", "no"}
+_VAR = re.compile(r"\{\{([A-Z][A-Z0-9_]*)\}\}")
+_TOKEN = re.compile(r"\{\{#(IF|UNLESS) ([A-Z][A-Z0-9_]*)\}\}|\{\{/(IF|UNLESS)\}\}")
+
+
+def truthy(value: str | None) -> bool:
+    return (value or "").strip().lower() not in _FALSE
+
+
+def _parse(text: str, pos: int, closing: str | None) -> tuple[list, int]:
+    """Parse into a tree of strings and (kind, name, children) blocks."""
+    nodes: list = []
+    while True:
+        match = _TOKEN.search(text, pos)
+        if match is None:
+            if closing is not None:
+                raise ValueError(f"unterminated {{{{#{closing} ...}}}} block")
+            nodes.append(text[pos:])
+            return nodes, len(text)
+        nodes.append(text[pos:match.start()])
+        if match.group(3):
+            if match.group(3) != closing:
+                raise ValueError(f"unexpected {{{{/{match.group(3)}}}}}")
+            return nodes, match.end()
+        kind, name = match.group(1), match.group(2)
+        children, pos = _parse(text, match.end(), kind)
+        nodes.append((kind, name, children))
+
+
+def _emit(nodes: list, variables: dict[str, str]) -> str:
+    out: list[str] = []
+    for node in nodes:
+        if isinstance(node, str):
+            out.append(_VAR.sub(lambda m: variables.get(m.group(1), ""), node))
+            continue
+        kind, name, children = node
+        keep = truthy(variables.get(name))
+        if kind == "UNLESS":
+            keep = not keep
+        if keep:
+            out.append(_emit(children, variables))
+    return "".join(out)
+
+
+def render(text: str, variables: dict[str, str]) -> str:
+    nodes, _ = _parse(text, 0, None)
+    return _emit(nodes, variables)
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) < 2 or argv[1] in {"-h", "--help"}:
+        sys.stderr.write(__doc__)
+        return 2
+    template = argv[1]
+    variables: dict[str, str] = {}
+    args = argv[2:]
+    while args:
+        item = args.pop(0)
+        if item == "--env":
+            prefix = args.pop(0) if args else ""
+            for key, value in os.environ.items():
+                if prefix and key.startswith(prefix):
+                    variables[key[len(prefix):]] = value
+            continue
+        if "=" not in item:
+            sys.stderr.write(f"getbible-render: expected KEY=VALUE, got {item!r}\n")
+            return 2
+        key, value = item.split("=", 1)
+        variables[key] = value
+    with open(template, encoding="utf-8") as handle:
+        sys.stdout.write(render(handle.read(), variables))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Called by logrotate after a getBible log rotation: reports the archive count
+# per endpoint on Telegram and warns when the retention ceiling is reached.
+#   getbible-logrotate-hook LOG_ROOT KEEP
+set -uo pipefail
+ROOT="${1:-/var/log/getbible}"
+KEEP="${2:-30}"
+NOTIFY="/usr/local/lib/getbible/getbible-notify"
+[[ -x "$NOTIFY" ]] || exit 0
+for dir in "$ROOT"/*/; do
+    [[ -d "$dir/archive" ]] || continue
+    domain="$(basename "$dir")"
+    count="$(find "$dir/archive" -maxdepth 1 -type f -name 'access.log-*' | wc -l)"
+    (( count > 0 )) || continue
+    marker="$dir/archive/.last-count"
+    previous="$(cat "$marker" 2>/dev/null || echo -1)"
+    [[ "$count" != "$previous" ]] || continue
+    printf '%s\n' "$count" > "$marker"
+    if (( count >= KEEP )); then
+        "$NOTIFY" warn "Log rotated: $domain" "Access log rotated. $count archived files kept, which is the ceiling of $KEEP. From now on the oldest archive is deleted on every rotation."
+    else
+        "$NOTIFY" info "Log rotated: $domain" "Access log rotated. $count of $KEEP archived files kept."
+    fi
+done
+exit 0

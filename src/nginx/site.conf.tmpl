@@ -1,0 +1,67 @@
+# getBible API - {{DOMAIN}} ({{TYPE}}{{#IF KIND}}/{{KIND}}{{/IF}}), rendered by getbible.sh.
+# Hand edits are detected on update and never silently overwritten.
+
+server {
+    listen 80;
+{{#IF IPV6}}    listen [::]:80;
+{{/IF}}    server_name {{DOMAIN}};
+
+    include snippets/getbible/acme.conf;
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+{{#IF TLS}}
+server {
+    listen 443 ssl{{#IF HTTP2_LEGACY}} http2{{/IF}};
+{{#IF IPV6}}    listen [::]:443 ssl{{#IF HTTP2_LEGACY}} http2{{/IF}};
+{{/IF}}{{#IF HTTP2_NATIVE}}    http2 on;
+{{/IF}}    server_name {{DOMAIN}};
+
+    ssl_certificate     {{CERT_DIR}}/fullchain.pem;
+    ssl_certificate_key {{CERT_DIR}}/privkey.pem;
+    include snippets/getbible/tls.conf;
+{{#IF ORIGIN_PULLS}}
+    # Only Cloudflare holds a client certificate signed by this CA.
+    ssl_client_certificate {{NGINX_GB_DIR}}/cloudflare-origin-pull-ca.pem;
+    ssl_verify_client on;
+{{/IF}}{{#IF REAL_IP}}
+    include {{NGINX_GB_DIR}}/cloudflare-real-ip.conf;
+{{/IF}}
+    access_log {{LOG_DIR}}/access.log getbible_json buffer=64k flush=5s;
+    error_log  {{LOG_DIR}}/error.log warn;
+
+    include {{NGINX_GB_DIR}}/{{DOMAIN}}/server.conf;
+    include snippets/getbible/headers.conf;
+    include snippets/getbible/errors.conf;
+    include {{NGINX_GB_DIR}}/{{DOMAIN}}/limits.conf;
+
+    # Preflights are answered here, cheaply and without authentication.
+    if ($request_method = OPTIONS) {
+        return 204;
+    }
+    if ($request_method !~ ^({{METHODS_REGEX}})$) {
+        return 405;
+    }
+{{#IF REJECT_ARGS}}
+    # Nothing on this domain accepts parameters.
+    if ($args != "") {
+        return 400;
+    }
+{{/IF}}
+    # Documentation for this API lives at the domain root.
+    location = / {
+        root {{WWW_DIR}};
+        try_files /index.html =404;
+        include snippets/getbible/headers-html.conf;
+    }
+
+{{LOCATIONS}}
+    location ~ /\. {
+        access_log off;
+        log_not_found off;
+        return 404;
+    }
+}
+{{/IF}}

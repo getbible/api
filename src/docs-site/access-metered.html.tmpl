@@ -1,0 +1,13 @@
+<p>This endpoint is <strong>public and metered</strong>. Anonymous callers share a budget per client address; callers with a bearer token are <strong>not limited at all</strong>.</p>
+<table>
+<tr><th>Budget (per address)</th><th>Value</th></tr>
+<tr><td>Sustained rate</td><td>{{RATE_PER_SECOND}} requests per second, bursts up to {{RATE_BURST}}</td></tr>
+<tr><td>Per hour</td><td>about {{QUOTA_HOUR}} requests</td></tr>
+<tr><td>Per day</td><td>about {{QUOTA_DAY}} requests</td></tr>
+<tr><td>Concurrent connections</td><td>{{CONN_LIMIT}}</td></tr>
+</table>
+<p>Budgets are enforced as token buckets, so steady traffic under the quota is never touched and bursts above it are slowed with a <code>429</code> rather than cut off.</p>
+<h3>Using a token</h3>
+<p>Send it as a bearer credential. Tokens never go in the URL.</p>
+<pre><code>curl -H "Authorization: Bearer gb..." https://{{DOMAIN}}/{{FIRST_VERSION}}/{{EXAMPLE_PATH}}</code></pre>
+<p>Tokens are issued to applications and partners by the getBible team; ask through <a href="https://getbible.net">getbible.net</a>.</p>

@@ -1,0 +1,32 @@
+    # {{DOMAIN}} version {{LABEL}}: {{DATA_DIR}}/{{LABEL}} -> current release
+    location ^~ /{{LABEL}}/ {
+        root {{DATA_DIR}};
+
+        location ~ /\. {
+            access_log off;
+            log_not_found off;
+            return 404;
+        }
+{{#IF DATA_EXT_REGEX}}
+        location ~* ^/{{LABEL}}/.+\.({{DATA_EXT_REGEX}})$ {
+            include {{NGINX_GB_DIR}}/{{DOMAIN}}/auth.conf;
+            try_files $uri =404;
+            include snippets/getbible/headers.conf;
+            add_header Cache-Control "public, max-age={{CACHE_TTL}}, stale-while-revalidate=86400, stale-if-error=86400" always;
+        }
+{{/IF}}{{#IF HAS_SHA}}
+        location ~* ^/{{LABEL}}/.+\.sha$ {
+            include {{NGINX_GB_DIR}}/{{DOMAIN}}/auth.conf;
+            try_files $uri =404;
+            include snippets/getbible/headers.conf;
+            add_header Cache-Control "public, max-age={{SHA_CACHE_TTL}}, stale-while-revalidate=3600, stale-if-error=86400" always;
+        }
+{{/IF}}{{#IF HAS_HTML}}
+        location ~* ^/{{LABEL}}/.+\.html$ {
+            include {{NGINX_GB_DIR}}/{{DOMAIN}}/auth.conf;
+            try_files $uri =404;
+            include snippets/getbible/headers-html.conf;
+        }
+{{/IF}}
+        return 404;
+    }

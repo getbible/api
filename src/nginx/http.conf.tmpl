@@ -1,0 +1,54 @@
+# getBible API - http-context definitions shared by every endpoint.
+# Managed by getbible.sh; hand edits are detected and reported on update.
+#
+# Only things that cannot live in a server block belong here: the JSON log
+# format and the maps that identify a caller. Zones and caches are rendered
+# per endpoint into conf.d/getbible-ep-<slug>.conf.
+
+log_format getbible_json escape=json '{'
+    '"time":"$time_iso8601",'
+    '"host":"$host",'
+    '"endpoint":"$server_name",'
+    '"version":"$gb_version",'
+    '"remote_addr":"$remote_addr",'
+    '"method":"$request_method",'
+    '"uri":"$request_uri",'
+    '"status":$status,'
+    '"bytes":$body_bytes_sent,'
+    '"request_length":$request_length,'
+    '"request_time":$request_time,'
+    '"upstream_time":"$upstream_response_time",'
+    '"cache":"$upstream_cache_status",'
+    '"referer":"$http_referer",'
+    '"user_agent":"$http_user_agent",'
+    '"request_id":"$request_id",'
+    '"token":"$gb_token_id",'
+    '"scheme":"$scheme",'
+    '"protocol":"$server_protocol",'
+    '"tls":"$ssl_protocol",'
+    '"country":"$http_cf_ipcountry"'
+'}';
+
+# Token map keys are long ("<host> Bearer <token>"); size the hash for them.
+map_hash_bucket_size 256;
+map_hash_max_size 8192;
+
+# API version segment of the request, for logs and analytics.
+map $uri $gb_version {
+    default "";
+    "~^/(?<gbv>v[0-9]+)(/|$)" $gbv;
+}
+
+# Caller identity from a bearer token. Every endpoint renders its own token
+# map into getbible/tokens/<slug>.map as: "<server_name> Bearer <token>" "<id>";
+map "$server_name $http_authorization" $gb_token_id {
+    default "";
+    include {{NGINX_GB_DIR}}/tokens/*.map;
+}
+
+# Limits key on the client address and are switched off for token holders:
+# an empty key means "not limited" to the limit_req and limit_conn modules.
+map $gb_token_id $gb_limit_key {
+    "" $binary_remote_addr;
+    default "";
+}
