@@ -4,7 +4,7 @@
 # hold both to their documented behaviour.
 set -Eeuo pipefail
 source "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
-FIXTURE="$IT_ROOT/tests/python/fixtures/repository"
+FIXTURE="$IT_SB/fixtures/repository"
 PIDS=()
 cleanup() {
     local result="$?"
@@ -16,6 +16,9 @@ cleanup() {
 trap cleanup EXIT
 
 it_log "sandbox $IT_SB"
+install -d -m 0755 "$IT_SB/fixtures"
+cp -a "$IT_ROOT/tests/python/fixtures/repository" "$FIXTURE"
+chmod -R a+rX "$FIXTURE"
 for kind in query search; do
     domain="$kind.example.test"
     "$IT_ROOT/getbible.sh" deploy runtime --domain "$domain" --kind "$kind" --repository "$FIXTURE" \
@@ -39,7 +42,7 @@ start_gunicorn() {
     # The sandbox cannot create the production accounts. Run unprivileged
     # here; systemd.sh separately verifies the actual account/ACL/unit setup.
     chown -R "$IT_NGINX_USER:" "$socket_dir" "$IT_SB/var/log/getbible/$kind.example.test/app" "$IT_SB/var/cache/getbible/$kind"
-    ( set -a; # shellcheck source=/dev/null
+    ( cd "$release"; set -a; # shellcheck source=/dev/null
       source "$env_file"; set +a
       exec runuser -u "$IT_NGINX_USER" -- "$release/.venv/bin/gunicorn" --config "$deployment/gunicorn.conf.py" --workers 1 \
           "$(grep '^WSGI=' "$IT_ROOT/src/apps/$kind/manifest.conf" | cut -d= -f2)" ) >"$IT_SB/gunicorn-$kind.log" 2>&1 &
