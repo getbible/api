@@ -189,6 +189,12 @@ type_runtime_prepare() {
     gb_ensure_dir "$GB_CACHE/$kind/releases" 0750 "$user:$user" || return 1
     gb_ensure_dir "$(ep_log_dir "$domain")/app" 0750 "$user:$user" || return 1
     gb_ensure_dir "$GB_PREFIX/var/cache/nginx/getbible" 0755 || return 1
+    # nginx -t runs as root. Pre-create each owned cache tree so its worker
+    # account can read and populate cache files on every supported distro.
+    gb_ensure_dir "$GB_PREFIX/var/cache/nginx/getbible/$EP_SLUG" 0750 "$GB_NGINX_USER:$GB_NGINX_USER" || return 1
+    if [[ -z "$GB_PREFIX" && "$GB_DRY_RUN" != true ]]; then
+        chown -R "$GB_NGINX_USER:$GB_NGINX_USER" "$GB_PREFIX/var/cache/nginx/getbible/$EP_SLUG" || return 1
+    fi
     gb_ensure_dir "$(rt_deployments_dir "$kind")" 0755 || return 1
     rt_check_repository "$domain"
     current="$(py_current_release "$kind")"
