@@ -1,0 +1,10 @@
+# Reviewed CPython standalone distributions; update only through a repository change.
+# Source: astral-sh/uv download-metadata.json blob 1c8d06ad75fbe1275de1947438cb253192129b7c
+# SHA256 values also verified against GitHub python-build-standalone release asset digests.
+# VERSION ARCH BUILD SHA256 URL
+3.12.14 aarch64 20260901 577b4bec0793ad1ff0cbff9adbd0df078eddde38a4c41bf5d83ad381a85ee39d https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.12.14%2B20260901-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz
+3.12.14 x86_64 20260901 72748da13197c1fb161e3afeef20a6a385ff24f2165e6e2758e47008e7faba4c https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.12.14%2B20260901-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz
+3.13.15 aarch64 20260901 01ce0ce9189feaead3298abf10d4efe998c55a489b3d5d38ca4f83dda7e7977e https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.13.15%2B20260901-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz
+3.13.15 x86_64 20260901 8a689a077337bea6d1c4bc0b7df1d52fcaa28f5f67e50df8bf417c1e3f9d8874 https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.13.15%2B20260901-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz
+3.14.7 aarch64 20260901 8a0798baa8a2c27b5751d590aced543eaa85e20b3f73d93c1af049688acdc9c5 https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.14.7%2B20260901-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz
+3.14.7 x86_64 20260901 3959f92825141e04adf44982d3a83ee57af0877e893b0796e04c1468749d9b04 https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.14.7%2B20260901-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz
