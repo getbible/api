@@ -14,7 +14,7 @@ GB_ARGS=("$@")
 GB_REPO_DIR="$(cd -- "$(dirname -- "$GB_SELF")" && pwd -P)"
 export GB_REPO_DIR
 
-for lib in core ui config registry users telegram nginx certs systemd logs access sync python docs endpoint; do
+for lib in core platform ui config registry users telegram nginx certs systemd logs access sync python docs endpoint; do
     # shellcheck source=/dev/null
     source "$GB_REPO_DIR/src/lib/$lib.sh"
 done
@@ -37,9 +37,14 @@ Endpoints
                 [--extensions json,sha,txt] [--access open|metered|token]
                 [--schedule daily|weekly|monthly]
   deploy runtime --domain D --kind query|search [--version v2]
-                [--repository PATH] [--access MODE] [--warm kjv]
+                [--repository PATH] [--access MODE] [--warm kjv] [--python auto|VERSION]
   apply DOMAIN                           re-render and re-install one endpoint
-  update                                 bring every endpoint to the current code
+  update [DOMAIN]                        apply reviewed code and configuration
+  runtime versions                       list reviewed managed Python versions
+  runtime DOMAIN update [--python VERSION] update packages and managed Python
+  runtime DOMAIN redeploy                 rebuild using the selected Python
+  runtime DOMAIN rollback                 restore the previous healthy deployment
+  runtime DOMAIN set KEY VALUE            validate and apply one runtime setting
   remove DOMAIN [--purge]                stop serving an endpoint (purge deletes data)
   version add DOMAIN vN --repo URL [--ref master] [--path .]
   version remove DOMAIN vN
@@ -82,6 +87,7 @@ export GB_YES GB_DRY_RUN
 
 gb_system_init() {
     gb_require_root
+    gb_management_lock || return 1
     gb_global_init
     gb_ensure_base_groups
     gb_ensure_base_dirs
@@ -127,13 +133,20 @@ cmd_version() {
 }
 
 cmd_sync() {
-    local domain="${1:-}" label="${2:-}" force=false
+    local domain="${1:-}" label="" force=false
     [[ -n "$domain" ]] || gb_die "sync DOMAIN [vN] [--force]"
     shift || true
-    [[ "${1:-}" == --force ]] && { force=true; shift; }
-    [[ "$label" == --force ]] && { force=true; label=""; }
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --force) force=true ;;
+            v[0-9]*) [[ -z "$label" ]] || gb_die "Only one version may be synced at a time"; label="$1" ;;
+            *) gb_die "Unknown sync option: $1" ;;
+        esac
+        shift
+    done
     gb_system_init
     ep_exists "$domain" || gb_die "Unknown endpoint: $domain"
+    [[ "$(ep_get "$domain" TYPE)" == static ]] || gb_die "$domain is not a static endpoint"
     if [[ -z "$label" ]]; then
         while read -r label; do
             [[ -n "$label" ]] || continue
@@ -142,6 +155,24 @@ cmd_sync() {
     else
         if [[ "$force" == true ]]; then sync_force_now "$domain" "$label"; else sync_run_now "$domain" "$label"; fi
     fi
+}
+
+cmd_runtime() {
+    local domain="${1:-}" action="${2:-}"
+    if [[ "$domain" == versions ]]; then py_catalog; return; fi
+    [[ -n "$domain" && -n "$action" ]] || gb_die "runtime DOMAIN update|redeploy|rollback|set KEY VALUE"
+    shift 2
+    gb_system_init || return 1
+    ep_exists "$domain" || gb_die "Unknown endpoint: $domain"
+    [[ "$(ep_get "$domain" TYPE)" == runtime ]] || gb_die "$domain is not a runtime endpoint"
+    endpoint_source_type runtime
+    case "$action" in
+        update) rt_update "$domain" "$@" ;;
+        redeploy) [[ $# == 0 ]] || gb_die "runtime DOMAIN redeploy"; rt_redeploy "$domain" ;;
+        rollback) [[ $# == 0 ]] || gb_die "runtime DOMAIN rollback"; rt_rollback "$domain" ;;
+        set) [[ $# == 2 ]] || gb_die "runtime DOMAIN set KEY VALUE"; rt_set_setting "$domain" "$1" "$2" ;;
+        *) gb_die "Unknown runtime action: $action" ;;
+    esac
 }
 
 cmd_limits() {
@@ -205,7 +236,8 @@ cmd_logs() {
         journal)
             ep_load "$domain"
             if [[ "$EP_TYPE" == runtime ]]; then
-                sd_journal "getbible-$EP_KIND.service" "$lines"
+                endpoint_source_type runtime
+                sd_journal "$(rt_live_unit "$EP_KIND").service" "$lines"
             else
                 sd_journal "getbible-sync-$EP_SLUG-$(ep_versions "$domain" | head -1).service" "$lines"
             fi ;;
@@ -235,7 +267,8 @@ main() {
                 while read -r d; do [[ -n "$d" ]] && ep_summary_line "$d"; done < <(ep_list); fi ;;
         deploy) cmd_deploy "$@" ;;
         apply) gb_system_init; endpoint_apply "${1:?domain}" ;;
-        update) gb_system_init; update_all ;;
+        update) gb_system_init; if [[ -n "${1:-}" ]]; then endpoint_apply "$1"; else update_all; fi ;;
+        runtime) cmd_runtime "$@" ;;
         remove)
             gb_system_init
             local purge=false; [[ "${2:-}" == --purge ]] && purge=true

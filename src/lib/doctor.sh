@@ -4,7 +4,7 @@
 [[ -n "${GB_DOCTOR_LOADED:-}" ]] && return 0
 GB_DOCTOR_LOADED=1
 
-GB_APT_PACKAGES=(nginx certbot python3 python3-venv python3-pip whiptail rsync git openssh-client curl logrotate acl ca-certificates openssl)
+GB_APT_PACKAGES=(nginx certbot python3 python3-venv python3-pip whiptail rsync git openssh-client curl logrotate acl ca-certificates openssl xz-utils tar util-linux)
 
 doctor_check() {
     # doctor_check LABEL STATUS DETAIL
@@ -14,12 +14,16 @@ doctor_check() {
 doctor_run() {
     local tool
     printf 'getBible API host check\n\n'
-    printf 'Host: %s   OS: %s\n\n' "$(hostname -f 2>/dev/null || hostname)" "$(. /etc/os-release 2>/dev/null && printf '%s' "$PRETTY_NAME" || uname -sr)"
-    for tool in nginx certbot python3 whiptail rsync git ssh-keygen curl logrotate flock setfacl openssl; do
+    printf 'Host: %s\nPlatform: %s\n\n' "$(hostname -f 2>/dev/null || hostname)" "$(platform_report)"
+    printf 'Default managed Python: %s (selected on first deployment)\n' "$(py_resolve_version auto)"
+    for tool in nginx certbot python3 whiptail rsync git ssh-keygen curl logrotate flock setfacl openssl tar sha256sum systemctl; do
         if gb_have "$tool"; then doctor_check "$tool" ok "$(command -v "$tool")"; else doctor_check "$tool" MISS "install with: getbible.sh install-deps"; fi
     done
     if gb_have python3; then
         python3 -c 'import venv' 2>/dev/null && doctor_check "python3 venv" ok "$(python3 --version)" || doctor_check "python3 venv" MISS "python3-venv package"
+    fi
+    if [[ "$(uname -s)" != Linux || ! -d /run/systemd/system ]]; then
+        doctor_check "service manager" WARN "Live deployment requires Linux booted with systemd; offline rendering remains available."
     fi
     nginx_detect
     if [[ "$NG_AVAILABLE" == true ]]; then
@@ -41,14 +45,17 @@ doctor_run() {
 }
 
 doctor_install_deps() {
-    gb_have apt-get || gb_die "Automatic installation supports Debian/Ubuntu only. Install: ${GB_APT_PACKAGES[*]}"
+    platform_detect
+    [[ "$PLATFORM_OS" == Linux ]] || gb_die "Deployment requires Linux; detected $PLATFORM_OS."
+    [[ "$PLATFORM_PACKAGE_MANAGER" == apt ]] || gb_die "Detected $PLATFORM_NAME. Install compatible nginx, certbot, systemd and these command-line tools with your package manager: ${GB_APT_PACKAGES[*]}. Then run doctor; managed endpoint Python is independent of the distro."
     [[ "$GB_DRY_RUN" == true ]] && { gb_log "(dry-run) would apt-get install ${GB_APT_PACKAGES[*]}"; return 0; }
     gb_step "Installing packages: ${GB_APT_PACKAGES[*]}"
-    DEBIAN_FRONTEND=noninteractive apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y "${GB_APT_PACKAGES[@]}"
+    DEBIAN_FRONTEND=noninteractive apt-get update || return 1
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "${GB_APT_PACKAGES[@]}" || return 1
     if apt-cache show libnginx-mod-http-brotli-static >/dev/null 2>&1; then
         DEBIAN_FRONTEND=noninteractive apt-get install -y libnginx-mod-http-brotli-static || true
     fi
     gb_ensure_dir "$GB_ACME_ROOT" 0755
     sd_enable --now nginx || true
+    gb_log "Installed host tools. Endpoint Python and packages are installed separately during explicit deployment/update."
 }

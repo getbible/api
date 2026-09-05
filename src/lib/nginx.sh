@@ -195,7 +195,11 @@ nginx_apply_stage() {
             hand-edited)
                 if ! nginx_confirm_overwrite "$target" "$file"; then
                     gb_warn "Keeping hand-edited $target"
-                    continue
+                    # A skipped upstream/socket file cannot be treated as a
+                    # successful switch: retiring the old backend would break
+                    # the route that nginx is still serving.
+                    failed=true
+                    break
                 fi
                 ;;
         esac

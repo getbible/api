@@ -21,6 +21,9 @@ workers = _integer(f"{PREFIX}_WORKERS", {{WORKERS}}, 1, 64)
 worker_class = "gthread"
 threads = _integer(f"{PREFIX}_THREADS", {{THREADS}}, 1, 64)
 preload_app = True
+# Lifecycle operations use isolated systemd generations. Gunicorn's separate
+# control listener would share a home-directory path between generations.
+control_socket_disable = True
 
 backlog = _integer(f"{PREFIX}_BACKLOG", 2048, 64, 65535)
 timeout = _integer(f"{PREFIX}_WORKER_TIMEOUT", {{WORKER_TIMEOUT}}, 5, 600)

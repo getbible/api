@@ -158,6 +158,37 @@ nginx_transaction_rollback example.test
 [[ "$(cat "$GB_NGINX/conf.d/endpoint.conf")" == original ]]
 ''')
 
+    def test_declined_route_edit_rejects_stage_and_restores_prior_writes(self):
+        self.shell('''
+stage="$GB_TMP/stage"
+mkdir -p "$stage/conf.d" "$stage/sites-available" "$GB_NGINX/conf.d" "$GB_NGINX/sites-available"
+shared="$GB_NGINX/conf.d/shared.conf"
+site="$GB_NGINX/sites-available/query.example.test.conf"
+printf original-shared > "$shared"
+printf original-route > "$site"
+gb_ledger_record "$shared"
+gb_ledger_record "$site"
+# Simulate an operator editing the old backend's route after its last apply.
+printf hand-edited-old-backend > "$site"
+printf new-shared > "$stage/conf.d/shared.conf"
+printf new-backend > "$stage/sites-available/query.example.test.conf"
+nginx_test() { return 0; }
+nginx_reload() {
+    # Recovery must reload only the original configuration, never a mixture.
+    [[ "$(cat "$shared")" == original-shared ]]
+    [[ "$(cat "$site")" == hand-edited-old-backend ]]
+    touch "$GB_TMP/recovery-reloaded"
+}
+nginx_transaction_begin query.example.test
+if nginx_apply_stage "$stage" edited-route; then exit 2; fi
+[[ "$(cat "$shared")" == original-shared ]]
+[[ "$(cat "$site")" == hand-edited-old-backend ]]
+[[ "$(gb_ledger_get "$shared")" == "$(gb_sha256_file "$shared")" ]]
+[[ "$(gb_ledger_get "$site")" != "$(gb_sha256_file "$site")" ]]
+[[ -f "$GB_TMP/recovery-reloaded" ]]
+[[ ${#NG_TRANSACTION_FILES[@]} == 0 ]]
+''')
+
     def test_nginx_reload_propagates_systemctl_failure(self):
         self.shell('''
 GB_PREFIX=''
