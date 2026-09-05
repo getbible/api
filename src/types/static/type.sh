@@ -46,7 +46,7 @@ type_static_render_locations() {
         gb_render "$GB_TYPES/static/templates/version-locations.conf.tmpl" "$piece" \
             "DOMAIN=$EP_DOMAIN" "LABEL=$label" "DATA_DIR=$(ep_data_dir "$EP_DOMAIN")" \
             "NGINX_GB_DIR=$GB_NGINX_GB" "DATA_EXT_REGEX=$data_ext" "HAS_SHA=$has_sha" \
-            "HAS_HTML=$has_html" "CACHE_TTL=$EP_CACHE_TTL" "SHA_CACHE_TTL=$EP_SHA_CACHE_TTL"
+            "HAS_HTML=$has_html" "TOKEN_ACCESS=$([[ "$EP_ACCESS_MODE" == token ]] && printf true || printf false)" "CACHE_TTL=$EP_CACHE_TTL" "SHA_CACHE_TTL=$EP_SHA_CACHE_TTL"
         cat "$piece" >> "$output"
         printf '\n' >> "$output"
     done < <(ep_versions "$EP_DOMAIN")

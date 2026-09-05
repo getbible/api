@@ -33,6 +33,10 @@ def install_request_hooks(app: Flask, settings: ServiceSettings, logger: logging
 
     @app.after_request
     def _finish(response: Response) -> Response:
+        if settings.access_mode == "token":
+            response.headers["Cache-Control"] = "private, no-store"
+            response.headers["CDN-Cache-Control"] = "no-store"
+            response.vary.add("Authorization")
         response.headers["X-Request-ID"] = g.get("request_id", "-")
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("Referrer-Policy", "no-referrer")
@@ -88,8 +92,8 @@ def json_response(app: Flask, payload: dict[str, Any], *, cache_seconds: int = 0
 
 
 def redirect_permanent(location: str) -> Response:
-    """A 301 with a relative Location, cacheable for five minutes."""
-    response = Response(status=301)
+    """Preserve POST methods and JSON bodies through canonical aliases."""
+    response = Response(status=308 if request.method == "POST" else 301)
     response.headers["Location"] = location
-    response.headers["Cache-Control"] = "public, max-age=300"
+    response.headers["Cache-Control"] = "no-store" if request.method == "POST" else "public, max-age=300"
     return response

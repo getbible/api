@@ -6,7 +6,7 @@ import json
 import logging
 import logging.handlers
 import os
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 # Fields copied from a LogRecord's extra attributes when present.
@@ -21,7 +21,7 @@ EXTRA_FIELDS = (
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
-            "time": datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            "time": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
@@ -39,7 +39,9 @@ def configure_logging(name: str, level: str, path: str = "") -> logging.Logger:
     """Log JSON lines to `path` (reopened after rotation) and, for warnings
     and above, to stderr so journald keeps the failures too."""
     logger = logging.getLogger(name)
-    logger.handlers.clear()
+    for handler in tuple(logger.handlers):
+        logger.removeHandler(handler)
+        handler.close()
     formatter = JsonFormatter()
     if path:
         directory = os.path.dirname(path)

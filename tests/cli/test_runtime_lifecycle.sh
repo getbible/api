@@ -189,6 +189,16 @@ rt_rollback "$legacy_domain"
 check test "$(ep_get "$legacy_domain" DEFAULT_TRANSLATION)" = test
 check test "$(py_current_release search)" = "$legacy_release"
 
+# A dependency/code rebuild warms an isolated cache; retaining the old cache
+# keeps a schema-changing library upgrade from damaging rollback readiness.
+SOURCE_REVISION=two
+rt_update "$domain"
+updated_release="$(py_current_release query)"
+check test "$updated_release" != "$first_release"
+check test "$(rt_cache_dir query "$updated_release")" != "$(rt_cache_dir query "$first_release")"
+check test -d "$(rt_cache_dir query "$first_release")"
+check grep -q "$(rt_cache_dir query "$updated_release")" "$(rt_env_file "$domain")"
+
 # Retirement is sensitive to PID identity, not just PID existence.
 printf '%s 0\n' "$$" > "$GB_PREFIX/drain-snapshot"
 cat > "$GB_PREFIX/fake-systemctl" <<'CTL'

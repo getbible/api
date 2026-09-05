@@ -24,6 +24,9 @@ def main() -> int:
             )
         if not bible.valid_reference(settings.default_reference, settings.service.default_translation):
             raise SystemExit(f"Default reference {settings.default_reference!r} does not resolve.")
+        result = bible.select(settings.default_reference, settings.service.default_translation)
+        if not any(chapter.get("verses") for chapter in result.values()):
+            raise SystemExit("Default reference returned no scripture; refusing to start.")
         print(f"query endpoint ready: repository {settings.librarian.repository!r} version {settings.librarian.version!r}")
     finally:
         bible.close()

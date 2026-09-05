@@ -68,7 +68,7 @@ def active(token: dict) -> bool:
     if token.get("revoked_at"):
         return False
     expires = token.get("expires_at")
-    if expires and expires < now()[:10]:
+    if expires and datetime.strptime(expires, "%Y-%m-%d").date() < datetime.fromisoformat(now().replace("Z", "+00:00")).date():
         return False
     return True
 
@@ -96,7 +96,7 @@ def epoch_before(boundary: int) -> str:
 
 
 def validated_tokens(data: dict, domain: str):
-    if not re.fullmatch(r"[a-z0-9]+(?:[.-][a-z0-9]+)*", domain):
+    if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?(?:[.][a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?)+", domain):
         raise SystemExit("invalid endpoint domain")
     seen = set()
     for token in data["tokens"]:
@@ -135,7 +135,7 @@ def cmd_add(path: str, data: dict, args: list[str]) -> int:
             label = args.pop(0)
         elif item == "--expires":
             expires = args.pop(0)
-            datetime.strptime(expires, "%Y-%m-%d")
+            expires = datetime.strptime(expires, "%Y-%m-%d").date().isoformat()
         else:
             raise SystemExit(f"unknown option {item}")
     if not label:

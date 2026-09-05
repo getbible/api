@@ -42,7 +42,7 @@ curl -X POST -H "Content-Type: application/json" \
 <p>Unknown parameters, repeated non-repeatable parameters, and values out of range answer <code>400</code>. Matching is derived from the writing system of the text and the search string, so a bare search string works in every translation; the machine-readable description is in <a href="/openapi.json">openapi.json</a>.</p>
 
 <h2>Response</h2>
-<p>A JSON envelope with three members: <code>query</code> (normalised criteria, <code>kind</code>, translation, <code>sha</code>, exact <code>total</code>, pagination, cache state and cost), <code>results</code> (the same chapter-keyed scripture object the query endpoint returns) and <code>matches</code> (the ordered verses with score, occurrences and matched terms). GET responses carry <code>Cache-Control: public, max-age={{CACHE_SECONDS}}</code> and an <code>ETag</code>.</p>
+<p>A JSON envelope with three members: <code>query</code> (normalised criteria, <code>kind</code>, translation, <code>sha</code>, exact <code>total</code>, pagination, cache state and cost), <code>results</code> (the same chapter-keyed scripture object the query endpoint returns) and <code>matches</code> (the ordered verses with score, occurrences and matched terms). Public GET responses carry <code>Cache-Control: public, max-age={{CACHE_SECONDS}}</code> and an <code>ETag</code>. Token-protected endpoints use <code>private, no-store</code>; POST responses are never cached.</p>
 
 <h2>Access</h2>
 {{ACCESS_HTML}}
@@ -62,7 +62,7 @@ curl -X POST -H "Content-Type: application/json" \
 </table>
 
 <h2>Health</h2>
-<p><code>GET /healthz</code> answers when the service is up; <code>GET /readyz</code> answers <code>200</code> only when the default translation can be read.</p>
+<p><code>GET /healthz</code> answers when the service is up; <code>GET /readyz</code> reads a verse from the default translation. Deployment additionally runs <code>GET /probez</code> through the private service socket to verify the search corpus. A failed check answers <code>503</code>. Alias redirects use <code>301</code> for GET and <code>308</code> for POST, preserving JSON bodies and query parameters.</p>
 
 <footer>Served by getBible · <a href="https://getbible.net">getbible.net</a> · Requests carry an <code>X-Request-ID</code> header; quote it when reporting a problem.</footer>
 </main>

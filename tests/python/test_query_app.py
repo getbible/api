@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import unittest
+from dataclasses import replace
+from unittest.mock import patch
 
 from getbible_api_common.settings import LibrarianSettings, ServiceSettings
 from getbible_query_api.app import create_app
@@ -94,6 +96,26 @@ class QueryAppTest(EndpointCase, unittest.TestCase):
     def test_health_and_readiness(self) -> None:
         self.assertEqual(self.client.get("/healthz").get_json(), {"status": "ok"})
         self.assertEqual(self.client.get("/readyz").get_json(), {"status": "ready"})
+
+    def test_readiness_requires_readable_scripture_not_only_metadata(self) -> None:
+        bible = self.app.extensions["getbible"]
+        with patch.object(bible, "valid_translation", return_value=True), \
+             patch.object(bible, "select", side_effect=OSError("chapter unavailable")):
+            response = self.client.get("/readyz")
+            self.assertEqual(response.status_code, 503)
+            self.assertEqual(response.get_json(), {"status": "unavailable"})
+            self.assertEqual(self.client.get("/healthz").status_code, 200)
+
+    def test_token_endpoint_never_advertises_shared_caching(self) -> None:
+        settings = self.app.extensions["settings"]
+        app = create_app(replace(settings, service=replace(settings.service, access_mode="token")))
+        self.addCleanup(app.extensions["getbible"].close)
+        client = app.test_client()
+        for path in ("/", "/v2/test/Ge1:1", "/v2/test/nonsense"):
+            with self.subTest(path=path):
+                response = client.get(path)
+                self.assertEqual(response.headers["Cache-Control"], "private, no-store")
+                self.assertEqual(response.headers["CDN-Cache-Control"], "no-store")
 
     def test_security_headers_and_request_id(self) -> None:
         response = self.client.get("/v2/test/Ge1:1", headers={"X-Request-ID": "trace-1", "X-GetBible-Token-Id": "tk_abc"})

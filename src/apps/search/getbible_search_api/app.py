@@ -17,6 +17,7 @@ from __future__ import annotations
 import dataclasses
 import threading
 from typing import Any
+from urllib.parse import quote
 
 from flask import Flask, Response, g, request
 from getbible import SEARCH_ENGINE_VERSION, SearchBible, SearchValidationError
@@ -83,7 +84,7 @@ def create_app(settings: Settings | None = None) -> Flask:
     allowed = settings.service.translation_allowed
     max_length = settings.max_query_length
 
-    register_health(app, bible, default_translation, logger)
+    register_health(app, bible, default_translation, logger, search_probe=True)
 
     # --- parameter handling ---------------------------------------------------
     def body_values() -> dict[str, Any]:
@@ -222,7 +223,8 @@ def create_app(settings: Settings | None = None) -> Flask:
     def not_here(requested: str) -> ProblemError:
         return ProblemError(404, "unknown_version", f"API version {requested} is not served here; use {version}.")
 
-    def with_query_string(location: str) -> str:
+    def with_query_string(*segments: str) -> str:
+        location = "/" + "/".join(quote(segment, safe=":;,") for segment in segments)
         qs = request.query_string.decode("utf-8", "replace")
         return f"{location}?{qs}" if qs else location
 
@@ -242,8 +244,8 @@ def create_app(settings: Settings | None = None) -> Flask:
             raise not_here(segment)
         g.operation = "redirect"
         if detect.is_translation(bible, segment, allowed):
-            return redirect_permanent(with_query_string(f"/{version}/{segment.casefold()}"))
-        return redirect_permanent(with_query_string(f"/{version}/{default_translation}/{segment}"))
+            return redirect_permanent(with_query_string(version, segment.casefold()))
+        return redirect_permanent(with_query_string(version, default_translation, segment))
 
     @app.route("/<first>/<second>", methods=["GET", "POST"])
     def two_segments(first: str, second: str) -> Response:
@@ -254,11 +256,11 @@ def create_app(settings: Settings | None = None) -> Flask:
                 translation = require_translation(second)
                 return perform(translation, require_search_string(values), values)
             g.operation = "redirect"
-            return redirect_permanent(with_query_string(f"/{version}/{default_translation}/{second}"))
+            return redirect_permanent(with_query_string(version, default_translation, second))
         if detect.looks_like_version(first):
             raise not_here(first)
         g.operation = "redirect"
-        return redirect_permanent(with_query_string(f"/{version}/{first}/{second}"))
+        return redirect_permanent(with_query_string(version, first, second))
 
     @app.route("/<requested_version>/<translation>/<text>", methods=["GET", "POST"])
     def search(requested_version: str, translation: str, text: str) -> Response:

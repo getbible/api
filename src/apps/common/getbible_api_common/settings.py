@@ -132,8 +132,11 @@ class ServiceSettings:
     trust_proxy: bool = True
     cache_seconds: int = 300
     max_input_length: int = 512
+    access_mode: str = "metered"
 
     def __post_init__(self) -> None:
+        if self.access_mode not in {"open", "metered", "token"}:
+            raise ValueError("GB_ACCESS_MODE must be open, metered or token.")
         translation = self.default_translation.casefold() if isinstance(self.default_translation, str) else ""
         object.__setattr__(self, "default_translation", translation)
         if not valid_translation_code(translation):
@@ -161,6 +164,7 @@ class ServiceSettings:
         defaults = cls(prefix=prefix)
         values = dict(
             prefix=prefix,
+            access_mode=env_str("GB_ACCESS_MODE", defaults.access_mode),
             default_translation=env_str(f"{prefix}_DEFAULT_TRANSLATION", defaults.default_translation),
             allowed_translations=translations_list(env_str(f"{prefix}_ALLOWED_TRANSLATIONS", "")),
             slow_request_milliseconds=env_int(f"{prefix}_SLOW_REQUEST_MILLISECONDS", defaults.slow_request_milliseconds, 1, 300_000),
