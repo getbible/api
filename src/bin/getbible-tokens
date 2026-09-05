@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+"""Manage the bearer tokens of one endpoint.
+
+Usage:
+  getbible-tokens FILE list
+  getbible-tokens FILE add --label LABEL [--expires YYYY-MM-DD]
+  getbible-tokens FILE revoke ID
+  getbible-tokens FILE render-map DOMAIN
+  getbible-tokens FILE count
+
+The store is a root-only JSON file. Tokens are 32 random bytes rendered as
+lowercase base32, so nginx's case-insensitive map matching loses nothing.
+The plaintext stays in the file because nginx must compare exact strings;
+`add` prints the new token once on stdout as JSON.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import os
+import secrets
+import sys
+import tempfile
+from datetime import UTC, datetime
+
+SCHEMA = "getbible-tokens-v1"
+
+
+def now() -> str:
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def load(path: str, endpoint: str = "") -> dict:
+    if not os.path.exists(path):
+        return {"schema": SCHEMA, "endpoint": endpoint, "tokens": []}
+    with open(path, encoding="utf-8") as handle:
+        data = json.load(handle)
+    if data.get("schema") != SCHEMA or not isinstance(data.get("tokens"), list):
+        raise SystemExit(f"{path}: not a getbible token store")
+    return data
+
+
+def save(path: str, data: dict) -> None:
+    directory = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(prefix=".tokens.", suffix=".json", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def new_token() -> str:
+    raw = base64.b32encode(secrets.token_bytes(32)).decode("ascii").rstrip("=").lower()
+    return "gb" + raw
+
+
+def active(token: dict) -> bool:
+    if token.get("revoked_at"):
+        return False
+    expires = token.get("expires_at")
+    if expires and expires < now()[:10]:
+        return False
+    return True
+
+
+def cmd_list(data: dict) -> int:
+    rows = data["tokens"]
+    if not rows:
+        print("no tokens")
+        return 0
+    print(f"{'id':<14} {'state':<8} {'created':<11} {'expires':<11} label")
+    for token in rows:
+        state = "active" if active(token) else ("revoked" if token.get("revoked_at") else "expired")
+        print(
+            f"{token['id']:<14} {state:<8} {token['created_at'][:10]:<11} "
+            f"{(token.get('expires_at') or '-'):<11} {token.get('label', '')}"
+        )
+    return 0
+
+
+def cmd_add(path: str, data: dict, args: list[str]) -> int:
+    label = ""
+    expires = None
+    while args:
+        item = args.pop(0)
+        if item == "--label":
+            label = args.pop(0)
+        elif item == "--expires":
+            expires = args.pop(0)
+            datetime.strptime(expires, "%Y-%m-%d")
+        else:
+            raise SystemExit(f"unknown option {item}")
+    if not label:
+        raise SystemExit("--label is required")
+    token = {
+        "id": "tk_" + secrets.token_hex(4),
+        "label": label,
+        "token": new_token(),
+        "created_at": now(),
+        "expires_at": expires,
+        "revoked_at": None,
+    }
+    data["tokens"].append(token)
+    save(path, data)
+    print(json.dumps(token))
+    return 0
+
+
+def cmd_revoke(path: str, data: dict, token_id: str) -> int:
+    for token in data["tokens"]:
+        if token["id"] == token_id:
+            if token.get("revoked_at"):
+                print(f"{token_id} was already revoked")
+                return 0
+            token["revoked_at"] = now()
+            save(path, data)
+            print(f"revoked {token_id}")
+            return 0
+    raise SystemExit(f"no token with id {token_id}")
+
+
+def cmd_render_map(data: dict, domain: str) -> int:
+    for token in data["tokens"]:
+        if active(token):
+            print(f'"{domain} Bearer {token["token"]}" "{token["id"]}";')
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) < 3 or argv[1] in {"-h", "--help"}:
+        sys.stderr.write(__doc__)
+        return 2
+    path, command, rest = argv[1], argv[2], argv[3:]
+    data = load(path)
+    if command == "list":
+        return cmd_list(data)
+    if command == "add":
+        return cmd_add(path, data, rest)
+    if command == "revoke":
+        return cmd_revoke(path, data, rest[0])
+    if command == "render-map":
+        return cmd_render_map(data, rest[0])
+    if command == "count":
+        print(sum(1 for token in data["tokens"] if active(token)))
+        return 0
+    raise SystemExit(f"unknown command {command}")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

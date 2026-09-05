@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{DOMAIN}} · getBible API</title>
+<style>{{CSS}}</style>
+</head>
+<body>
+<main>
+<h1>{{DOMAIN}}</h1>
+<p class="lead">A getBible static API: every resource is a file served exactly as published. <span class="badge">{{ACCESS_MODE_LABEL}}</span></p>
+
+<h2>Versions</h2>
+<p>Every path starts with a version segment. Versions are independent trees and can change on their own schedule.</p>
+<table>
+<tr><th>Version</th><th>Base URL</th><th>Documents</th></tr>
+{{VERSIONS_ROWS}}
+</table>
+{{#IF NO_VERSIONS}}<p>No version has been published yet.</p>{{/IF}}
+
+<h2>How to call it</h2>
+<p>Plain HTTPS <code>GET</code> requests, from any origin. Responses are JSON, plus <code>.sha</code> and <code>.txt</code> files as plain text. Nothing here accepts query strings or request bodies.</p>
+<pre><code>curl https://{{DOMAIN}}/{{FIRST_VERSION}}/{{EXAMPLE_PATH}}</code></pre>
+<ul>
+<li>Allowed file types: {{EXTENSIONS_LIST}}.</li>
+<li>Methods: <code>GET</code>, <code>HEAD</code>, <code>OPTIONS</code>. Anything else answers <code>405</code>.</li>
+<li>CORS is open: <code>Access-Control-Allow-Origin: *</code> on every response, preflights answer <code>204</code>.</li>
+<li>Caching: <code>Cache-Control: public, max-age={{CACHE_TTL}}</code> on documents and <code>max-age={{SHA_CACHE_TTL}}</code> on checksum files; every response carries an <code>ETag</code>, so conditional requests answer <code>304</code>.</li>
+<li>Compression: gzip (and brotli where available) on request.</li>
+<li>Health: <code>GET /healthz</code> answers <code>{"status":"ok"}</code>.</li>
+</ul>
+
+<h2>Access</h2>
+{{ACCESS_HTML}}
+
+<h2>Errors</h2>
+<p>Every error is an <a href="https://www.rfc-editor.org/rfc/rfc9457">RFC 9457 problem document</a> with the media type <code>application/problem+json</code>:</p>
+<pre><code>{"type":"https://getbible.net/problems/not-found","title":"Not Found","status":404,"code":"not_found","detail":"No such resource on this API. ...","instance":"urn:request:..."}</code></pre>
+<table>
+<tr><th>Status</th><th>Code</th><th>Meaning</th></tr>
+<tr><td>400</td><td>bad_request</td><td>A query string or malformed request was sent.</td></tr>
+<tr><td>401</td><td>unauthorized</td><td>A bearer token is required and was missing or invalid.</td></tr>
+<tr><td>404</td><td>not_found</td><td>No such document in this version.</td></tr>
+<tr><td>405</td><td>method_not_allowed</td><td>Only GET, HEAD and OPTIONS are accepted.</td></tr>
+<tr><td>429</td><td>rate_limited</td><td>The public budget for your address is used up; a <code>Retry-After</code> header is included.</td></tr>
+<tr><td>503</td><td>unavailable</td><td>Temporary outage; retry after a moment.</td></tr>
+</table>
+
+<footer>Served by getBible · <a href="https://getbible.net">getbible.net</a> · Requests carry an <code>X-Request-ID</code> header; quote it when reporting a problem.</footer>
+</main>
+</body>
+</html>

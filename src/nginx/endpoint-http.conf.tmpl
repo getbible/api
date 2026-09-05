@@ -1,0 +1,9 @@
+# getBible API - http-context zones for {{DOMAIN}}, rendered by getbible.sh.
+# Keys are empty for token holders, so only anonymous callers are counted.
+limit_req_zone  $gb_limit_key zone=gb_{{SLUG}}_sec:10m  rate={{RATE_PER_SECOND}}r/s;
+limit_req_zone  $gb_limit_key zone=gb_{{SLUG}}_hour:10m rate={{HOUR_RATE}}r/m;
+limit_req_zone  $gb_limit_key zone=gb_{{SLUG}}_day:10m  rate={{DAY_RATE}}r/m;
+limit_conn_zone $gb_limit_key zone=gb_{{SLUG}}_conn:10m;
+{{#IF PROXY_CACHE}}
+proxy_cache_path {{CACHE_DIR}} levels=1:2 keys_zone=gb_{{SLUG}}_cache:64m max_size=2g inactive=1h use_temp_path=off;
+{{/IF}}

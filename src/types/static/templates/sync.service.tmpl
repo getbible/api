@@ -1,0 +1,44 @@
+[Unit]
+Description=getBible sync {{DOMAIN}} {{LABEL}} from {{REPO_URL}}
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User={{USER}}
+Group={{GROUP}}
+Environment=GB_SYNC_DOMAIN={{DOMAIN}}
+Environment=GB_SYNC_VERSION={{LABEL}}
+Environment=GB_SYNC_REPO={{REPO_URL}}
+Environment=GB_SYNC_REF={{REPO_REF}}
+Environment=GB_SYNC_SUBPATH={{SOURCE_PATH}}
+Environment=GB_SYNC_EXTENSIONS={{EXTENSIONS}}
+Environment=GB_SYNC_HOME={{HOME}}
+Environment=GB_SYNC_DATA={{DATA_DIR}}
+Environment=GB_SYNC_KEEP=2
+Environment=GB_NOTIFY={{LIBEXEC}}/getbible-notify
+Environment=GB_VERIFY={{LIBEXEC}}/getbible-verify-tree
+Environment=GB_TELEGRAM_CONF={{TELEGRAM_CONF}}
+ExecStart={{LIBEXEC}}/getbible-sync
+TimeoutStartSec=6h
+Nice=10
+IOSchedulingClass=idle
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths={{DATA_DIR}} {{HOME}}
+UMask=0027

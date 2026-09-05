@@ -1,0 +1,10 @@
+    location = /healthz {
+        access_log off;
+        default_type application/json;
+        add_header Cache-Control "no-store" always;
+        return 200 '{"status":"ok"}\n';
+    }
+
+    location / {
+        return 404;
+    }

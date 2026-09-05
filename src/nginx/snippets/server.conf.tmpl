@@ -1,0 +1,52 @@
+# getBible API - server-context tuning shared by every endpoint.
+# Every directive here is valid in a server block so it overrides the
+# distribution defaults instead of colliding with them.
+
+server_tokens off;
+merge_slashes on;
+ignore_invalid_headers on;
+
+# One request is one small file read; cache descriptors and stat() results.
+open_file_cache          max=200000 inactive=5m;
+open_file_cache_valid    60s;
+open_file_cache_min_uses 1;
+open_file_cache_errors   on;
+
+sendfile           on;
+sendfile_max_chunk 2m;
+tcp_nopush         on;
+tcp_nodelay        on;
+aio                threads;
+directio           16m;
+output_buffers     2 512k;
+
+# Precompressed variants are served when the sync produced them; on-the-fly
+# gzip stays on as the safety net.
+gzip            on;
+gzip_vary       on;
+gzip_proxied    any;
+gzip_comp_level 5;
+gzip_min_length 1024;
+gzip_types      application/json application/problem+json text/plain;
+gzip_static     on;
+{{#IF BROTLI}}brotli_static   on;{{/IF}}
+
+# Only the types this API serves; .sha checksums are plain text.
+types {
+    application/json  json;
+    text/plain        sha txt;
+    text/html         html;
+}
+default_type application/json;
+charset      off;
+etag         on;
+
+client_max_body_size {{MAX_BODY}};
+client_header_timeout 10s;
+client_body_timeout   10s;
+send_timeout          60s;
+keepalive_timeout     65s;
+keepalive_requests    1000;
+reset_timedout_connection on;
+limit_req_status  429;
+limit_conn_status 429;
