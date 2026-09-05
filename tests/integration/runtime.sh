@@ -7,6 +7,8 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
 FIXTURE="$IT_ROOT/tests/python/fixtures/repository"
 PIDS=()
 cleanup() {
+    local result="$?"
+    (( result == 0 )) || it_failure_logs
     it_nginx_stop
     for pid in "${PIDS[@]:-}"; do [[ -n "$pid" ]] && kill -QUIT "$pid" 2>/dev/null || true; done
     sleep 0.5
