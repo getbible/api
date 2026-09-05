@@ -26,7 +26,15 @@ update_pull() {
     git -C "$GB_REPO_DIR" pull --ff-only origin "$branch"
 }
 
-update_pull_and_all() { update_pull && update_all; }
+# Re-exec after pulling so the manager's functions, not just its templates,
+# come from the new checkout. Retain the inherited management lock throughout.
+update_pull_and_all() {
+    update_pull || return 1
+    gb_cleanup
+    unset GB_TMP
+    export GB_MANAGER_LOCKED=true
+    exec "$GB_SELF" update
+}
 
 update_all() {
     local commit dirty failures=0 count=0 domain

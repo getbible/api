@@ -21,6 +21,11 @@
         include {{NGINX_GB_DIR}}/{{DOMAIN}}/auth.conf;
         include snippets/getbible/proxy.conf;
         proxy_cache gb_{{SLUG}}_cache;
+{{#IF TOKEN_ACCESS}}        proxy_cache_bypass 1;
+        proxy_no_cache 1;
+        proxy_hide_header Cache-Control;
+        add_header Cache-Control "private, no-store" always;
+{{/IF}}
         proxy_cache_methods GET HEAD;
         proxy_cache_key "$scheme$request_method$host$request_uri";
         proxy_cache_valid 200 {{CACHE_TTL}}s;

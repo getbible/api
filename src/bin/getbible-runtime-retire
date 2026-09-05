@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Keep a previous runtime available until nginx's pre-reload workers exit.
+# Snapshot records include Linux process start time, protecting against PID reuse.
+set -Eeuo pipefail
+[[ $# -eq 3 ]] || { echo "usage: getbible-runtime-retire SYSTEMCTL UNIT SNAPSHOT" >&2; exit 2; }
+ctl="$1"; unit="$2"; snapshot="$3"
+[[ "$unit" =~ ^getbible-[A-Za-z0-9-]+$ && -f "$snapshot" ]] || exit 2
+while true; do
+    alive=false
+    while read -r pid started; do
+        [[ "$pid" =~ ^[0-9]+$ && "$started" =~ ^[0-9]+$ ]] || exit 2
+        stat=""
+        [[ -r "/proc/$pid/stat" ]] && IFS= read -r stat < "/proc/$pid/stat" || true
+        [[ -n "$stat" ]] || continue
+        read -r -a fields <<< "${stat##*) }"
+        if [[ "${fields[19]:-}" == "$started" && "${fields[0]:-}" != Z ]]; then alive=true; break; fi
+    done < "$snapshot"
+    [[ "$alive" == true ]] || break
+    sleep 2
+done
+"$ctl" stop "$unit.socket" "$unit.service"
+rm -f -- "$snapshot"

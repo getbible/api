@@ -151,9 +151,9 @@ gb_install_file() {
         gb_log "(dry-run) would install $target"
         return 0
     fi
-    install -m "$mode" -- "$source" "$target.gb-tmp"
+    install -m "$mode" -- "$source" "$target.gb-tmp" || return 1
     if gb_is_root && [[ -z "$GB_PREFIX" ]]; then
-        chown "$owner" -- "$target.gb-tmp"
+        chown "$owner" -- "$target.gb-tmp" || return 1
     fi
     mv -f -- "$target.gb-tmp" "$target"
 }
@@ -192,9 +192,21 @@ gb_restore_file() {
 
 gb_new_backup_set() {
     local name="$1" dir
-    dir="$GB_BACKUPS/$name-$(date -u +%Y%m%dT%H%M%SZ)"
-    gb_ensure_dir "$dir" 0700
+    gb_ensure_dir "$GB_BACKUPS" 0700 || return 1
+    dir="$(mktemp -d "$GB_BACKUPS/$name-$(date -u +%Y%m%dT%H%M%S%N)-XXXXXX")" || return 1
     printf '%s\n' "$dir"
+}
+
+# Every management command shares one lock. Static synchronizers have their
+# own per-version locks and continue to serve/publish independently.
+gb_management_lock() {
+    if [[ "${GB_MANAGER_LOCKED:-false}" == true && "$(readlink /proc/self/fd/7 2>/dev/null || true)" == "$GB_VAR/manage.lock" ]]; then
+        return 0
+    fi
+    gb_ensure_dir "$GB_VAR" 0755 || return 1
+    exec 7>"$GB_VAR/manage.lock" || return 1
+    flock -n 7 || { gb_warn "Another endpoint management command is running."; return 1; }
+    GB_MANAGER_LOCKED=true
 }
 
 gb_prune_backups() {

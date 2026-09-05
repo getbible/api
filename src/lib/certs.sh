@@ -50,7 +50,12 @@ certs_install_hook() {
     cat > "$(gb_tmpdir)/reload-hook" <<'HOOK'
 #!/bin/sh
 # Installed by getbible.sh: reload nginx after a certificate renewal.
-systemctl reload nginx 2>/dev/null || nginx -s reload
+if ! nginx -t || ! { systemctl reload nginx 2>/dev/null || nginx -s reload; }; then
+    if [ -x /usr/local/lib/getbible/getbible-notify ]; then
+        /usr/local/lib/getbible/getbible-notify fail "Certificate reload failed" "Renewed: ${RENEWED_DOMAINS:-unknown}. nginx validation or reload failed; check the service."
+    fi
+    exit 1
+fi
 if [ -x /usr/local/lib/getbible/getbible-notify ]; then
     /usr/local/lib/getbible/getbible-notify ok "Certificate renewed" "Renewed: ${RENEWED_DOMAINS:-unknown}. nginx reloaded."
 fi
@@ -61,7 +66,7 @@ HOOK
 certs_renew_now() {
     local domain="$1"
     certs_available || gb_die "certbot is not installed."
-    "$GB_CERTBOT" renew --cert-name "$domain" --force-renewal --non-interactive && nginx_reload
+    "$GB_CERTBOT" renew --cert-name "$domain" --force-renewal --non-interactive && nginx_test && nginx_reload
 }
 
 certs_expiry() {

@@ -12,41 +12,71 @@ endpoint_source_type() {
     source "$GB_TYPES/$type/type.sh"
 }
 
-# endpoint_apply DOMAIN: make the live configuration match the registry.
-# Phase one renders the HTTP vhost, phase two adds TLS once a certificate
-# exists. Safe to run repeatedly; a second run changes nothing.
+# Restore routing before stopping a failed candidate. The old runtime keeps
+# serving until the full configuration transaction has committed.
+endpoint_apply_abort() {
+    local domain="$1" reason="$2" recovery=true
+    gb_warn "$reason"
+    if [[ -n "${EP_ENABLE_BACKUP:-}" ]]; then
+        gb_restore_file "$(nginx_enabled_file "$domain")" "$EP_ENABLE_BACKUP" || recovery=false
+    fi
+    nginx_transaction_rollback "$domain" || recovery=false
+    if declare -F "type_${EP_TYPE}_abort" >/dev/null; then
+        if [[ "$recovery" == true ]]; then
+            "type_${EP_TYPE}_abort" "$domain" || recovery=false
+        else
+            gb_warn "Routing recovery failed; retaining runtime processes to avoid interrupting traffic."
+        fi
+    fi
+    ep_state_set "$domain" LAST_ERROR "$reason" || true
+    tg_notify fail "Endpoint update failed: $domain" "$reason. Routing recovery: $recovery."
+    return 1
+}
+
+# All stages check their own errors because callers may invoke this function
+# from an if/! condition, where Bash does not apply errexit inside functions.
 endpoint_apply() {
     local domain="$1" stage
-    ep_load "$domain"
-    endpoint_source_type "$EP_TYPE"
-    gb_ensure_base_dirs
-    logs_ensure_endpoint_dir "$domain"
-    "type_${EP_TYPE}_prepare" "$domain"
-    docs_render "$domain"
+    ep_load "$domain" || return 1
+    endpoint_source_type "$EP_TYPE" || return 1
+    gb_ensure_base_dirs || return 1
+    logs_ensure_endpoint_dir "$domain" || return 1
+    EP_ENABLE_BACKUP="$(gb_new_backup_set "site-enable-$EP_SLUG")" || return 1
+    gb_backup_file "$(nginx_enabled_file "$domain")" "$EP_ENABLE_BACKUP" || return 1
+    nginx_transaction_begin "$domain" || return 1
+    if declare -F cloudflare_protect_access >/dev/null; then
+        cloudflare_protect_access "$domain" || { endpoint_apply_abort "$domain" "Could not protect shared-cache access"; return 1; }
+    fi
+    "type_${EP_TYPE}_prepare" "$domain" || { endpoint_apply_abort "$domain" "Endpoint candidate preparation failed"; return 1; }
+    docs_render "$domain" || { endpoint_apply_abort "$domain" "Endpoint documentation rendering failed"; return 1; }
 
     stage="$(gb_tmpdir)/stage-$EP_SLUG"
-    rm -rf -- "$stage"
-    nginx_render_global "$stage"
-    nginx_render_endpoint "$stage"
-    nginx_enable_site "$domain"
-    nginx_apply_stage "$stage" "$EP_SLUG" || gb_die "nginx refused the configuration for $domain; previous files restored."
+    rm -rf -- "$stage" || return 1
+    nginx_render_global "$stage" && nginx_render_endpoint "$stage" || { endpoint_apply_abort "$domain" "nginx rendering failed"; return 1; }
+    nginx_enable_site "$domain" || { endpoint_apply_abort "$domain" "Could not enable the nginx site"; return 1; }
+    if declare -F "type_${EP_TYPE}_before_switch" >/dev/null; then
+        "type_${EP_TYPE}_before_switch" "$domain" || { endpoint_apply_abort "$domain" "Could not prepare the traffic switch"; return 1; }
+    fi
+    nginx_apply_stage "$stage" "$EP_SLUG" || { endpoint_apply_abort "$domain" "nginx rejected the endpoint configuration"; return 1; }
 
     if ! nginx_cert_exists "$domain"; then
         if certs_obtain "$domain"; then
-            rm -rf -- "$stage"
-            nginx_render_global "$stage"
-            nginx_render_endpoint "$stage"
-            nginx_apply_stage "$stage" "$EP_SLUG" || gb_die "nginx refused the TLS configuration for $domain."
+            rm -rf -- "$stage" || return 1
+            nginx_render_global "$stage" && nginx_render_endpoint "$stage" || { endpoint_apply_abort "$domain" "TLS configuration rendering failed"; return 1; }
+            nginx_apply_stage "$stage" "$EP_SLUG" || { endpoint_apply_abort "$domain" "nginx rejected the TLS configuration"; return 1; }
         else
             gb_warn "$domain is reachable over HTTP only until a certificate is issued."
         fi
     fi
-    "type_${EP_TYPE}_finish" "$domain"
+    "type_${EP_TYPE}_finish" "$domain" || { endpoint_apply_abort "$domain" "Endpoint activation failed"; return 1; }
+    nginx_transaction_commit "$domain" || return 1
+    EP_ENABLE_BACKUP=""
     if [[ -n "${GB_CLOUDFLARE_LOADED:-}" && "$(ep_get "$domain" CLOUDFLARE_MODE off)" != off ]]; then
         cloudflare_apply "$domain" || gb_warn "Cloudflare update failed for $domain; nginx is unaffected."
     fi
     ep_state_set "$domain" LAST_APPLY "$(gb_timestamp)"
     ep_state_set "$domain" LAST_APPLY_COMMIT "$(git -C "$GB_REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    ep_state_set "$domain" LAST_ERROR ""
 }
 
 endpoint_apply_all() {
@@ -107,10 +137,14 @@ endpoint_prompt_access_mode() {
 
 # endpoint_set_access DOMAIN MODE
 endpoint_set_access() {
-    local domain="$1" mode="$2"
+    local domain="$1" mode="$2" previous
     access_valid_mode "$mode" || gb_die "Invalid access mode: $mode"
-    ep_set "$domain" ACCESS_MODE "$mode"
-    endpoint_apply "$domain"
+    previous="$(ep_get "$domain" ACCESS_MODE)"
+    ep_set "$domain" ACCESS_MODE "$mode" || return 1
+    if ! endpoint_apply "$domain"; then
+        ep_set "$domain" ACCESS_MODE "$previous"
+        return 1
+    fi
     tg_notify info "Access mode changed: $domain" "Now: $(access_mode_description "$mode")"
 }
 
