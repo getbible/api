@@ -3,7 +3,12 @@
 # to the promises the documentation makes.
 set -Eeuo pipefail
 source "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
-trap it_nginx_stop EXIT
+cleanup() {
+    local result="$?"
+    (( result == 0 )) || it_failure_logs
+    it_nginx_stop
+}
+trap cleanup EXIT
 
 DOMAIN="static.example.test"
 it_log "sandbox $IT_SB"
@@ -23,6 +28,11 @@ printf 'hello\n' > "$REL/kjv/readme.txt"
 printf '<script>alert(1)</script>\n' > "$REL/kjv/evil.html"
 printf 'secret\n' > "$REL/.hidden"
 ln -sfn "releases/v2/20260101T000000Z-abcdef1" "$IT_SB/srv/getbible/$DOMAIN/v2"
+# GB_PREFIX intentionally skips host account/group creation. Give this test
+# fixture the equivalent reader-group access used by real static deployments.
+chgrp -R "$IT_NGINX_USER" "$IT_SB/srv/getbible/$DOMAIN"
+chmod -R g+rX "$IT_SB/srv/getbible/$DOMAIN"
+runuser -u "$IT_NGINX_USER" -- test -r "$REL/kjv/1/1.json"
 
 # Tokens: one active token for the exemption test.
 TOKEN="$("$IT_ROOT/getbible.sh" token "$DOMAIN" add "integration test" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')"

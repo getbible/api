@@ -39,6 +39,11 @@ cleanup() {
     [[ -z "$PROBE_PID" ]] || { touch "$PROBE_STOP"; wait "$PROBE_PID" || true; }
     if (( result != 0 )); then
         journalctl -u 'getbible-*' --no-pager -n 200 || true
+        for diagnostic in /var/log/nginx/error.log /var/log/getbible/*/error.log /var/log/getbible/*/app/app.log; do
+            [[ -f "$diagnostic" ]] || continue
+            printf '\nFailure diagnostic: %s\n' "$diagnostic"
+            tail -80 "$diagnostic" || true
+        done
         [[ ! -f "$PROBE_LOG" ]] || tail -30 "$PROBE_LOG"
     fi
     "$GB" remove "$Q" --purge >/dev/null 2>&1 || true
@@ -50,7 +55,7 @@ trap cleanup EXIT
 
 request() {
     local domain="$1" path="$2"
-    curl --fail --silent --show-error --insecure --noproxy '*' --max-time 10 \
+    curl --fail-with-body --silent --show-error --insecure --noproxy '*' --max-time 10 \
         --resolve "$domain:443:127.0.0.1" "https://$domain$path"
 }
 
@@ -110,7 +115,7 @@ for kind in query search; do
     check "$kind pinned dependencies consistent" 'No broken requirements found.' "$("$release/.venv/bin/python" -m pip check)"
 done
 request "$Q" /v2/test/Ge1:1 | /usr/bin/python3 -c 'import json,sys; assert "test_1_1" in json.load(sys.stdin)'
-request "$S" /v2/test/beginning | /usr/bin/python3 -c 'import json,sys; assert json.load(sys.stdin)["kind"] == "search"'
+request "$S" /v2/test/beginning | /usr/bin/python3 -c 'import json,sys; payload=json.load(sys.stdin); assert payload["query"]["kind"] == "search", payload'
 
 NGINX_PID="$(systemctl show --property=MainPID --value nginx)"
 OLD_DEPLOYMENT="$(deployment query)"

@@ -12,7 +12,7 @@ step() { printf '\n== %s ==\n' "$*"; }
 fail() { printf 'FAILED: %s\n' "$*"; FAILED=$((FAILED + 1)); }
 
 step "syntax"
-for f in getbible.sh src/lib/*.sh src/types/*/type.sh src/bin/getbible-sync src/bin/getbible-notify src/bin/getbible-logrotate-hook tests/run.sh tests/cli/*.sh tests/integration/*.sh; do
+for f in getbible.sh src/lib/*.sh src/types/*/type.sh src/bin/getbible-sync src/bin/getbible-notify src/bin/getbible-logrotate-hook src/bin/getbible-runtime-retire tests/run.sh tests/cli/*.sh tests/integration/*.sh; do
     bash -n "$f" || fail "bash -n $f"
 done
 python3 -m py_compile src/bin/getbible-render src/bin/getbible-tokens src/bin/getbible-verify-tree src/bin/getbible-analytics src/bin/getbible-cloudflare src/bin/getbible-nginx-strip || fail "py_compile tools"
@@ -20,7 +20,7 @@ find src/apps -name '*.py' -not -path '*/build/*' -print0 | xargs -0 python3 -m 
 
 step "shellcheck"
 if command -v shellcheck >/dev/null; then
-    shellcheck -x -s bash getbible.sh src/lib/*.sh src/types/*/type.sh src/bin/getbible-sync src/bin/getbible-notify src/bin/getbible-logrotate-hook tests/run.sh tests/cli/*.sh tests/integration/*.sh || fail "shellcheck"
+    shellcheck -x -s bash getbible.sh src/lib/*.sh src/types/*/type.sh src/bin/getbible-sync src/bin/getbible-notify src/bin/getbible-logrotate-hook src/bin/getbible-runtime-retire tests/run.sh tests/cli/*.sh tests/integration/*.sh || fail "shellcheck"
 else
     if [[ "${CI:-false}" == true ]]; then fail "shellcheck is required in CI"; else echo "shellcheck not installed; skipped"; fi
 fi

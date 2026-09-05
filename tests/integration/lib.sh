@@ -7,8 +7,7 @@ set -Eeuo pipefail
 IT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 IT_SB="${IT_SB:-$(mktemp -d)}"
 chmod 0755 "$IT_SB"
-IT_HTTP_PORT="${IT_HTTP_PORT:-18080}"
-IT_HTTPS_PORT="${IT_HTTPS_PORT:-18443}"
+IT_HTTPS_PORT=443
 IT_PASS=0
 IT_FAIL=0
 IT_NGINX_USER="${IT_NGINX_USER:-www-data}"
@@ -44,14 +43,11 @@ it_selfsigned() {
         -out "$dir/fullchain.pem" -subj "/CN=$domain" 2>/dev/null
 }
 
-# Rewrite the rendered sites to high ports so the test needs no privileges.
+# These root-only tests use the rendered listeners verbatim. Rewriting them
+# would correctly trigger the manager's detection of hand-edited routes.
 it_nginx_start() {
-    local conf="$IT_SB/etc/nginx/nginx-test.conf" site
+    local conf="$IT_SB/etc/nginx/nginx-test.conf"
     mkdir -p "$IT_SB/etc/nginx/logs" "$IT_SB/var/cache/nginx/getbible" "$IT_SB/run"
-    for site in "$IT_SB"/etc/nginx/sites-enabled/*.conf; do
-        sed -i -e "s/listen 80;/listen 127.0.0.1:$IT_HTTP_PORT;/" \
-               -e "s/listen 443 ssl\(.*\);/listen 127.0.0.1:$IT_HTTPS_PORT ssl\1;/" "$(readlink -f "$site")"
-    done
     cat > "$conf" <<EOF
 pid $IT_SB/run/nginx.pid;
 user $IT_NGINX_USER;
@@ -85,13 +81,18 @@ it_nginx_stop() {
     rm -f "$IT_SB/run/nginx.pid"
 }
 
-# Restart after a configuration change; a start failure ends the test.
-it_nginx_reload() {
-    local conf="$IT_SB/etc/nginx/nginx-test.conf" site
-    for site in "$IT_SB"/etc/nginx/sites-enabled/*.conf; do
-        sed -i -e "s/listen 80;/listen 127.0.0.1:$IT_HTTP_PORT;/" \
-               -e "s/listen 443 ssl\(.*\);/listen 127.0.0.1:$IT_HTTPS_PORT ssl\1;/" "$(readlink -f "$site")"
+it_failure_logs() {
+    local file
+    for file in "$IT_SB/nginx-error.log" "$IT_SB"/var/log/getbible/*/error.log "$IT_SB/var/log/getbible/getbible.log"; do
+        [[ -f "$file" ]] || continue
+        printf '\n[it] Diagnostic log: %s\n' "$file"
+        tail -40 "$file"
     done
+}
+
+# Reload after a configuration change without changing the generated files.
+it_nginx_reload() {
+    local conf="$IT_SB/etc/nginx/nginx-test.conf"
     nginx -t -c "$conf" -p "$IT_SB/etc/nginx"
     nginx -s reload -c "$conf" -p "$IT_SB/etc/nginx"
     sleep 0.5

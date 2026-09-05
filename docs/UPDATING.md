@@ -54,9 +54,10 @@ nor an nginx reload: incomplete or invalid exports are never published.
 
 Unchanged code and configuration reuse their existing deployment. Hand-edited
 managed files are detected against `/var/lib/getbible/ledger`: an interactive
-update asks before replacing them; `--yes` keeps and reports them. Review those
-reports because retained local edits may prevent a requested change from taking
-effect. Backup sets are retained under `/var/backups/getbible/`.
+update asks before replacing them; `--yes` keeps and reports them. A declined
+nginx route change aborts the deployment and restores its prior routing, so
+review and reconcile local edits before retrying. Backup sets are retained
+under `/var/backups/getbible/`.
 
 ## Migrate an existing installation
 

@@ -55,6 +55,7 @@ jobs:
       - name: Install the deployment prerequisites using the host's Python
         run: sudo ./getbible.sh install-deps --yes
       - name: Actual systemd deployment, upgrades, permissions and recovery
+        shell: bash
         run: |
           sudo env GB_CI_DISPOSABLE_HOST=1 tests/integration/systemd.sh 2>&1 | tee /tmp/getbible-systemd-test.log
       - name: Capture the service journal on failure
