@@ -1,0 +1,88 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "getBible query endpoint",
+    "version": "{{VERSION}}",
+    "description": "Scripture references in, verses out. The reference is the last path segment; multiple references are separated by semicolons. The endpoint takes no query parameters.",
+    "contact": {"name": "getBible", "url": "https://getbible.net"}
+  },
+  "servers": [{"url": "https://{{DOMAIN}}"}],
+  "paths": {
+    "/{{VERSION}}/{translation}/{reference}": {
+      "get": {
+        "summary": "Verses for one or more references",
+        "operationId": "getScripture",
+        "parameters": [
+          {"name": "translation", "in": "path", "required": true, "description": "Translation abbreviation, e.g. {{DEFAULT_TRANSLATION}}", "schema": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,29}$"}},
+          {"name": "reference", "in": "path", "required": true, "description": "One or more scripture references separated by ';', e.g. John3:16 or Genesis 1:1-3;Psalm 23", "schema": {"type": "string", "maxLength": 512}}
+        ],
+        "responses": {
+          "200": {"description": "Chapter-keyed scripture object", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Scripture"}}}},
+          "304": {"description": "Not modified (conditional request)"},
+          "400": {"$ref": "#/components/responses/Problem"},
+          "401": {"$ref": "#/components/responses/Problem"},
+          "404": {"$ref": "#/components/responses/Problem"},
+          "429": {"$ref": "#/components/responses/Problem"},
+          "503": {"$ref": "#/components/responses/Problem"}
+        }
+      }
+    },
+    "/{{VERSION}}/{translation}": {
+      "get": {
+        "summary": "Redirect to the default reference in a translation",
+        "operationId": "redirectTranslation",
+        "parameters": [{"name": "translation", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {"301": {"description": "Location: /{{VERSION}}/{translation}/{{DEFAULT_REFERENCE}}"}}
+      }
+    },
+    "/{{VERSION}}": {
+      "get": {
+        "summary": "Redirect to the default translation and reference",
+        "operationId": "redirectVersion",
+        "responses": {"301": {"description": "Location: /{{VERSION}}/{{DEFAULT_TRANSLATION}}/{{DEFAULT_REFERENCE}}"}}
+      }
+    },
+    "/{reference}": {
+      "get": {
+        "summary": "Short form: reference in the default translation",
+        "operationId": "redirectReference",
+        "parameters": [{"name": "reference", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {"301": {"description": "Location: /{{VERSION}}/{{DEFAULT_TRANSLATION}}/{reference}; an unresolvable reference falls back to {{DEFAULT_REFERENCE}}"}}
+      }
+    },
+    "/healthz": {"get": {"summary": "Liveness", "operationId": "health", "responses": {"200": {"description": "{\"status\":\"ok\"}"}}}}
+  },
+  "components": {
+    "schemas": {
+      "Scripture": {
+        "type": "object",
+        "description": "One entry per chapter, keyed as {translation}_{book}_{chapter}",
+        "additionalProperties": {
+          "type": "object",
+          "properties": {
+            "translation": {"type": "string"}, "abbreviation": {"type": "string"}, "lang": {"type": "string"},
+            "language": {"type": "string"}, "direction": {"type": "string"}, "encoding": {"type": "string"},
+            "book_nr": {"type": "integer"}, "book_name": {"type": "string"}, "chapter": {"type": "integer"},
+            "name": {"type": "string"}, "ref": {"type": "array", "items": {"type": "string"}},
+            "verses": {"type": "array", "items": {"type": "object", "properties": {
+              "chapter": {"type": "integer"}, "verse": {"type": "integer"}, "name": {"type": "string"}, "text": {"type": "string"}}}}
+          }
+        }
+      },
+      "Problem": {
+        "type": "object",
+        "description": "RFC 9457 problem document",
+        "properties": {
+          "type": {"type": "string", "format": "uri"}, "title": {"type": "string"}, "status": {"type": "integer"},
+          "code": {"type": "string"}, "detail": {"type": "string"}, "instance": {"type": "string"}
+        },
+        "required": ["type", "title", "status", "code", "detail"]
+      }
+    },
+    "responses": {
+      "Problem": {"description": "Error", "content": {"application/problem+json": {"schema": {"$ref": "#/components/schemas/Problem"}}}}
+    },
+    "securitySchemes": {"bearer": {"type": "http", "scheme": "bearer", "description": "Optional bearer token; token holders are not rate limited."}}
+  }{{#IF TOKEN_REQUIRED}},
+  "security": [{"bearer": []}]{{/IF}}
+}

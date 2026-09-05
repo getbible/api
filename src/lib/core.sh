@@ -66,19 +66,20 @@ GB_DRY_RUN="${GB_DRY_RUN:-false}" # render and report, write nothing outside tem
 # --- output ------------------------------------------------------------------
 gb_timestamp() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
+# Log lines go to stderr so functions can return data on stdout.
 gb_log() {
     local line
     line="[$(gb_timestamp)] $*"
-    printf '%s\n' "$line"
+    printf '%s\n' "$line" >&2
     if [[ -d "$GB_LOG" && -w "$GB_LOG" ]]; then
         printf '%s\n' "$line" >> "$GB_LOG/getbible.log" 2>/dev/null || true
     fi
 }
 
-gb_warn() { gb_log "WARNING: $*" >&2; }
+gb_warn() { gb_log "WARNING: $*"; }
 
 gb_die() {
-    gb_log "ERROR: $*" >&2
+    gb_log "ERROR: $*"
     exit 1
 }
 

@@ -14,7 +14,7 @@ GB_ARGS=("$@")
 GB_REPO_DIR="$(cd -- "$(dirname -- "$GB_SELF")" && pwd -P)"
 export GB_REPO_DIR
 
-for lib in core ui config registry users telegram nginx certs systemd logs access sync docs endpoint; do
+for lib in core ui config registry users telegram nginx certs systemd logs access sync python docs endpoint; do
     # shellcheck source=/dev/null
     source "$GB_REPO_DIR/src/lib/$lib.sh"
 done

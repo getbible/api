@@ -1,0 +1,77 @@
+"""Gunicorn settings for the getBible {{KIND}} endpoint, rendered by getbible.sh."""
+
+from __future__ import annotations
+
+import os
+
+PREFIX = "{{ENV_PREFIX}}"
+
+
+def _integer(name: str, default: int, minimum: int, maximum: int) -> int:
+    value = int(os.environ.get(name, default))
+    if not minimum <= value <= maximum:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
+# systemd hands over the listening socket (LISTEN_FDS); this bind is the
+# fallback when the service is started without its socket unit.
+bind = os.environ.get(f"{PREFIX}_BIND", "unix:{{SOCKET}}")
+workers = _integer(f"{PREFIX}_WORKERS", {{WORKERS}}, 1, 64)
+worker_class = "gthread"
+threads = _integer(f"{PREFIX}_THREADS", {{THREADS}}, 1, 64)
+preload_app = True
+
+backlog = _integer(f"{PREFIX}_BACKLOG", 2048, 64, 65535)
+timeout = _integer(f"{PREFIX}_WORKER_TIMEOUT", {{WORKER_TIMEOUT}}, 5, 600)
+graceful_timeout = _integer(f"{PREFIX}_GRACEFUL_TIMEOUT", 30, 5, 300)
+keepalive = _integer(f"{PREFIX}_KEEPALIVE", 5, 1, 60)
+
+# Recycling caps process-local librarian caches without synchronised restarts.
+max_requests = _integer(f"{PREFIX}_MAX_REQUESTS", 10000, 100, 1000000)
+max_requests_jitter = _integer(f"{PREFIX}_MAX_REQUESTS_JITTER", 1000, 0, 100000)
+
+limit_request_line = 4094
+limit_request_fields = 50
+limit_request_field_size = 8190
+worker_tmp_dir = os.environ.get(f"{PREFIX}_WORKER_TMP_DIR", "/dev/shm")
+
+# The application writes its own JSON access log; gunicorn keeps lifecycle
+# messages on stderr for journald.
+accesslog = None
+errorlog = "-"
+loglevel = os.environ.get(f"{PREFIX}_GUNICORN_LOG_LEVEL", "info")
+capture_output = True
+umask = 0o007
+
+
+def on_starting(server):
+    """Warm the configured translations before workers fork so their indexes
+    are shared copy-on-write (search only; the list is empty for query)."""
+    translations = tuple(
+        code.strip().casefold()
+        for code in os.environ.get(f"{PREFIX}_WARM_TRANSLATIONS", "").split(",")
+        if code.strip()
+    )
+    if not translations:
+        return
+    from {{PACKAGE}}.wsgi import app
+
+    bible = app.extensions["getbible"]
+    for translation in dict.fromkeys(translations):
+        try:
+            report = bible.warm_translation(translation, diacritics="fold")
+        except Exception:
+            server.log.exception("Failed to warm translation %s", translation)
+            raise
+        server.log.info("Warmed translation %s at sha=%s", translation, report.get("sha"))
+
+
+def when_ready(server):
+    server.log.info("getBible {{KIND}} endpoint ready: workers=%s threads=%s", workers, threads)
+
+
+def worker_exit(server, worker):
+    from {{PACKAGE}}.wsgi import app
+
+    app.extensions["getbible"].close()
