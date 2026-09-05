@@ -36,6 +36,19 @@ timestamps. nginx gets a rendered map, `getbible/tokens/<slug>.map`, keyed
 by `"<domain> Bearer <token>"`, so a token is valid only on the endpoint
 that issued it and its id (never the secret) appears in logs and analytics.
 
+Both the token store and generated secret maps have root-only mode 0600;
+map directories have mode 0700. Expiry is evaluated on every request against
+nginx's current epoch time, independent of the server timezone or reload
+schedule. `--expires 2027-01-01` remains valid through that UTC date and expires
+at 00:00 UTC on January 2. Expiration also removes the metered-mode exemption.
+Revocation updates the generated maps through the normal endpoint apply.
+
+Token-only data responses use `Cache-Control: private, no-store`; nginx and
+Cloudflare shared caches are bypassed. When a proxied endpoint becomes
+token-only, previously cached content is purged for that host before origin
+activation. This needs Cloudflare Cache Purge permission. Open/metered
+endpoints retain their configured public caching behavior.
+
 ```sh
 getbible.sh token DOMAIN add "Mobile app"            # prints the token once
 getbible.sh token DOMAIN add "Partner" --expires 2027-01-01

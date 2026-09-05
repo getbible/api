@@ -67,7 +67,7 @@ it_check "preflight cors"            "access-control-allow-origin: *" "$(it_curl
 
 echo "-- metered access --"
 "$IT_ROOT/getbible.sh" limits "$DOMAIN" --rate 5 --burst 10 --hour 60 --day 1000000 >/dev/null 2>&1
-it_nginx_restart
+it_nginx_reload
 it_check "limits rendered"           "burst=10"         "$(cat "$IT_SB/etc/nginx/getbible/$DOMAIN/limits.conf")"
 for _ in $(seq 1 40); do it_status "$DOMAIN" /v2/kjv/1/1.json >/dev/null; done
 it_check "burst exhausted -> 429"    "429"              "$(it_status "$DOMAIN" /v2/kjv/1/1.json)"
@@ -79,20 +79,48 @@ it_check "log has full uri"          '"uri":"/v2/kjv/1/1.json"' "$(tail -1 "$IT_
 
 echo "-- token-only access --"
 "$IT_ROOT/getbible.sh" access "$DOMAIN" token >/dev/null 2>&1
-it_nginx_restart
+it_nginx_reload
 it_check "no token -> 401"           "401"              "$(it_status "$DOMAIN" /v2/kjv/1/1.json)"
 it_check "401 www-authenticate"      "bearer"           "$(it_header "$DOMAIN" /v2/kjv/1/1.json www-authenticate)"
 it_check "401 problem body"          '"code":"unauthorized"' "$(it_body "$DOMAIN" /v2/kjv/1/1.json)"
 it_check "valid token -> 200"        "200"              "$(it_status "$DOMAIN" /v2/kjv/1/1.json -H "Authorization: Bearer $TOKEN")"
+it_check "protected JSON is not shared-cacheable" "private, no-store" "$(it_headers "$DOMAIN" /v2/kjv/1/1.json -H "Authorization: Bearer $TOKEN" | grep -i '^cache-control')"
+it_check "protected SHA is not shared-cacheable" "private, no-store" "$(it_headers "$DOMAIN" /v2/kjv/1/1.sha -H "Authorization: Bearer $TOKEN" | grep -i '^cache-control')"
+it_check "protected text is not shared-cacheable" "private, no-store" "$(it_headers "$DOMAIN" /v2/kjv/readme.txt -H "Authorization: Bearer $TOKEN" | grep -i '^cache-control')"
 it_check "wrong token -> 401"        "401"              "$(it_status "$DOMAIN" /v2/kjv/1/1.json -H "Authorization: Bearer gbwrong")"
 it_check "docs still public"         "200"              "$(it_status "$DOMAIN" /)"
 it_check "preflight still public"    "204"              "$(it_status "$DOMAIN" /v2/kjv/1/1.json -X OPTIONS)"
 
 echo "-- open access --"
 "$IT_ROOT/getbible.sh" access "$DOMAIN" open >/dev/null 2>&1
-it_nginx_restart
+it_nginx_reload
 for _ in $(seq 1 40); do it_status "$DOMAIN" /v2/kjv/1/1.json >/dev/null; done
 it_check "open: no limits"           "200"              "$(it_status "$DOMAIN" /v2/kjv/1/1.json)"
+
+echo "-- live static rotation --"
+# Keep requests flowing while exchanging complete releases. Every response
+# must remain valid; a 404/5xx or a partial JSON document fails the test.
+NEXT_REL="$IT_SB/srv/getbible/$DOMAIN/releases/v2/20260102T000000Z-abcdef2"
+cp -a "$REL" "$NEXT_REL"
+printf '{"rotation":"complete"}\n' > "$NEXT_REL/kjv/1/1.json"
+MASTER_BEFORE="$(cat "$IT_SB/run/nginx.pid")"
+(
+    for _ in $(seq 1 50); do
+        curl --silent --show-error --fail --insecure --noproxy '*' --max-time 5 \
+            --resolve "$DOMAIN:$IT_HTTPS_PORT:127.0.0.1" \
+            "https://$DOMAIN:$IT_HTTPS_PORT/v2/kjv/1/1.json" | python3 -c 'import json,sys; json.load(sys.stdin)' || exit 1
+    done
+) > "$IT_SB/rotation-probe.log" 2>&1 &
+PROBE_PID="$!"
+for _ in $(seq 1 15); do
+    ln -s "$NEXT_REL" "$IT_SB/srv/getbible/$DOMAIN/v2.next"
+    mv -Tf "$IT_SB/srv/getbible/$DOMAIN/v2.next" "$IT_SB/srv/getbible/$DOMAIN/v2"
+    ln -s "$REL" "$IT_SB/srv/getbible/$DOMAIN/v2.next"
+    mv -Tf "$IT_SB/srv/getbible/$DOMAIN/v2.next" "$IT_SB/srv/getbible/$DOMAIN/v2"
+done
+if wait "$PROBE_PID"; then PROBE_RESULT=ok; else PROBE_RESULT="$(cat "$IT_SB/rotation-probe.log")"; fi
+it_check "all requests valid during rotation" "ok" "$PROBE_RESULT"
+it_check "rotation preserves nginx master" "$MASTER_BEFORE" "$(cat "$IT_SB/run/nginx.pid")"
 
 echo "-- idempotent re-apply --"
 BEFORE="$(find "$IT_SB/etc/nginx" -type f -exec sha256sum {} + | sort)"

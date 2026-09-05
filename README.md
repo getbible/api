@@ -11,7 +11,8 @@ a server, securely and at high volume.
 - **Runtime endpoints**: the `query` (references to verses) and `search`
   (full-text search) services built on the getBible librarian, each an
   immutable release run by gunicorn as its own sandboxed user behind a
-  systemd socket, proxied and cached by nginx.
+  separate systemd socket for each deployment. Candidates pass readiness before
+  nginx switches traffic; old workers drain before their backend stops.
 - **Access modes** per endpoint: open, metered (public budget per address,
   token holders unlimited) or token only, with bearer tokens issued from
   the menu.
@@ -26,6 +27,31 @@ cd /opt/getbible/api
 sudo ./getbible.sh install-deps
 sudo ./getbible.sh
 ```
+
+Ubuntu **24.04 and 26.04** are the deployment targets. The manager detects the
+OS, architecture and capabilities; Debian/Ubuntu prerequisites use `apt`.
+Other glibc Linux hosts need compatible tools, systemd and nginx installed
+with their package manager. Managed runtimes cover x86_64 and aarch64 with
+glibc 2.28 or newer.
+
+Runtime CPython is installed under `/opt/getbible/python` from a reviewed,
+SHA-256-verified catalog covering Python 3.12, 3.13 and 3.14. Interpreter,
+standard library and virtual environments belong to the application, so
+distro Python updates do not replace them. Updates are explicit:
+
+```sh
+sudo ./getbible.sh list
+sudo ./getbible.sh runtime versions
+sudo ./getbible.sh update query.getbible.net
+sudo ./getbible.sh runtime query.getbible.net update --python 3.14
+sudo ./getbible.sh runtime query.getbible.net rollback
+```
+
+Ordinary `update` applies reviewed application/package changes while retaining
+the endpoint's exact Python patch. Explicit `runtime ... update` adopts the
+catalog's latest patch in the selected family. Allow memory for both runtime
+generations during upgrades. The kernel, glibc, nginx and systemd remain host
+dependencies; plan their maintenance separately.
 
 Documentation:
 

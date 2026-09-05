@@ -20,7 +20,7 @@ the menu. The libraries:
 | `users`, `systemd`, `certs`, `nginx` | system users and groups; units and timers; certbot; render, stage, test, install, reload, drift |
 | `access` | access modes, limits, tokens and their nginx snippets |
 | `sync` | sync users, deploy keys, sync units |
-| `python` | immutable runtime releases |
+| `platform`, `python` | host capability detection, reviewed standalone CPython distributions and immutable runtime releases |
 | `logs`, `analytics`, `telegram`, `cloudflare` | rotation, reports, notifications, Cloudflare |
 | `docs`, `endpoint`, `update`, `migrate`, `doctor`, `menu` | documentation pages, the endpoint pipeline, update, legacy migration, host checks, the menu tree |
 
@@ -28,8 +28,10 @@ Endpoint types live in `src/types/<type>/type.sh` and implement
 `type_<type>_prepare`, `_render_locations`, `_finish`, `_remove`,
 `_status`, `_render_docs`, `_deploy_cli`, `_deploy_interactive`,
 `_menu_items` and `_menu_action`. `endpoint_apply` is the one pipeline both
-share: prepare, docs, render global and endpoint nginx files, stage, test,
-install, certificate (two-phase TLS), finish, Cloudflare, state.
+share: protect shared-cache access, prepare a ready candidate, render docs and
+nginx files, snapshot routing, install/test/reload, certificate (two-phase TLS),
+commit activation, retire old workers' backends, Cloudflare and state. Failed
+activation restores prior nginx files and runtime generation state.
 
 Helper programs in `src/bin/` are installed to `/usr/local/lib/getbible`
 for timers and hooks that run as other users: `getbible-sync`,
@@ -46,7 +48,9 @@ rest (`getbible-render`, `getbible-tokens`, `getbible-analytics`,
 - `snippets/getbible/`: TLS policy, headers, HTML headers, problem
   documents, proxy settings, ACME location.
 - `getbible/<domain>/`: `server.conf` (tuning), `limits.conf`, `auth.conf`;
-  `getbible/tokens/<slug>.map`.
+  `getbible/tokens/<slug>.map` and `getbible/token-validity/<slug>.map` enforce
+  endpoint identity and per-request UTC token expiry. Map directories are
+  root-only; all hosts' maps migrate together with the shared configuration.
 - `sites-available/<domain>.conf`: the vhost, port 80 with the ACME
   location and a redirect, port 443 with everything above and the type's
   locations.
@@ -58,3 +62,10 @@ per-endpoint state, sync homes), `/var/backups/getbible` holds backup sets,
 `/var/log/getbible` holds logs. Data roots are `/srv/getbible` (static) and
 `/opt/getbible` (runtime releases), with librarian caches under
 `/var/cache/getbible/<kind>`.
+
+Runtime code releases and deployment generations are distinct. A generation
+holds environment, service/socket configuration and a release reference;
+configuration-only changes can reuse code while creating a new ready process.
+`active` and `previous` preserve complete deployment identities. Owned CPython
+installations are content-identified by version, architecture, build and
+checksum under `/opt/getbible/python`; OS package updates do not rewrite them.

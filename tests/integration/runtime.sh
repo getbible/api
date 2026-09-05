@@ -24,18 +24,26 @@ for kind in query search; do
 done
 
 start_gunicorn() {
-    local kind="$1" release env_file socket_dir
+    local kind="$1" release deployment env_file socket socket_dir
     release="$(readlink -f "$IT_SB/opt/getbible/$kind/current")"
-    env_file="$IT_SB/etc/getbible/endpoints/$kind.example.test/runtime.env"
-    socket_dir="$IT_SB/run/getbible/$kind"
+    deployment="$(readlink -f "$IT_SB/opt/getbible/$kind/active")"
+    env_file="$deployment/runtime.env"
+    socket="$( # shellcheck source=/dev/null
+        source "$env_file"; bind_name="${kind^^}_BIND"; printf '%s' "${!bind_name}"
+    )"
+    socket="${socket#unix:}"
+    socket_dir="$(dirname "$socket")"
     mkdir -p "$socket_dir" "$IT_SB/var/log/getbible/$kind.example.test/app" "$IT_SB/var/cache/getbible/$kind/librarian"
+    # The sandbox cannot create the production accounts. Run unprivileged
+    # here; systemd.sh separately verifies the actual account/ACL/unit setup.
+    chown -R "$IT_NGINX_USER:" "$socket_dir" "$IT_SB/var/log/getbible/$kind.example.test/app" "$IT_SB/var/cache/getbible/$kind"
     ( set -a; # shellcheck source=/dev/null
       source "$env_file"; set +a
-      exec "$release/.venv/bin/gunicorn" --config "$release/gunicorn.conf.py" --workers 1 \
+      exec runuser -u "$IT_NGINX_USER" -- "$release/.venv/bin/gunicorn" --config "$deployment/gunicorn.conf.py" --workers 1 \
           "$(grep '^WSGI=' "$IT_ROOT/src/apps/$kind/manifest.conf" | cut -d= -f2)" ) >"$IT_SB/gunicorn-$kind.log" 2>&1 &
     PIDS+=("$!")
     local waited=0
-    until curl --silent --fail --max-time 2 --unix-socket "$socket_dir/gunicorn.sock" http://localhost/readyz >/dev/null 2>&1; do
+    until curl --silent --fail --max-time 2 --unix-socket "$socket" http://localhost/readyz >/dev/null 2>&1; do
         sleep 0.5; waited=$((waited + 1))
         (( waited < 60 )) || { echo "gunicorn $kind did not become ready"; tail -20 "$IT_SB/gunicorn-$kind.log"; exit 1; }
     done
