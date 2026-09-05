@@ -109,11 +109,14 @@ if command -v nginx >/dev/null; then
     openssl req -x509 -newkey rsa:2048 -nodes -days 1 -keyout "$SB/etc/letsencrypt/live/$D/privkey.pem" -out "$SB/etc/letsencrypt/live/$D/fullchain.pem" -subj "/CN=$D" 2>/dev/null
     "$GB" apply "$D" >/dev/null 2>&1
     mkdir -p "$SB/etc/nginx/logs" "$SB/var/cache/nginx/getbible"
+    # nginx -t binds every listener; move them to high ports so the test
+    # needs no privileges.
+    sed -i -e 's/listen 80;/listen 127.0.0.1:18180;/' -e 's/listen 443 ssl\(.*\);/listen 127.0.0.1:18543 ssl\1;/' "$SB/etc/nginx/sites-available/$D.conf"
     cat > "$SB/etc/nginx/nginx-test.conf" <<EOF
 pid $SB/nginx.pid;
 error_log stderr warn;
 events { worker_connections 16; }
-http { include /etc/nginx/mime.types; include $SB/etc/nginx/conf.d/*.conf; include $SB/etc/nginx/sites-enabled/*.conf; }
+http { access_log off; include /etc/nginx/mime.types; include $SB/etc/nginx/conf.d/*.conf; include $SB/etc/nginx/sites-enabled/*.conf; }
 EOF
     check "nginx -t"             "successful"              "$(nginx -t -c "$SB/etc/nginx/nginx-test.conf" -p "$SB/etc/nginx" 2>&1)"
 else
