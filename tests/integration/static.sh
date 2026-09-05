@@ -66,8 +66,8 @@ it_check "preflight 204"             "204"              "$(it_status "$DOMAIN" /
 it_check "preflight cors"            "access-control-allow-origin: *" "$(it_curl "$DOMAIN" /v2/kjv/1/1.json -X OPTIONS | grep -i '^access-control-allow-origin' | tr -d '\r')"
 
 echo "-- metered access --"
-"$IT_ROOT/getbible.sh" limits "$DOMAIN" --rate 5 --burst 10 --hour 100000 --day 1000000 >/dev/null 2>&1
-it_nginx_stop; it_nginx_start
+"$IT_ROOT/getbible.sh" limits "$DOMAIN" --rate 5 --burst 10 --hour 60 --day 1000000 >/dev/null 2>&1
+it_nginx_restart
 it_check "limits rendered"           "burst=10"         "$(cat "$IT_SB/etc/nginx/getbible/$DOMAIN/limits.conf")"
 for _ in $(seq 1 40); do it_status "$DOMAIN" /v2/kjv/1/1.json >/dev/null; done
 it_check "burst exhausted -> 429"    "429"              "$(it_status "$DOMAIN" /v2/kjv/1/1.json)"
@@ -79,7 +79,7 @@ it_check "log has full uri"          '"uri":"/v2/kjv/1/1.json"' "$(tail -1 "$IT_
 
 echo "-- token-only access --"
 "$IT_ROOT/getbible.sh" access "$DOMAIN" token >/dev/null 2>&1
-it_nginx_stop; it_nginx_start
+it_nginx_restart
 it_check "no token -> 401"           "401"              "$(it_status "$DOMAIN" /v2/kjv/1/1.json)"
 it_check "401 www-authenticate"      "bearer"           "$(it_header "$DOMAIN" /v2/kjv/1/1.json www-authenticate)"
 it_check "401 problem body"          '"code":"unauthorized"' "$(it_body "$DOMAIN" /v2/kjv/1/1.json)"
@@ -90,7 +90,7 @@ it_check "preflight still public"    "204"              "$(it_status "$DOMAIN" /
 
 echo "-- open access --"
 "$IT_ROOT/getbible.sh" access "$DOMAIN" open >/dev/null 2>&1
-it_nginx_stop; it_nginx_start
+it_nginx_restart
 for _ in $(seq 1 40); do it_status "$DOMAIN" /v2/kjv/1/1.json >/dev/null; done
 it_check "open: no limits"           "200"              "$(it_status "$DOMAIN" /v2/kjv/1/1.json)"
 

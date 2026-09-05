@@ -58,6 +58,7 @@ error_log $IT_SB/nginx-error.log warn;
 worker_processes 1;
 events { worker_connections 128; }
 http {
+    access_log off;
     include /etc/nginx/mime.types;
     include $IT_SB/etc/nginx/conf.d/*.conf;
     include $IT_SB/etc/nginx/sites-enabled/*.conf;
@@ -68,9 +69,25 @@ EOF
     sleep 0.5
 }
 
+# Fast shutdown, then wait until the master is really gone so the next start
+# never races an old process for the listening ports.
 it_nginx_stop() {
-    [[ -f "$IT_SB/run/nginx.pid" ]] && kill -QUIT "$(cat "$IT_SB/run/nginx.pid")" 2>/dev/null || true
-    sleep 0.3
+    local pid="" tries=0
+    [[ -f "$IT_SB/run/nginx.pid" ]] && pid="$(cat "$IT_SB/run/nginx.pid")"
+    [[ -n "$pid" ]] || return 0
+    kill -TERM "$pid" 2>/dev/null || return 0
+    while kill -0 "$pid" 2>/dev/null && (( tries < 100 )); do
+        sleep 0.1
+        tries=$((tries + 1))
+    done
+    kill -0 "$pid" 2>/dev/null && { kill -KILL "$pid" 2>/dev/null || true; sleep 0.2; }
+    rm -f "$IT_SB/run/nginx.pid"
+}
+
+# Restart after a configuration change; a start failure ends the test.
+it_nginx_restart() {
+    it_nginx_stop
+    it_nginx_start || { it_log "nginx failed to restart"; exit 1; }
 }
 
 # it_curl DOMAIN PATH [curl args...] -> prints "STATUS\n<headers>\n\n<body>"
