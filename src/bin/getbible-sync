@@ -146,7 +146,8 @@ chmod 0640 "$RELEASE/.revision"
 STEP="publish"
 SWAP="$GB_SYNC_DATA/.$GB_SYNC_VERSION.$$.tmp"
 ln -s "releases/$GB_SYNC_VERSION/$(basename "$RELEASE")" "$SWAP"
-mv -Tf -- "$SWAP" "$CURRENT"
+# rename(2) on the link itself; mv -T is not portable across coreutils here.
+python3 -c 'import os, sys; os.rename(sys.argv[1], sys.argv[2])' "$SWAP" "$CURRENT"
 SWAP=""
 PUBLISHED=true
 

@@ -32,7 +32,7 @@ cfg_set() {
     [[ "$value" != *$'\n'* ]] || gb_die "Configuration values cannot contain newlines ($key)."
     local dir tmp replaced=false line
     dir="$(dirname -- "$file")"
-    [[ -d "$dir" ]] || install -d -m 0750 -- "$dir"
+    [[ -d "$dir" ]] || gb_ensure_dir "$dir" 0750 || gb_die "Cannot create $dir"
     tmp="$file.tmp.$$"
     : > "$tmp"
     if [[ -f "$file" ]]; then

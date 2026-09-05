@@ -42,6 +42,9 @@ check "logrotate rendered"       "size 1G"                 "$(cat "$SB/etc/getbi
 check "docs page rendered"       "<h1>$D</h1>"             "$(cat "$SB/var/www/getbible/$D/index.html")"
 check "docs list version"        "https://$D/v2/"          "$(cat "$SB/var/www/getbible/$D/index.html")"
 check "tools installed"          "getbible-sync"           "$(ls "$SB/usr/local/lib/getbible/")"
+check "aio threads on 1.26"      "aio                threads;" "$(cat "$SB/etc/nginx/getbible/$D/server.conf")"
+# Implicit parents must stay traversable whichever coreutils created them.
+check "parents traversable"      "755 755 755"             "$(stat -c %a "$SB/srv/getbible" "$SB/var/www/getbible" "$SB/var/log/getbible" | tr '\n' ' ' | sed 's/ $//')"
 
 echo "-- TLS phase --"
 mkdir -p "$SB/etc/letsencrypt/live/$D" && touch "$SB/etc/letsencrypt/live/$D/fullchain.pem" "$SB/etc/letsencrypt/live/$D/privkey.pem"
@@ -90,6 +93,8 @@ echo "-- render and drift --"
 OUT="$SB/render-out"; mkdir -p "$OUT"
 "$GB" render "$D" --out "$OUT" >/dev/null 2>&1
 check "render writes site"       "server_name $D;"         "$(cat "$OUT/sites-available/$D.conf")"
+GB_NGINX_FAKE_VERSION=1.24.0 "$GB" render "$D" --out "$OUT" >/dev/null 2>&1
+check "aio off before 1.25.4"    "aio                off;"  "$(cat "$OUT/getbible/$D/server.conf")"
 BEFORE="$(find "$SB/etc/nginx" -type f -exec sha256sum {} + | sort)"
 "$GB" apply "$D" >/dev/null 2>&1
 AFTER="$(find "$SB/etc/nginx" -type f -exec sha256sum {} + | sort)"

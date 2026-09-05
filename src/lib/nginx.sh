@@ -7,6 +7,7 @@ GB_NGINX_LOADED=1
 
 NG_VERSION=""
 NG_HTTP2_NATIVE=false
+NG_AIO_THREADS=false
 NG_IPV6=false
 NG_BROTLI=false
 NG_AVAILABLE=false
@@ -54,6 +55,13 @@ nginx_detect() {
     NG_VERSION="${GB_NGINX_FAKE_VERSION:-${NG_VERSION:-1.24.0}}"
     if [[ "$(printf '%s\n1.25.1\n' "$NG_VERSION" | sort -V | head -1)" == "1.25.1" ]]; then
         NG_HTTP2_NATIVE=true
+    fi
+    # Before 1.25.4 a worker shutting down gracefully (every reload) could
+    # close connections that still had a threaded read in flight, so clients
+    # saw resets whenever a cached response was being served. Keep aio off
+    # on older builds; the API's files are small enough that it costs nothing.
+    if [[ "$(printf '%s\n1.25.4\n' "$NG_VERSION" | sort -V | head -1)" == "1.25.4" ]]; then
+        NG_AIO_THREADS=true
     fi
     if [[ -n "${GB_NGINX_FAKE_IPV6:-}" ]]; then
         NG_IPV6="$GB_NGINX_FAKE_IPV6"
@@ -146,7 +154,7 @@ nginx_render_endpoint() {
         "PROXY_CACHE=$proxy_cache" "CACHE_DIR=$GB_PREFIX/var/cache/nginx/getbible/$slug" || return 1
 
     gb_render "$GB_NGINX_SRC/snippets/server.conf.tmpl" "$stage/getbible/$domain/server.conf" \
-        "MAX_BODY=$max_body" "BROTLI=$NG_BROTLI" || return 1
+        "MAX_BODY=$max_body" "BROTLI=$NG_BROTLI" "AIO_THREADS=$NG_AIO_THREADS" || return 1
     access_render_limits "$stage/getbible/$domain/limits.conf" || return 1
     access_render_auth "$stage/getbible/$domain/auth.conf" || return 1
     tokens_render_map "$domain" "$stage/getbible/tokens/$slug.map" || return 1
