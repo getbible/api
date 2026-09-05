@@ -10,7 +10,9 @@ applies per domain.
 
 Settings > Cloudflare API token stores and verifies a scoped token
 (`/etc/getbible/cloudflare.conf`, root only). Scopes: Zone:Read, DNS:Edit,
-Zone Settings:Edit, Zone WAF:Edit, SSL and Certificates:Edit.
+Zone Settings:Edit, Zone WAF:Edit, SSL and Certificates:Edit, and Cache
+Purge:Purge for protected endpoint transitions. Limit the token to the zones
+managed by this installation.
 
 ## Per domain
 
@@ -29,7 +31,8 @@ hostname so the rest of the zone is untouched:
   "essentially off", SSL strict;
 - cache rule: `bypass` (default) so every request reaches the origin and its
   logs stay complete, or `respect` to cache per the origin's `Cache-Control`
-  (then origin logs only see cache misses);
+  (then origin logs only see cache misses). `respect` is available for
+  open/metered endpoints; token-only endpoints always bypass caching;
 - WAF custom rule skipping managed challenges and Cloudflare rate limiting
   for the host (DDoS protection stays on).
 
@@ -47,6 +50,15 @@ origin tools and applied only on explicit request.
 
 ## Plans
 
-Everything above works on the Free plan except where Cloudflare restricts a
-feature; the tool reports "not applied" with Cloudflare's message and
-continues. Rate limiting at the edge is not configured by this tool.
+Feature availability and API permissions depend on the account and plan.
+Optional WAF/zone settings can report "not applied" with Cloudflare's message.
+Security-critical cache protection does not silently continue: before a
+token-only transition, the manager installs a host-specific bypass rule and
+purges that hostname's cached content. A rejected purge or missing credentials
+aborts activation. It never falls back to purging the entire zone.
+
+If a protected transition fails, correct the token's Cache Purge permission
+and retry `sudo ./getbible.sh apply api.getbible.net`. Existing public data
+cannot be recalled from clients that already downloaded it. Review any
+independently managed CDN rules that could override the host's cache policy.
+Rate limiting at the edge is not configured by this tool.

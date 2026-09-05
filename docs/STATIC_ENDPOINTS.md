@@ -38,14 +38,22 @@ default, daily or monthly on request, "Sync now" any time) runs
 4. Export the source folder into a new release directory with rsync, copying
    only the allowed file types, skipping dotfiles, and **hard-linking every
    unchanged file from the previous release** so inodes and ETags survive.
-5. Verify: every `.sha` next to a `.json` must hold that file's SHA-1; every
+5. Verify every JSON document; every `.sha` must have a JSON sibling and hold
+   that file's SHA-1; every
    `hashes.json` manifest must describe existing files with matching
    digests. A failure deletes the export and leaves the old release live.
 6. Flip the version symlink (atomic for the whole tree; nginx keeps running).
-7. Keep the previous release for rollback, delete older ones.
+7. Keep the actual current and previous releases, including same-second
+   syncs. Older releases have a minimum one-hour cleanup grace period.
 8. Telegram: "Update live" with the commit, file count and changed count.
 
-Nothing in this pipeline runs as root and nothing reloads nginx.
+Nothing in this pipeline runs as root and nothing reloads nginx. Release
+directories are unique, concurrent runs are locked, and hard-linked files
+are never rewritten or have their metadata changed after export. Verification
+failure removes only the unpublished candidate. Responses already streaming
+keep their open file descriptors across rotation. Multiple independent HTTP
+requests can span different releases; the symlink switch is not a client-wide
+snapshot transaction.
 
 ## Serving
 
@@ -56,7 +64,9 @@ Nothing in this pipeline runs as root and nothing reloads nginx.
 - CORS is open on every response. Security headers: `nosniff`, a locked CSP,
   `no-referrer`, `Cross-Origin-Resource-Policy: cross-origin`, HSTS.
 - `Cache-Control: public, max-age=3600` (documents) and `300` (checksums),
-  both with stale-while-revalidate; ETags on everything; gzip and brotli.
+  both with stale-while-revalidate in open/metered mode. Token-only documents,
+  checksums and HTML use `private, no-store` with `Vary: Authorization`.
+  ETags and conditional requests remain available; gzip and optional brotli.
 - The domain root serves the documentation page; `/healthz` answers for
   monitors. A version's own `openapi.json`, when the repository ships one,
   is linked from that page.

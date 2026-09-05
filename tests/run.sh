@@ -22,7 +22,7 @@ step "shellcheck"
 if command -v shellcheck >/dev/null; then
     shellcheck -x -s bash getbible.sh src/lib/*.sh src/types/*/type.sh src/bin/getbible-sync src/bin/getbible-notify src/bin/getbible-logrotate-hook tests/run.sh tests/cli/*.sh tests/integration/*.sh || fail "shellcheck"
 else
-    echo "shellcheck not installed; skipped"
+    if [[ "${CI:-false}" == true ]]; then fail "shellcheck is required in CI"; else echo "shellcheck not installed; skipped"; fi
 fi
 
 step "runtime kinds carry every required file"
@@ -41,15 +41,23 @@ if [[ ! -x "$VENV/bin/python" ]]; then
     echo "creating $VENV"
     python3 -m venv "$VENV"
     "$VENV/bin/python" -m pip install --quiet --upgrade pip
-    "$VENV/bin/python" -m pip install --quiet --requirement src/apps/query/requirements.txt
 fi
+if [[ "$("$VENV/bin/python" -c 'import sys; print(sys.version_info[:2])')" != "$(python3 -c 'import sys; print(sys.version_info[:2])')" ]]; then
+    printf 'The test virtual environment uses another Python version; choose a fresh GB_TEST_VENV.\n' >&2
+    exit 1
+fi
+# Install both kinds on every invocation: cached virtual environments must
+# follow changes to the pinned dependencies instead of silently staying stale.
+"$VENV/bin/python" -m pip install --quiet --requirement src/apps/query/requirements.txt --requirement src/apps/search/requirements.txt
 "$VENV/bin/python" -m pip install --quiet --no-deps --force-reinstall src/apps/common src/apps/query src/apps/search
+"$VENV/bin/python" -m pip check || fail "python dependency compatibility"
 rm -rf src/apps/*/build src/apps/*/*.egg-info
-"$VENV/bin/python" -m unittest discover -s tests/python -t . -v 2>&1 | tail -30 || true
-"$VENV/bin/python" -m unittest discover -s tests/python -t . >/dev/null 2>&1 || fail "python unit tests"
+"$VENV/bin/python" -m unittest discover -s tests/python -t . -v 2>&1 | tail -50 || fail "python unit tests"
 
 step "command line tests (sandbox prefix)"
-bash tests/cli/test_cli.sh || fail "cli tests"
+for script in tests/cli/test_*.sh; do
+    bash "$script" || fail "cli tests: $script"
+done
 
 if [[ "$ALL" == true ]]; then
     step "integration"
@@ -57,7 +65,7 @@ if [[ "$ALL" == true ]]; then
         bash tests/integration/static.sh || fail "integration static"
         bash tests/integration/runtime.sh || fail "integration runtime"
     else
-        echo "needs nginx and root; skipped"
+        fail "--all requires nginx and root; integration tests were not run"
     fi
 fi
 

@@ -10,7 +10,11 @@ GB="$ROOT/getbible.sh"
 PASS=0; FAIL=0
 check() {
     local label="$1" expected="$2" actual="$3"
-    if [[ "$actual" == *"$expected"* ]]; then printf '  ok    %s\n' "$label"; PASS=$((PASS + 1)); else printf '  FAIL  %-48s expected %-24s got: %s\n' "$label" "$expected" "${actual:0:160}"; FAIL=$((FAIL + 1)); fi
+    if { [[ -z "$expected" && -z "$actual" ]]; } || { [[ -n "$expected" && "$actual" == *"$expected"* ]]; }; then
+        printf '  ok    %s\n' "$label"; PASS=$((PASS + 1))
+    else
+        printf '  FAIL  %-48s expected %-24s got: %s\n' "$label" "$expected" "${actual:0:160}"; FAIL=$((FAIL + 1))
+    fi
 }
 D=static.example.test
 "$GB" deploy static --domain "$D" --version v2 --repo git@github.com:getbible/v2_scripture.git --extensions json,sha,txt >/dev/null 2>&1 || { echo "deploy failed"; exit 1; }

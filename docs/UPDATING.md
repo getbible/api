@@ -1,38 +1,98 @@
-# Updating
+# Updating and recovery
+
+Pull reviewed repository changes, then apply them to one endpoint first:
 
 ```sh
 cd /opt/getbible/api
 sudo git pull --ff-only
-sudo ./getbible.sh update          # or: menu > Update all endpoints
+sudo ./getbible.sh doctor
+sudo ./getbible.sh update query.getbible.net
+sudo ./getbible.sh status query.getbible.net
+sudo ./getbible.sh update
 ```
 
-Update re-renders every endpoint from the current templates and code:
+The menu also offers "git pull first, then update" and refuses to pull a dirty
+checkout. `update DOMAIN` applies that endpoint; `update` processes all
+registered endpoints and reports failures. Manager mutations are locked to
+prevent concurrent commands from interleaving configuration changes.
 
-1. the log rotation configuration and timer;
-2. for every endpoint: users, directories, sync units, documentation page,
-   nginx files (staged, compared with what is installed, backed up,
-   installed, `nginx -t`, reloaded once), and for runtime endpoints a new
-   release when the code, requirements or gunicorn template changed, then a
-   restart behind the readiness gate with automatic rollback;
-3. Cloudflare address ranges when a proxied domain exists;
-4. a Telegram summary.
+## Choose the operation
 
-Running it twice changes nothing. A file that was edited by hand on the
-server is detected through the ledger of installed hashes
-(`/var/lib/getbible/ledger`): interactively you see the diff and choose,
-non-interactively (`--yes`) it is kept and reported. Backups of every
-replaced file are under `/var/backups/getbible/`.
+| Operation | Result |
+| --- | --- |
+| `update [DOMAIN]` | Applies checked-out templates, helpers, configuration, documentation and changed runtime code/dependency pins. Retains the selected exact Python patch. |
+| `runtime DOMAIN update` | Rebuilds application dependencies and adopts the latest reviewed patch of the endpoint's selected Python family. |
+| `runtime DOMAIN update --python 3.14` | Explicitly selects the catalog's current 3.14 patch and creates a new runtime release. An exact catalog patch is also accepted. |
+| `runtime DOMAIN redeploy` | Starts a fresh deployment of the current release and settings, rebuilding code only if its inputs changed. |
+| `runtime DOMAIN set WORKERS 4` | Validates the setting and activates a new generation; the running process receives the updated configuration. |
+| `runtime DOMAIN rollback` | Activates the retained previous code, interpreter and runtime settings, preserving current access mode, quotas and tokens. |
+| `sync DOMAIN v2` | Fetches and verifies the selected static data version, then atomically changes its live symlink when needed. |
 
-The menu's "git pull first, then update" refuses a checkout with local
-modifications.
+See `runtime versions` for the reviewed interpreter catalog. New upstream
+Python releases become eligible after a repository change updates
+`src/python/distributions.lock`; deployment never queries an unpinned latest
+interpreter feed. Application dependency changes belong in the kind's pinned
+`requirements.txt`. Built releases retain Python provenance and `packages.lock`.
+Host Python updates cannot replace managed runtime Python or its standard
+library. Kernel, glibc, systemd and nginx updates remain host maintenance.
 
-## Rolling back
+## How an update preserves service
 
-- nginx: the previous backup set restores the files (`cp` them back, then
-  `nginx -t` and `systemctl reload nginx`); the update itself restores them
-  automatically when `nginx -t` fails.
-- runtime: `ln -sfn <previous release> /opt/getbible/<kind>/current` and
-  `systemctl restart getbible-<kind>`; the update does this automatically
-  when a new release fails its readiness check.
-- static: `ln -sfn releases/<version>/<previous> /srv/getbible/<domain>/<version>`
-  as the sync user; the previous release is always kept.
+Runtime releases build beside the live release. Each candidate gets a separate
+environment, systemd service and socket. It must serve real scripture through
+`/readyz`; search also passes its search probe before traffic changes. nginx
+configuration is backed up, validated with `nginx -t`, and gracefully reloaded.
+The old backend stays alive until the recorded pre-reload nginx workers exit;
+PID start times guard against PID reuse. Retirement runs independently of the
+CLI. Allow temporary memory for both generations and their warm-up work.
+
+Preparation failures leave the old runtime serving. Activation failures restore
+the prior routing and deployment state; a failed routing recovery retains
+processes and reports the failure for inspection. nginx is never restarted by
+the deployment pipeline. Static data rotation needs neither a runtime restart
+nor an nginx reload: incomplete or invalid exports are never published.
+
+Unchanged code and configuration reuse their existing deployment. Hand-edited
+managed files are detected against `/var/lib/getbible/ledger`: an interactive
+update asks before replacing them; `--yes` keeps and reports them. Review those
+reports because retained local edits may prevent a requested change from taking
+effect. Backup sets are retained under `/var/backups/getbible/`.
+
+## Migrate an existing installation
+
+Run the same pull, `doctor`, and per-endpoint `update` commands above. Existing
+single-service runtime installations are captured as rollback generations;
+the first successful update moves them to owned Python and isolated deployment
+generations. An existing exact managed Python version remains selected on
+ordinary updates. Token-map permissions and per-request expiry maps migrate
+with the nginx configuration.
+
+Before updating a token-only endpoint behind Cloudflare, grant the connector
+Cache Purge permission. The update disables shared caching and purges that
+hostname's previously public content before activation. Missing permission or
+a failed purge aborts the protected transition. See [CLOUDFLARE.md](CLOUDFLARE.md).
+
+## Recovery and operational checks
+
+```sh
+sudo ./getbible.sh status query.getbible.net
+sudo ./getbible.sh logs query.getbible.net journal --lines 100
+sudo ./getbible.sh runtime query.getbible.net rollback
+sudo nginx -t
+```
+
+Use the rollback command instead of manually changing `current` or restarting
+a historical unit name: code, settings, service names and sockets must agree.
+If automatic routing restoration reports failure, inspect the nginx error and
+backup sets before retrying; retain the old generation and interpreter files.
+Manual nginx recovery must validate configuration before `systemctl reload
+nginx`. Static data recovery can republish a corrected source commit with
+`sync DOMAIN v2 --force`; retained releases also permit an operator-controlled
+atomic symlink restore while holding that version's sync lock.
+
+CI exercises supported Python families, real nginx/Gunicorn, actual systemd
+service users, upgrades, failure recovery and a request-load smoke test. These
+checks do not establish an enterprise SLA. Before production, test the actual
+Bible corpus and expected concurrency, monitor HTTPS query/search responses,
+verify backups and recovery on a separate host, and establish capacity and
+host-maintenance procedures.

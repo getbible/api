@@ -11,6 +11,7 @@ IT_HTTP_PORT="${IT_HTTP_PORT:-18080}"
 IT_HTTPS_PORT="${IT_HTTPS_PORT:-18443}"
 IT_PASS=0
 IT_FAIL=0
+IT_NGINX_USER="${IT_NGINX_USER:-www-data}"
 
 export GB_PREFIX="$IT_SB" GB_YES=true GB_UI=none GB_NGINX_FAKE_IPV6=false
 # Talk to the local nginx directly, never through an environment proxy.
@@ -22,7 +23,7 @@ it_log() { printf '[it] %s\n' "$*"; }
 it_check() {
     # it_check LABEL EXPECTED ACTUAL (substring, case-insensitive)
     local label="$1" expected="$2" actual="$3"
-    if [[ "${actual,,}" == *"${expected,,}"* ]]; then
+    if { [[ -z "$expected" && -z "$actual" ]]; } || { [[ -n "$expected" && "${actual,,}" == *"${expected,,}"* ]]; }; then
         printf '  ok    %s\n' "$label"
         IT_PASS=$((IT_PASS + 1))
     else
@@ -53,7 +54,7 @@ it_nginx_start() {
     done
     cat > "$conf" <<EOF
 pid $IT_SB/run/nginx.pid;
-user root root;
+user $IT_NGINX_USER;
 error_log $IT_SB/nginx-error.log warn;
 worker_processes 1;
 events { worker_connections 128; }
@@ -85,9 +86,15 @@ it_nginx_stop() {
 }
 
 # Restart after a configuration change; a start failure ends the test.
-it_nginx_restart() {
-    it_nginx_stop
-    it_nginx_start || { it_log "nginx failed to restart"; exit 1; }
+it_nginx_reload() {
+    local conf="$IT_SB/etc/nginx/nginx-test.conf" site
+    for site in "$IT_SB"/etc/nginx/sites-enabled/*.conf; do
+        sed -i -e "s/listen 80;/listen 127.0.0.1:$IT_HTTP_PORT;/" \
+               -e "s/listen 443 ssl\(.*\);/listen 127.0.0.1:$IT_HTTPS_PORT ssl\1;/" "$(readlink -f "$site")"
+    done
+    nginx -t -c "$conf" -p "$IT_SB/etc/nginx"
+    nginx -s reload -c "$conf" -p "$IT_SB/etc/nginx"
+    sleep 0.5
 }
 
 # it_curl DOMAIN PATH [curl args...] -> prints "STATUS\n<headers>\n\n<body>"

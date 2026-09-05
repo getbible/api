@@ -4,25 +4,65 @@ on:
   push:
     branches: [master, main, staging]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   tests:
-    runs-on: ubuntu-24.04
+    name: Ubuntu ${{ matrix.os }} / Python ${{ matrix.python }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: "24.04"
+            python: "3.12"
+          - os: "24.04"
+            python: "3.13"
+          - os: "26.04"
+            python: "3.14"
+    runs-on: ubuntu-${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python }}
           cache: pip
       - name: Install nginx, shellcheck and tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y nginx shellcheck rsync logrotate openssh-client whiptail
+          sudo apt-get install -y nginx shellcheck rsync logrotate openssh-client whiptail acl
           sudo systemctl stop nginx || true
       - name: Lint, unit and command line tests
         run: tests/run.sh
       - name: Integration tests (real nginx and gunicorn)
-        run: sudo -E env "PATH=$PATH" GB_TEST_VENV="$PWD/.venv-test" tests/run.sh --all
+        run: |
+          sudo -E env "PATH=$PATH" tests/integration/static.sh
+          sudo -E env "PATH=$PATH" tests/integration/runtime.sh
+
+  systemd:
+    name: Production services / Ubuntu ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ["24.04", "26.04"]
+    runs-on: ubuntu-${{ matrix.os }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the deployment prerequisites using the host's Python
+        run: sudo ./getbible.sh install-deps --yes
+      - name: Actual systemd deployment, upgrades, permissions and recovery
+        run: |
+          sudo env GB_CI_DISPOSABLE_HOST=1 tests/integration/systemd.sh 2>&1 | tee /tmp/getbible-systemd-test.log
+      - name: Capture the service journal on failure
+        if: failure()
+        run: sudo journalctl -u 'getbible-*' --no-pager -n 500 > /tmp/getbible-systemd-journal.log
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: systemd-ubuntu-${{ matrix.os }}
+          path: /tmp/getbible-systemd-*.log
+          retention-days: 7

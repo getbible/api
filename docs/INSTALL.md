@@ -1,7 +1,12 @@
 # Installing on a server
 
-One Ubuntu (22.04 or 24.04) server, DNS for each endpoint domain pointing at
-it, and a shell with sudo. Everything else is installed by the tool.
+Start with Ubuntu 24.04 or 26.04, DNS for each endpoint domain, and sudo.
+The manager detects `/etc/os-release`, architecture, glibc, nginx capabilities
+and available tools. `install-deps` uses `apt` on Debian/Ubuntu; on other Linux
+distributions it reports the required packages for manual installation.
+Live deployment requires systemd, a compatible nginx configuration layout,
+and glibc 2.28 or newer on x86_64 or aarch64. Alpine/musl, other architectures
+and non-Linux hosts are not supported runtime targets.
 
 ## 1. Clone
 
@@ -19,12 +24,27 @@ action (see `UPDATING.md`).
 ```sh
 sudo ./getbible.sh install-deps     # nginx, certbot, python3-venv, whiptail, rsync, git, acl, ...
 sudo ./getbible.sh doctor           # what the host looks like
+sudo ./getbible.sh runtime versions # reviewed CPython versions and builds
 sudo ./getbible.sh                  # the menu
 ```
 
 The first run creates `/etc/getbible` with the global configuration, the
 `getbible-readers` and `getbible-notify` groups, the log rotation timer and the
 helper programs under `/usr/local/lib/getbible`.
+
+Runtime Python is separate from the host's management Python. First deployment
+downloads a checksum-verified standalone CPython distribution and installs
+packages into a new release. `auto` selects the reviewed 3.12 family on Ubuntu
+24.04 and 3.14 on Ubuntu 26.04; `--python 3.13` or an exact catalog patch can
+override it. The selected exact patch is recorded per endpoint. No timer
+upgrades runtime Python or its packages, and host Python upgrades do not
+replace either its interpreter or standard library.
+
+Provide network access to GitHub release assets, the Python package index,
+your data repositories, and configured certificate/Cloudflare/Telegram
+services. Size runtime hosts for the old and candidate workers to coexist
+during an update, plus release/interpreter storage. OS libraries, the kernel,
+nginx and systemd still follow host maintenance policy.
 
 ## 3. Telegram (recommended first)
 
@@ -43,8 +63,9 @@ Details: `STATIC_ENDPOINTS.md`, `RUNTIME_ENDPOINTS.md`.
 
 Certificates are requested from Let's Encrypt automatically once the domain's
 HTTP vhost is up. When certbot cannot reach Let's Encrypt (DNS not yet live,
-port 80 blocked) the endpoint stays HTTP-only; run "Re-apply configuration"
-on the endpoint once that is fixed.
+port 80 blocked), HTTPS deployment is incomplete: HTTP serves ACME challenges
+and redirects normal requests to HTTPS. Fix certificate issuance and run
+"Re-apply configuration" before exposing the endpoint to clients.
 
 ## 5. Migrating an existing server
 
@@ -64,6 +85,8 @@ and reloads nginx. Deploy the new endpoints first, then migrate.
 | `/etc/nginx/sites-available/<domain>.conf` | the rendered vhost (`conf.d/getbible-*.conf`, `snippets/getbible/`, `getbible/` hold the shared pieces) |
 | `/srv/getbible/<domain>/<version>` | the live static tree (a symlink to a release under `releases/`) |
 | `/opt/getbible/<kind>/current` | the live runtime release (a symlink under `releases/`) |
+| `/opt/getbible/<kind>/active`, `previous`, `deployments/` | active and previous generations, each with its own environment, service configuration and release reference |
+| `/opt/getbible/python/` | managed CPython distributions with verified provenance; never upgraded in place |
 | `/var/log/getbible/<domain>/` | `access.log`, `error.log`, `app/app.log`, `archive/` |
 | `/var/lib/getbible/` | state, the ledger of installed files, sync users' homes |
 | `/var/backups/getbible/` | backup sets taken before every configuration change |
