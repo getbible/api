@@ -190,8 +190,7 @@ py_switch_release() {
     local kind="$1" release="$2" link
     link="$(py_current_link "$kind")"
     [[ "$GB_DRY_RUN" == true ]] && return 0
-    ln -sfn "$release" "$link.tmp"
-    mv -Tf "$link.tmp" "$link"
+    gb_switch_link "$release" "$link"
 }
 
 py_prune_releases() {

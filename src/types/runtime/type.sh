@@ -95,10 +95,7 @@ rt_proxy_socket() {
         rt_socket "$EP_KIND"
     fi
 }
-rt_switch_link() {
-    local target="$1" link="$2"
-    ln -sfn -- "$target" "$link.new" && mv -Tf -- "$link.new" "$link"
-}
+rt_switch_link() { gb_switch_link "$1" "$2"; }
 
 # Preserve the last traditional single-service installation as a rollback
 # target when migrating to isolated generations. Reconstruct runtime settings
@@ -188,6 +185,9 @@ type_runtime_prepare() {
     gb_ensure_dir "$GB_CACHE/$kind" 0750 "$user:$user" || return 1
     gb_ensure_dir "$GB_CACHE/$kind/releases" 0750 "$user:$user" || return 1
     gb_ensure_dir "$(ep_log_dir "$domain")/app" 0750 "$user:$user" || return 1
+    # The cache tree is traversed by the nginx worker account; repair the
+    # parents explicitly so an earlier umask-restricted creation cannot linger.
+    gb_ensure_dir "$GB_PREFIX/var/cache/nginx" 0755 || return 1
     gb_ensure_dir "$GB_PREFIX/var/cache/nginx/getbible" 0755 || return 1
     # nginx -t runs as root. Pre-create each owned cache tree so its worker
     # account can read and populate cache files on every supported distro.

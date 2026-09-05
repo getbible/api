@@ -32,7 +32,8 @@ ln -sfn "releases/v2/20260101T000000Z-abcdef1" "$IT_SB/srv/getbible/$DOMAIN/v2"
 # fixture the equivalent reader-group access used by real static deployments.
 chgrp -R "$IT_NGINX_USER" "$IT_SB/srv/getbible/$DOMAIN"
 chmod -R g+rX "$IT_SB/srv/getbible/$DOMAIN"
-runuser -u "$IT_NGINX_USER" -- test -r "$REL/kjv/1/1.json"
+runuser -u "$IT_NGINX_USER" -- test -r "$REL/kjv/1/1.json" \
+    || { it_log "$IT_NGINX_USER cannot read the fixture release; check directory modes under $IT_SB/srv"; exit 1; }
 
 # Tokens: one active token for the exemption test.
 TOKEN="$("$IT_ROOT/getbible.sh" token "$DOMAIN" add "integration test" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')"
@@ -122,11 +123,12 @@ MASTER_BEFORE="$(cat "$IT_SB/run/nginx.pid")"
     done
 ) > "$IT_SB/rotation-probe.log" 2>&1 &
 PROBE_PID="$!"
+flip() { python3 -c 'import os, sys; os.rename(sys.argv[1], sys.argv[2])' "$1" "$2"; }
 for _ in $(seq 1 15); do
     ln -s "$NEXT_REL" "$IT_SB/srv/getbible/$DOMAIN/v2.next"
-    mv -Tf "$IT_SB/srv/getbible/$DOMAIN/v2.next" "$IT_SB/srv/getbible/$DOMAIN/v2"
+    flip "$IT_SB/srv/getbible/$DOMAIN/v2.next" "$IT_SB/srv/getbible/$DOMAIN/v2"
     ln -s "$REL" "$IT_SB/srv/getbible/$DOMAIN/v2.next"
-    mv -Tf "$IT_SB/srv/getbible/$DOMAIN/v2.next" "$IT_SB/srv/getbible/$DOMAIN/v2"
+    flip "$IT_SB/srv/getbible/$DOMAIN/v2.next" "$IT_SB/srv/getbible/$DOMAIN/v2"
 done
 if wait "$PROBE_PID"; then PROBE_RESULT=ok; else PROBE_RESULT="$(cat "$IT_SB/rotation-probe.log")"; fi
 it_check "all requests valid during rotation" "ok" "$PROBE_RESULT"

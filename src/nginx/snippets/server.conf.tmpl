@@ -16,7 +16,7 @@ sendfile           on;
 sendfile_max_chunk 2m;
 tcp_nopush         on;
 tcp_nodelay        on;
-aio                threads;
+{{#IF AIO_THREADS}}aio                threads;{{/IF}}{{#UNLESS AIO_THREADS}}aio                off;{{/UNLESS}}
 directio           16m;
 output_buffers     2 512k;
 

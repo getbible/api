@@ -32,6 +32,12 @@ The first run creates `/etc/getbible` with the global configuration, the
 `getbible-readers` and `getbible-notify` groups, the log rotation timer and the
 helper programs under `/usr/local/lib/getbible`.
 
+The rendered configuration adapts to the release. Ubuntu 26.04 ships the Rust
+coreutils, whose `install -d` and `mv -T` differ from GNU's, so the tool creates
+every directory level explicitly and switches symlinks with `rename(2)`. Ubuntu
+24.04 ships nginx 1.24, which could reset connections with threaded file reads
+in flight during a reload; `aio threads` is enabled only from nginx 1.25.4.
+
 Runtime Python is separate from the host's management Python. First deployment
 downloads a checksum-verified standalone CPython distribution and installs
 packages into a new release. `auto` selects the reviewed 3.12 family on Ubuntu

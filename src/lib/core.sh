@@ -146,7 +146,7 @@ gb_install_file() {
     local source="$1" target="$2" mode="${3:-0644}" owner="${4:-root:root}"
     local dir
     dir="$(dirname -- "$target")"
-    [[ -d "$dir" ]] || install -d -m 0755 -- "$dir"
+    [[ -d "$dir" ]] || gb_ensure_dir "$dir" 0755 || return 1
     if [[ "$GB_DRY_RUN" == true ]]; then
         gb_log "(dry-run) would install $target"
         return 0
@@ -158,12 +158,21 @@ gb_install_file() {
     mv -f -- "$target.gb-tmp" "$target"
 }
 
+# Create DIR with MODE and OWNER. Missing ancestors are created one by one at
+# 0755, never implicitly: GNU install ignores the umask for implicit parents
+# while the Rust coreutils shipped by Ubuntu 26.04 apply it, which under this
+# tool's umask 027 left /srv/getbible or /var/cache/nginx at 0750 and locked
+# the nginx account out of every file below them.
 gb_ensure_dir() {
-    local dir="$1" mode="${2:-0755}" owner="${3:-root:root}"
-    [[ -d "$dir" ]] || install -d -m "$mode" -- "$dir"
+    local dir="$1" mode="${2:-0755}" owner="${3:-root:root}" parent
+    if [[ ! -d "$dir" ]]; then
+        parent="$(dirname -- "$dir")"
+        [[ -d "$parent" ]] || gb_ensure_dir "$parent" 0755 root:root || return 1
+        install -d -m "$mode" -- "$dir" || return 1
+    fi
     if gb_is_root && [[ -z "$GB_PREFIX" ]]; then
-        chown "$owner" -- "$dir"
-        chmod "$mode" -- "$dir"
+        chown "$owner" -- "$dir" || return 1
+        chmod "$mode" -- "$dir" || return 1
     fi
 }
 
@@ -227,6 +236,16 @@ gb_render() {
 }
 
 gb_have() { command -v "$1" >/dev/null 2>&1; }
+
+# Point LINK at TARGET atomically: a fresh symlink is renamed over the old
+# one with rename(2). mv -T cannot be relied on for this step because the Rust
+# coreutils follow the existing link into its directory and refuse the move.
+gb_switch_link() {
+    local target="$1" link="$2"
+    ln -sfn -- "$target" "$link.new" || return 1
+    "$GB_PYTHON" -c 'import os, sys; os.rename(sys.argv[1], sys.argv[2])' "$link.new" "$link" \
+        || { rm -f -- "$link.new"; return 1; }
+}
 
 # Ledger: remember the hash of every file this tool installed so update can
 # tell an untouched file from a hand edit.
