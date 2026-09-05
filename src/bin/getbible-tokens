@@ -6,6 +6,7 @@ Usage:
   getbible-tokens FILE add --label LABEL [--expires YYYY-MM-DD]
   getbible-tokens FILE revoke ID
   getbible-tokens FILE render-map DOMAIN
+  getbible-tokens FILE render-validity-map DOMAIN
   getbible-tokens FILE count
 
 The store is a root-only JSON file. Tokens are 32 random bytes rendered as
@@ -19,10 +20,13 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import secrets
 import sys
 import tempfile
-from datetime import UTC, datetime
+from datetime import datetime, timedelta, timezone
+
+UTC = timezone.utc
 
 SCHEMA = "getbible-tokens-v1"
 
@@ -67,6 +71,44 @@ def active(token: dict) -> bool:
     if expires and expires < now()[:10]:
         return False
     return True
+
+
+def epoch_before(boundary: int) -> str:
+    """PCRE for nonnegative integer seconds strictly before a UTC boundary.
+
+    nginx maps cannot compare numeric variables. A decimal range expressed as
+    a regex permits expiry checks against $msec on each request, even in old
+    workers draining after a reload, without an expiry timer or auth service.
+    """
+    if boundary <= 0:
+        return r"(?!)"
+    maximum = str(boundary - 1)
+    alternatives = ["0"]
+    if len(maximum) > 1:
+        alternatives.append(f"[1-9][0-9]{{0,{len(maximum) - 2}}}")
+    for index, digit in enumerate(maximum):
+        low = 1 if index == 0 else 0
+        high = int(digit) - 1
+        if high >= low:
+            alternatives.append(maximum[:index] + f"[{low}-{high}]" + f"[0-9]{{{len(maximum) - index - 1}}}")
+    alternatives.append(maximum)
+    return "(?:" + "|".join(alternatives) + ")"
+
+
+def validated_tokens(data: dict, domain: str):
+    if not re.fullmatch(r"[a-z0-9]+(?:[.-][a-z0-9]+)*", domain):
+        raise SystemExit("invalid endpoint domain")
+    seen = set()
+    for token in data["tokens"]:
+        if not re.fullmatch(r"tk_[0-9a-f]{8}", token.get("id", "")):
+            raise SystemExit("invalid token id in store")
+        secret = token.get("token", "")
+        if not re.fullmatch(r"gb[a-z2-7]{52}", secret) or secret in seen:
+            raise SystemExit("invalid or duplicate bearer token in store")
+        seen.add(secret)
+        if token.get("expires_at"):
+            datetime.strptime(token["expires_at"], "%Y-%m-%d")
+        yield token
 
 
 def cmd_list(data: dict) -> int:
@@ -126,9 +168,23 @@ def cmd_revoke(path: str, data: dict, token_id: str) -> int:
 
 
 def cmd_render_map(data: dict, domain: str) -> int:
-    for token in data["tokens"]:
+    for token in validated_tokens(data, domain):
         if active(token):
             print(f'"{domain} Bearer {token["token"]}" "{token["id"]}";')
+    return 0
+
+
+def cmd_render_validity_map(data: dict, domain: str) -> int:
+    for token in validated_tokens(data, domain):
+        if not active(token):
+            continue
+        seconds = "[0-9]+"
+        if token.get("expires_at"):
+            # A YYYY-MM-DD expiry includes that whole date in UTC.
+            end = datetime.strptime(token["expires_at"], "%Y-%m-%d").replace(tzinfo=UTC) + timedelta(days=1)
+            seconds = epoch_before(int(end.timestamp()))
+        host = domain.replace(".", "[.]")
+        print(f'"~^{host} {token["id"]} {seconds}[.][0-9]+$" "{token["id"]}";')
     return 0
 
 
@@ -146,6 +202,8 @@ def main(argv: list[str]) -> int:
         return cmd_revoke(path, data, rest[0])
     if command == "render-map":
         return cmd_render_map(data, rest[0])
+    if command == "render-validity-map":
+        return cmd_render_validity_map(data, rest[0])
     if command == "count":
         print(sum(1 for token in data["tokens"] if active(token)))
         return 0

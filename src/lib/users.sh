@@ -61,6 +61,7 @@ gb_ensure_base_dirs() {
     gb_ensure_dir "$GB_LIBEXEC" 0755
     gb_ensure_dir "$GB_ACME_ROOT" 0755
     gb_ensure_dir "$GB_NGINX_GB" 0755
-    gb_ensure_dir "$GB_NGINX_GB/tokens" 0755
+    gb_ensure_dir "$GB_NGINX_GB/tokens" 0700
+    gb_ensure_dir "$GB_NGINX_GB/token-validity" 0700
     gb_ensure_dir "$GB_NGINX/snippets/getbible" 0755
 }

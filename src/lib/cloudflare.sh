@@ -16,7 +16,7 @@ cf_cmd() {
 
 cloudflare_configure() {
     local token result
-    token="$(ui_password "Cloudflare" "API token (Zone:Read, DNS:Edit, Zone Settings:Edit, Zone WAF:Edit, SSL and Certificates:Edit). Empty keeps the stored one.")" || return 1
+    token="$(ui_password "Cloudflare" "API token (Zone:Read, DNS:Edit, Zone Settings:Edit, Zone WAF:Edit, Cache Purge:Purge, SSL and Certificates:Edit). Empty keeps the stored one.")" || return 1
     if [[ -n "$token" ]]; then
         cfg_set "$GB_CLOUDFLARE_CONF" CLOUDFLARE_API_TOKEN "$token"
         chmod 0600 "$GB_CLOUDFLARE_CONF" 2>/dev/null || true
@@ -46,11 +46,32 @@ cf_public_ipv6() {
 }
 
 # cloudflare_apply DOMAIN: make DNS and rules match the endpoint's settings.
+# Must run before publishing a token-only endpoint. A prior public response
+# must not remain retrievable at the edge after origin authentication changes.
+cloudflare_protect_access() {
+    local domain="$1"
+    [[ "$(ep_get "$domain" ACCESS_MODE metered)" == token ]] || return 0
+    [[ "$(ep_get "$domain" CLOUDFLARE_MODE off)" == proxied ]] || return 0
+    [[ "$(ep_state_get "$domain" EDGE_CACHE_POLICY)" == protected-v1 ]] && return 0
+    if ! cf_enabled; then
+        gb_warn "Cannot secure cached responses for $domain without the Cloudflare token (including Cache Purge permission)."
+        return 1
+    fi
+    gb_step "Disable shared caching and purge formerly public responses for $domain"
+    cf_cmd protect-access "$domain" >&2 || return 1
+    ep_state_set "$domain" EDGE_CACHE_POLICY protected-v1
+    tg_notify info "Protected cache policy: $domain" "Cloudflare caching disabled; previously cached host content purged."
+}
+
 cloudflare_apply() {
     local domain="$1" mode cache ipv4 ipv6 proxied
-    cf_enabled || { gb_warn "No Cloudflare token stored; skipping Cloudflare for $domain."; return 0; }
     mode="$(ep_get "$domain" CLOUDFLARE_MODE off)"
     cache="$(ep_get "$domain" CLOUDFLARE_CACHE bypass)"
+    if [[ "$(ep_get "$domain" ACCESS_MODE metered)" == token ]]; then
+        cache=bypass
+        cloudflare_protect_access "$domain" || return 1
+    fi
+    cf_enabled || { gb_warn "No Cloudflare token stored; skipping Cloudflare for $domain."; return 0; }
     [[ "$mode" == off ]] && return 0
     ipv4="$(cf_public_ipv4)"
     ipv6="$(cf_public_ipv6)"
@@ -60,11 +81,14 @@ cloudflare_apply() {
     local -a args=(dns "$domain" --proxied "$proxied")
     [[ -n "$ipv4" ]] && args+=(--ipv4 "$ipv4")
     [[ -n "$ipv6" ]] && args+=(--ipv6 "$ipv6")
-    cf_cmd "${args[@]}" >&2
+    cf_cmd "${args[@]}" >&2 || return 1
     if [[ "$mode" == proxied ]]; then
         gb_step "Cloudflare rules for $domain (cache: $cache)"
-        cf_cmd host-rules "$domain" --cache "$cache" --security api >&2
-        cloudflare_refresh_ips
+        cf_cmd host-rules "$domain" --cache "$cache" --security api >&2 || return 1
+        if [[ "$(ep_get "$domain" ACCESS_MODE metered)" != token ]]; then
+            ep_state_set "$domain" EDGE_CACHE_POLICY "public-$cache"
+        fi
+        cloudflare_refresh_ips || return 1
         if [[ "$(ep_get "$domain" CLOUDFLARE_ORIGIN_PULLS false)" == true ]]; then
             cloudflare_install_origin_ca
         fi
@@ -168,6 +192,10 @@ cloudflare_endpoint_menu() {
                     proxied "Proxied: DDoS shield, TLS at the edge, API-safe security profile" "$([[ "$mode" == proxied ]] && echo on || echo off)")" || continue
                 ep_set "$domain" CLOUDFLARE_MODE "$mode" ;;
             cache)
+                if [[ "$(ep_get "$domain" ACCESS_MODE metered)" == token ]]; then
+                    ui_msg "Edge cache" "Token-only endpoints always bypass shared caches."
+                    continue
+                fi
                 cache="$(ui_radiolist "Edge cache" "Cache responses at Cloudflare's edge?" \
                     bypass "Bypass: every request reaches the origin and its logs" "$([[ "$cache" == bypass ]] && echo on || echo off)" \
                     respect "Respect origin: cache per Cache-Control, origin logs see only misses" "$([[ "$cache" == respect ]] && echo on || echo off)")" || continue
@@ -222,6 +250,7 @@ cloudflare_cli() {
         cache)
             local domain="${1:?domain}" cache="${2:?bypass|respect}"
             [[ "$cache" =~ ^(bypass|respect)$ ]] || gb_die "cache is bypass or respect"
+            [[ "$cache" != respect || "$(ep_get "$domain" ACCESS_MODE metered)" != token ]] || gb_die "Token-only endpoints must bypass shared caches."
             ep_set "$domain" CLOUDFLARE_CACHE "$cache"
             cloudflare_apply "$domain" ;;
         refresh-ips) cloudflare_refresh_and_reload ;;

@@ -41,9 +41,18 @@ map $uri $gb_version {
 
 # Caller identity from a bearer token. Every endpoint renders its own token
 # map into getbible/tokens/<slug>.map as: "<server_name> Bearer <token>" "<id>";
-map "$server_name $http_authorization" $gb_token_id {
+map "$server_name $http_authorization" $gb_token_candidate {
     default "";
     include {{NGINX_GB_DIR}}/tokens/*.map;
+}
+
+# Validate lifetime for every request against epoch seconds, independent of
+# worker reloads and the server's local timezone. Expired callers immediately
+# lose both protected access and the metered-mode quota exemption.
+map "$server_name $gb_token_candidate $msec" $gb_token_id {
+    volatile;
+    default "";
+    include {{NGINX_GB_DIR}}/token-validity/*.map;
 }
 
 # Limits key on the client address and are switched off for token holders:

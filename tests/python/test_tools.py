@@ -10,7 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -85,7 +85,7 @@ class VerifyTreeTest(unittest.TestCase):
 
 class AnalyticsTest(unittest.TestCase):
     def test_totals_and_unique_callers(self) -> None:
-        now = datetime.now(UTC).isoformat()
+        now = datetime.now(timezone.utc).isoformat()
 
         def line(**fields):
             base = {"time": now, "host": "a", "endpoint": "a", "version": "v2", "remote_addr": "203.0.113.5", "method": "GET",
