@@ -147,7 +147,7 @@ menu_update() {
         back "Back")" || return 0
     case "$choice" in
         apply) ui_run "Update all" update_all ;;
-        pull) ui_run "Pull and update" bash -c 'update_pull && update_all' ;;
+        pull) ui_run "Pull and update" update_pull_and_all ;;
     esac
 }
 

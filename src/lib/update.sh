@@ -26,6 +26,8 @@ update_pull() {
     git -C "$GB_REPO_DIR" pull --ff-only origin "$branch"
 }
 
+update_pull_and_all() { update_pull && update_all; }
+
 update_all() {
     local commit dirty failures=0 count=0 domain
     commit="$(git -C "$GB_REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"

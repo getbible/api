@@ -372,6 +372,14 @@ type_runtime_deploy_finish() {
     tg_notify ok "Endpoint deployed: $domain" "Runtime $(ep_get "$domain" KIND) endpoint, version $(ep_get "$domain" VERSION)."
 }
 
+rt_restart() {
+    local domain="$1" kind unit
+    kind="$(ep_get "$domain" KIND)"
+    unit="$(rt_unit "$kind")"
+    sd_restart "$unit.service"
+    sd_wait_ready "$(rt_socket "$kind")" /readyz 120 && gb_log "$unit.service is ready." || gb_warn "$unit.service is not ready yet."
+}
+
 # --- endpoint submenu --------------------------------------------------------
 type_runtime_menu_items() {
     printf '%s\n' \
@@ -385,7 +393,7 @@ type_runtime_menu_action() {
     local domain="$1" action="$2" kind out
     kind="$(ep_get "$domain" KIND)"
     case "$action" in
-        restart) ui_run "Restart $domain" bash -c "source '$GB_LIB/systemd.sh'; sd_restart '$(rt_unit "$kind").service'" ;;
+        restart) ui_run "Restart $domain" rt_restart "$domain" ;;
         journal)
             out="$(gb_tmpdir)/journal.$$"
             sd_journal "$(rt_unit "$kind").service" 200 > "$out"
