@@ -1,6 +1,10 @@
     # {{DOMAIN}} version {{LABEL}}: {{DATA_DIR}}/{{LABEL}} -> current release
     location ^~ /{{LABEL}}/ {
         root {{DATA_DIR}};
+        # Resolve the current-release symlink for each new request. Cached
+        # descriptors would keep independently serving files from the old tree
+        # after an atomic publication; the kernel still caches file contents.
+        open_file_cache off;
 
         location ~ /\. {
             access_log off;

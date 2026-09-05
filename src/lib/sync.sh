@@ -133,26 +133,33 @@ sync_remove_version() {
 
 # Run the sync for one version right now, in the foreground, as the sync user.
 sync_run_now() {
-    local domain="$1" label="$2" unit
+    local domain="$1" label="$2" unit result=0
     unit="$(sync_unit "$domain" "$label")"
     if sd_available; then
         gb_step "Starting $unit.service"
-        "$GB_SYSTEMCTL" start "$unit.service" || true
+        "$GB_SYSTEMCTL" start "$unit.service" || result=$?
         sd_journal "$unit.service" 80
+        return "$result"
     else
         gb_warn "systemd unavailable; sync not started."
+        return 1
     fi
 }
 
-sync_force_now() {
-    local domain="$1" label="$2" unit
-    unit="$(sync_unit "$domain" "$label")"
+sync_force_now() (
+    local domain="$1" label="$2" home
+    home="$(sync_home "$domain")"
     sd_available || gb_die "systemd is required."
-    "$GB_SYSTEMCTL" set-environment GB_SYNC_FORCE=1 >/dev/null 2>&1 || true
-    "$GB_SYSTEMCTL" start "$unit.service" || true
-    "$GB_SYSTEMCTL" unset-environment GB_SYNC_FORCE >/dev/null 2>&1 || true
-    sd_journal "$unit.service" 80
-}
+    # Serialize with an existing sync before placing this version's marker.
+    # A manager-wide environment flag affects unrelated services and is not
+    # inherited by system services without PassEnvironment.
+    exec 9>"$home/lock-$label"
+    flock 9
+    touch "$home/state/$label.force"
+    flock -u 9
+    exec 9>&-
+    sync_run_now "$domain" "$label"
+)
 
 sync_test_access() {
     # Can the sync user reach the repository? Prints the head commit or an error.

@@ -26,7 +26,7 @@ rt_manifest_load() {
 rt_unit() { printf 'getbible-%s\n' "$1"; }
 rt_user() { printf 'getbible-%s\n' "$1"; }
 rt_env_file() { printf '%s/runtime.env\n' "$(ep_dir "$1")"; }
-rt_cache_dir() { printf '%s/%s/librarian\n' "$GB_CACHE" "$1"; }
+rt_cache_dir() { printf '%s/%s/releases/%s/librarian\n' "$GB_CACHE" "$1" "$(basename -- "$2")"; }
 rt_app_log() { printf '%s/app/app.log\n' "$(ep_log_dir "$1")"; }
 
 rt_kind_deployed_on() {
@@ -186,7 +186,7 @@ type_runtime_prepare() {
     gb_ensure_base_groups || return 1
     gb_ensure_system_user "$user" "$user" /nonexistent "$GB_READERS_GROUP" || return 1
     gb_ensure_dir "$GB_CACHE/$kind" 0750 "$user:$user" || return 1
-    gb_ensure_dir "$GB_CACHE/$kind/librarian" 0750 "$user:$user" || return 1
+    gb_ensure_dir "$GB_CACHE/$kind/releases" 0750 "$user:$user" || return 1
     gb_ensure_dir "$(ep_log_dir "$domain")/app" 0750 "$user:$user" || return 1
     gb_ensure_dir "$GB_PREFIX/var/cache/nginx/getbible" 0755 || return 1
     gb_ensure_dir "$(rt_deployments_dir "$kind")" 0755 || return 1
@@ -224,6 +224,10 @@ type_runtime_prepare() {
             gb_log "Release $release is current."
         fi
     fi
+    if [[ "$GB_DRY_RUN" != true ]]; then
+        gb_ensure_dir "$(dirname -- "$(rt_cache_dir "$kind" "$release")")" 0750 "$user:$user" || return 1
+        gb_ensure_dir "$(rt_cache_dir "$kind" "$release")" 0750 "$user:$user" || return 1
+    fi
     inputs="$(rt_deployment_inputs "$domain" "$release")" || return 1
     if [[ "${RT_FORCE_DEPLOY:-false}" != true && -n "$active" && -f "$active/.inputs" && "$(cat "$active/.inputs")" == "$inputs" ]]; then
         if ! sd_available || sd_is_active "$(rt_generation_unit "$kind" "$active").service"; then
@@ -252,14 +256,15 @@ rt_check_repository() {
 }
 
 rt_render_env() {
-    local domain="$1" generation="$2" stage is_query=false is_search=false expensive
+    local domain="$1" generation="$2" stage is_query=false is_search=false expensive release
     stage="$(gb_tmpdir)/runtime.env.$EP_SLUG"
+    release="$(cat "$generation/.release")" || return 1
     [[ "$EP_KIND" == query ]] && is_query=true
     [[ "$EP_KIND" == search ]] && is_search=true
     expensive=$(( EP_THREADS / 2 )); (( expensive < 1 )) && expensive=1
     gb_render "$GB_TYPES/runtime/templates/env.tmpl" "$stage" \
         "KIND=$EP_KIND" "DOMAIN=$domain" "REPOSITORY=$EP_REPOSITORY" "VERSION=$EP_VERSION" \
-        "CACHE_DIR=$GB_CACHE/$EP_KIND/librarian" "CACHE_TTL_SECONDS=900" "REQUIRE_CHECKSUMS=${EP_REQUIRE_CHECKSUMS:-true}" \
+        "CACHE_DIR=$(rt_cache_dir "$EP_KIND" "$release")" "CACHE_TTL_SECONDS=900" "REQUIRE_CHECKSUMS=${EP_REQUIRE_CHECKSUMS:-true}" \
         "APP_LOG=$(rt_app_log "$domain")" "ENV_PREFIX=$RM_ENV_PREFIX" "ACCESS_MODE=$EP_ACCESS_MODE" \
         "DEFAULT_TRANSLATION=${EP_DEFAULT_TRANSLATION:-kjv}" "ALLOWED_TRANSLATIONS=$EP_ALLOWED_TRANSLATIONS" \
         "CACHE_SECONDS=${EP_CACHE_TTL:-$RM_CACHE_SECONDS}" "WORKERS=${EP_WORKERS:-$RM_WORKERS}" \
@@ -427,7 +432,7 @@ type_runtime_abort() {
 }
 
 rt_prune_generations() {
-    local kind="$1" generation active previous unit
+    local kind="$1" generation active previous unit cache
     active="$(rt_active_generation "$kind")"; previous="$(rt_previous_generation "$kind")"
     while IFS= read -r generation; do
         [[ "$generation" == "$active" || "$generation" == "$previous" ]] && continue
@@ -439,6 +444,9 @@ rt_prune_generations() {
         rm -rf -- "$generation"
     done < <(find "$(rt_deployments_dir "$kind")" -mindepth 1 -maxdepth 1 -type d -mmin +2 2>/dev/null)
     py_prune_releases "$kind" 3
+    while IFS= read -r cache; do
+        [[ -d "$(py_releases_dir "$kind")/$(basename -- "$cache")" ]] || rm -rf -- "$cache"
+    done < <(find "$GB_CACHE/$kind/releases" -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
 }
 
 type_runtime_remove() {

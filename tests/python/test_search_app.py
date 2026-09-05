@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from unittest.mock import patch
 
 from getbible_api_common.settings import LibrarianSettings, ServiceSettings
 from getbible_search_api.app import create_app
@@ -72,6 +73,39 @@ class SearchAppTest(EndpointCase, unittest.TestCase):
         self.assertEqual(response.headers["Location"], "/v2/test/beginning?limit=3")
         self.assertEqual(self.client.get("/beginning").headers["Location"], "/v2/test/beginning")
         self.assertEqual(self.client.get("/test/beginning").headers["Location"], "/v2/test/beginning")
+
+    def test_post_alias_redirect_preserves_body_and_query_precedence(self) -> None:
+        for path in ("/test", "/beginning", "/test/beginning", "/v2/beginning"):
+            with self.subTest(path=path):
+                response = self.client.post(path + "?limit=1", json={"q": "beginning", "words": "any", "limit": 2})
+                self.assertEqual(response.status_code, 308)
+                self.assertEqual(response.headers["Cache-Control"], "no-store")
+                result = self.client.post(path + "?limit=1", json={"q": "beginning", "words": "any", "limit": 2},
+                                          follow_redirects=True)
+                self.assertEqual(result.status_code, 200)
+                criteria = result.get_json()["query"]["criteria"]
+                self.assertEqual(criteria["words"], "any")
+                self.assertEqual(criteria["limit"], 1)
+
+    def test_encoded_delimiters_stay_in_search_path_on_redirect(self) -> None:
+        response = self.client.get("/v2/why%3F%23yes?limit=1")
+        self.assertEqual(response.status_code, 301)
+        self.assertEqual(response.headers["Location"], "/v2/test/why%3F%23yes?limit=1")
+        result = self.client.get("/v2/why%3F%23yes?limit=1", follow_redirects=True)
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.get_json()["query"]["text"], "why?#yes")
+
+    def test_readiness_is_cheap_and_explicit_probe_exercises_search(self) -> None:
+        bible = self.app.extensions["getbible"]
+        with patch.object(bible, "search", wraps=bible.search) as search:
+            self.assertEqual(self.client.get("/readyz").status_code, 200)
+            search.assert_not_called()
+            self.assertEqual(self.client.get("/probez").status_code, 200)
+            search.assert_called_once()
+        with patch.object(bible, "search", side_effect=OSError("corpus unavailable")):
+            response = self.client.get("/probez")
+            self.assertEqual(response.status_code, 503)
+            self.assertEqual(response.get_json(), {"status": "unavailable"})
 
     def test_unknown_version_and_translation(self) -> None:
         self.assertEqual(self.client.get("/v1/test/beginning").get_json()["code"], "unknown_version")

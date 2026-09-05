@@ -50,7 +50,8 @@
         "responses": {"301": {"description": "Location: /{{VERSION}}/{{DEFAULT_TRANSLATION}}/{reference}; an unresolvable reference falls back to {{DEFAULT_REFERENCE}}"}}
       }
     },
-    "/healthz": {"get": {"summary": "Liveness", "operationId": "health", "responses": {"200": {"description": "{\"status\":\"ok\"}"}}}}
+    "/healthz": {"get": {"summary": "Liveness", "operationId": "health", "responses": {"200": {"description": "{\"status\":\"ok\"}"}}}},
+    "/readyz": {"get": {"summary": "Readiness: read the default scripture reference", "operationId": "readiness", "responses": {"200": {"description": "Scripture is readable"}, "503": {"description": "Scripture is unavailable"}}}}
   },
   "components": {
     "schemas": {

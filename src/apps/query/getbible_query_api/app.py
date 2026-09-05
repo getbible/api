@@ -9,6 +9,8 @@ does not resolve. The endpoint takes no parameters: a query string is a 400.
 
 from __future__ import annotations
 
+from urllib.parse import quote
+
 from flask import Flask, Response, g, request
 
 from getbible_api_common import detect
@@ -46,7 +48,7 @@ def create_app(settings: Settings | None = None) -> Flask:
     allowed = settings.service.translation_allowed
 
     def canonical(translation: str, reference: str) -> str:
-        return f"/{version}/{translation}/{reference}"
+        return "/" + "/".join(quote(part, safe=":;,") for part in (version, translation, reference))
 
     def translation_or_default(segment: str) -> str:
         return segment.casefold() if detect.is_translation(bible, segment, allowed) else default_translation
@@ -60,7 +62,7 @@ def create_app(settings: Settings | None = None) -> Flask:
             raise ProblemError(400, "parameters_not_accepted",
                                "This endpoint takes no parameters. Put the translation and the reference in the path.")
 
-    register_health(app, bible, default_translation, logger)
+    register_health(app, bible, default_translation, logger, reference=default_reference)
 
     @app.get("/")
     def index() -> Response:

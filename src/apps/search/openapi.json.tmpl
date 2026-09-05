@@ -47,7 +47,7 @@
         "operationId": "searchQueryBody",
         "parameters": [{"name": "translation", "in": "path", "required": true, "schema": {"type": "string"}}],
         "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SearchRequest"}}}},
-        "responses": {"200": {"$ref": "#/components/responses/SearchResult"}, "400": {"$ref": "#/components/responses/Problem"}}
+        "responses": {"200": {"$ref": "#/components/responses/SearchResult"}, "308": {"description": "Search-string aliases preserve the POST method, JSON body and query string in Location"}, "400": {"$ref": "#/components/responses/Problem"}}
       }
     },
     "/{{VERSION}}": {
@@ -64,7 +64,9 @@
         "responses": {"200": {"$ref": "#/components/responses/SearchResult"}, "400": {"$ref": "#/components/responses/Problem"}}
       }
     },
-    "/healthz": {"get": {"summary": "Liveness", "operationId": "health", "responses": {"200": {"description": "{\"status\":\"ok\"}"}}}}
+    "/healthz": {"get": {"summary": "Liveness", "operationId": "health", "responses": {"200": {"description": "{\"status\":\"ok\"}"}}}},
+    "/readyz": {"get": {"summary": "Readiness: read scripture from the default translation", "operationId": "readiness", "responses": {"200": {"description": "Scripture is readable"}, "503": {"description": "Scripture is unavailable"}}}},
+    "/probez": {"get": {"summary": "Private service socket deployment probe: read scripture and execute search", "operationId": "deploymentProbe", "responses": {"200": {"description": "Scripture and search corpus are available"}, "503": {"description": "Scripture or search unavailable"}}}}
   },
   "components": {
     "parameters": {

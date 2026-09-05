@@ -52,7 +52,7 @@
 </table>
 
 <h2>Health</h2>
-<p><code>GET /healthz</code> answers when the service is up; <code>GET /readyz</code> answers <code>200</code> only when the default translation can be read.</p>
+<p><code>GET /healthz</code> answers when the service is up; <code>GET /readyz</code> answers <code>200</code> only after reading scripture for the configured default reference, or <code>503</code> when unavailable. Token-protected responses use <code>Cache-Control: private, no-store</code>.</p>
 
 <footer>Served by getBible · <a href="https://getbible.net">getbible.net</a> · Requests carry an <code>X-Request-ID</code> header; quote it when reporting a problem.</footer>
 </main>
