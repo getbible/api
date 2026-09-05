@@ -1,0 +1,302 @@
+#!/usr/bin/env python3
+"""Cloudflare integration for getBible endpoints (standard library only).
+
+Usage:
+  getbible-cloudflare verify
+  getbible-cloudflare zone DOMAIN
+  getbible-cloudflare dns-show DOMAIN
+  getbible-cloudflare dns DOMAIN --proxied true|false [--ipv4 A] [--ipv6 AAAA]
+  getbible-cloudflare host-rules DOMAIN --cache bypass|respect [--security api|default]
+  getbible-cloudflare host-rules-remove DOMAIN
+  getbible-cloudflare zone-settings DOMAIN [--http3 on] [--brotli on] [--min-tls 1.2] [--always-https on]
+  getbible-cloudflare bot-fight DOMAIN on|off
+  getbible-cloudflare origin-pulls DOMAIN on|off
+  getbible-cloudflare ips
+  getbible-cloudflare origin-ca
+
+The API token comes from the CLOUDFLARE_API_TOKEN environment variable. Every
+command prints JSON on stdout and exits non-zero with a message on stderr on
+failure. Rules created here carry the description "getbible:<domain>" so
+they are updated in place and never duplicate.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+API = "https://api.cloudflare.com/client/v4"
+IPS_V4 = "https://www.cloudflare.com/ips-v4"
+IPS_V6 = "https://www.cloudflare.com/ips-v6"
+ORIGIN_CA = "https://developers.cloudflare.com/ssl/static/authenticated_origin_pull_ca.pem"
+
+
+class CloudflareError(SystemExit):
+    pass
+
+
+def request(method: str, path: str, body: dict | list | None = None) -> dict:
+    token = os.environ.get("CLOUDFLARE_API_TOKEN", "")
+    if not token:
+        raise CloudflareError("CLOUDFLARE_API_TOKEN is not set")
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(API + path, data=data, method=method)
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("User-Agent", "getbible-api/1.0")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        text = error.read().decode("utf-8", "replace")
+        try:
+            payload = json.loads(text)
+        except ValueError:
+            raise CloudflareError(f"Cloudflare {method} {path}: HTTP {error.code}: {text[:300]}") from error
+        if error.code == 404 and method == "GET":
+            return {"success": False, "result": None, "errors": payload.get("errors", []), "status": 404}
+        messages = "; ".join(f"{e.get('code')}: {e.get('message')}" for e in payload.get("errors", [])) or text[:300]
+        raise CloudflareError(f"Cloudflare {method} {path}: {messages}") from error
+    except urllib.error.URLError as error:
+        raise CloudflareError(f"Cloudflare unreachable: {error.reason}") from error
+    if not payload.get("success", False):
+        messages = "; ".join(f"{e.get('code')}: {e.get('message')}" for e in payload.get("errors", []))
+        raise CloudflareError(f"Cloudflare {method} {path}: {messages or 'request failed'}")
+    return payload
+
+
+def fetch_text(url: str) -> str:
+    req = urllib.request.Request(url, headers={"User-Agent": "getbible-api/1.0"})
+    with urllib.request.urlopen(req, timeout=30) as response:
+        return response.read().decode("utf-8")
+
+
+def find_zone(domain: str) -> dict:
+    labels = domain.split(".")
+    for index in range(len(labels) - 1):
+        candidate = ".".join(labels[index:])
+        payload = request("GET", f"/zones?name={candidate}&status=active&per_page=5")
+        for zone in payload.get("result") or []:
+            if zone.get("name") == candidate:
+                return zone
+    raise CloudflareError(f"no active Cloudflare zone contains {domain}")
+
+
+def dns_records(zone_id: str, domain: str) -> list[dict]:
+    payload = request("GET", f"/zones/{zone_id}/dns_records?name={domain}&per_page=50")
+    return payload.get("result") or []
+
+
+def cmd_dns(domain: str, args: list[str]) -> dict:
+    proxied = None
+    ipv4 = ipv6 = None
+    while args:
+        item = args.pop(0)
+        if item == "--proxied":
+            proxied = args.pop(0).lower() in {"true", "on", "yes", "1"}
+        elif item == "--ipv4":
+            ipv4 = args.pop(0)
+        elif item == "--ipv6":
+            ipv6 = args.pop(0)
+        else:
+            raise CloudflareError(f"unknown option {item}")
+    zone = find_zone(domain)
+    existing = {(r["type"]): r for r in dns_records(zone["id"], domain) if r["type"] in {"A", "AAAA"}}
+    results = []
+    for record_type, content in (("A", ipv4), ("AAAA", ipv6)):
+        current = existing.get(record_type)
+        if content is None:
+            if current is not None and proxied is not None and current.get("proxied") != proxied:
+                body = {"type": record_type, "name": domain, "content": current["content"], "proxied": proxied, "ttl": 1}
+                results.append(request("PATCH", f"/zones/{zone['id']}/dns_records/{current['id']}", body)["result"])
+            continue
+        body = {"type": record_type, "name": domain, "content": content, "proxied": bool(proxied), "ttl": 1,
+                "comment": "managed by getbible.sh"}
+        if current is None:
+            results.append(request("POST", f"/zones/{zone['id']}/dns_records", body)["result"])
+        elif current.get("content") != content or current.get("proxied") != bool(proxied):
+            results.append(request("PATCH", f"/zones/{zone['id']}/dns_records/{current['id']}", body)["result"])
+        else:
+            results.append(current)
+    return {"zone": zone["name"], "records": [{"type": r["type"], "content": r["content"], "proxied": r["proxied"]} for r in results]}
+
+
+def cmd_dns_show(domain: str) -> dict:
+    zone = find_zone(domain)
+    return {"zone": zone["name"], "records": [{"type": r["type"], "content": r["content"], "proxied": r.get("proxied")}
+                                             for r in dns_records(zone["id"], domain)]}
+
+
+def entrypoint(zone_id: str, phase: str) -> dict | None:
+    payload = request("GET", f"/zones/{zone_id}/rulesets/phases/{phase}/entrypoint")
+    return payload.get("result")
+
+
+def replace_rule(zone_id: str, phase: str, description: str, rule: dict | None) -> dict:
+    """Insert, update or remove the rule carrying `description` in a phase."""
+    current = entrypoint(zone_id, phase)
+    rules = [r for r in (current or {}).get("rules", []) if r.get("description") != description]
+    kept = []
+    for existing in rules:
+        kept.append({k: existing[k] for k in ("action", "expression", "description", "enabled", "action_parameters") if k in existing})
+    if rule is not None:
+        rule = dict(rule)
+        rule["description"] = description
+        kept.append(rule)
+    return request("PUT", f"/zones/{zone_id}/rulesets/phases/{phase}/entrypoint", {"rules": kept})["result"]
+
+
+def cmd_host_rules(domain: str, args: list[str]) -> dict:
+    cache = "bypass"
+    security = "api"
+    while args:
+        item = args.pop(0)
+        if item == "--cache":
+            cache = args.pop(0)
+        elif item == "--security":
+            security = args.pop(0)
+        else:
+            raise CloudflareError(f"unknown option {item}")
+    zone = find_zone(domain)
+    expression = f'(http.host eq "{domain}")'
+    description = f"getbible:{domain}"
+    out: dict = {"zone": zone["name"]}
+
+    # Configuration rule: API-friendly security for this host only.
+    if security == "api":
+        config = {
+            "action": "set_config", "expression": expression, "enabled": True,
+            "action_parameters": {"bic": False, "security_level": "essentially_off", "ssl": "strict",
+                                  "automatic_https_rewrites": False, "opportunistic_encryption": False},
+        }
+    else:
+        config = None
+    out["config_rule"] = "set" if config else "removed"
+    replace_rule(zone["id"], "http_config_settings", description, config)
+
+    # Cache rule: bypass keeps the origin logs complete; respect follows the origin's Cache-Control.
+    if cache == "respect":
+        cache_rule = {
+            "action": "set_cache_settings", "expression": expression, "enabled": True,
+            "action_parameters": {"cache": True, "edge_ttl": {"mode": "respect_origin"}, "browser_ttl": {"mode": "respect_origin"},
+                                  "cache_key": {"custom_key": {"query_string": {"include": "*"}}}},
+        }
+    else:
+        cache_rule = {"action": "set_cache_settings", "expression": expression, "enabled": True,
+                      "action_parameters": {"cache": False}}
+    out["cache_rule"] = cache
+    replace_rule(zone["id"], "http_request_cache_settings", description, cache_rule)
+
+    # WAF: skip managed challenges and rate limiting for this host, keep DDoS protection.
+    skip = {
+        "action": "skip", "expression": expression, "enabled": True,
+        "action_parameters": {"phases": ["http_ratelimit", "http_request_firewall_managed", "http_request_sbfm"],
+                              "products": ["bic", "hot", "securityLevel", "uaBlock", "zoneLockdown"]},
+    }
+    try:
+        replace_rule(zone["id"], "http_request_firewall_custom", description, skip if security == "api" else None)
+        out["waf_skip"] = "set" if security == "api" else "removed"
+    except SystemExit as error:
+        out["waf_skip"] = f"not applied ({error})"
+    return out
+
+
+def cmd_host_rules_remove(domain: str) -> dict:
+    zone = find_zone(domain)
+    description = f"getbible:{domain}"
+    for phase in ("http_config_settings", "http_request_cache_settings", "http_request_firewall_custom"):
+        try:
+            replace_rule(zone["id"], phase, description, None)
+        except SystemExit:
+            pass
+    return {"zone": zone["name"], "removed": description}
+
+
+def cmd_zone_settings(domain: str, args: list[str]) -> dict:
+    zone = find_zone(domain)
+    wanted = {}
+    while args:
+        item = args.pop(0)
+        value = args.pop(0)
+        key = {"--http3": "http3", "--brotli": "brotli", "--min-tls": "min_tls_version", "--always-https": "always_use_https",
+               "--tls13": "tls_1_3", "--ssl": "ssl"}.get(item)
+        if key is None:
+            raise CloudflareError(f"unknown option {item}")
+        wanted[key] = value
+    out = {"zone": zone["name"], "settings": {}}
+    for key, value in wanted.items():
+        try:
+            request("PATCH", f"/zones/{zone['id']}/settings/{key}", {"value": value})
+            out["settings"][key] = value
+        except SystemExit as error:
+            out["settings"][key] = f"not applied ({error})"
+    return out
+
+
+def cmd_bot_fight(domain: str, state: str) -> dict:
+    zone = find_zone(domain)
+    enabled = state.lower() in {"on", "true", "yes"}
+    request("PUT", f"/zones/{zone['id']}/bot_management", {"fight_mode": enabled})
+    return {"zone": zone["name"], "fight_mode": enabled}
+
+
+def cmd_origin_pulls(domain: str, state: str) -> dict:
+    zone = find_zone(domain)
+    enabled = state.lower() in {"on", "true", "yes"}
+    request("PUT", f"/zones/{zone['id']}/origin_tls_client_auth/settings", {"enabled": enabled})
+    return {"zone": zone["name"], "authenticated_origin_pulls": enabled}
+
+
+def cmd_ips() -> dict:
+    v4 = [line.strip() for line in fetch_text(IPS_V4).splitlines() if line.strip()]
+    v6 = [line.strip() for line in fetch_text(IPS_V6).splitlines() if line.strip()]
+    if not v4 or not v6:
+        raise CloudflareError("Cloudflare returned an empty address list")
+    return {"ipv4": v4, "ipv6": v6}
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) < 2 or argv[1] in {"-h", "--help"}:
+        sys.stderr.write(__doc__)
+        return 2
+    command, rest = argv[1], argv[2:]
+    if command == "verify":
+        result = request("GET", "/user/tokens/verify")["result"]
+        out = {"status": result.get("status"), "id": result.get("id")}
+    elif command == "zone":
+        zone = find_zone(rest[0])
+        out = {"id": zone["id"], "name": zone["name"], "plan": (zone.get("plan") or {}).get("name")}
+    elif command == "dns-show":
+        out = cmd_dns_show(rest[0])
+    elif command == "dns":
+        out = cmd_dns(rest[0], rest[1:])
+    elif command == "host-rules":
+        out = cmd_host_rules(rest[0], rest[1:])
+    elif command == "host-rules-remove":
+        out = cmd_host_rules_remove(rest[0])
+    elif command == "zone-settings":
+        out = cmd_zone_settings(rest[0], rest[1:])
+    elif command == "bot-fight":
+        out = cmd_bot_fight(rest[0], rest[1])
+    elif command == "origin-pulls":
+        out = cmd_origin_pulls(rest[0], rest[1])
+    elif command == "ips":
+        out = cmd_ips()
+    elif command == "origin-ca":
+        print(fetch_text(ORIGIN_CA), end="")
+        return 0
+    else:
+        raise CloudflareError(f"unknown command {command}")
+    print(json.dumps(out, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main(sys.argv))
+    except CloudflareError as error:
+        sys.stderr.write(f"getbible-cloudflare: {error}\n")
+        raise SystemExit(1)

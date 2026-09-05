@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# The test suite. Lint, Python unit tests and sandboxed CLI tests always run;
+# integration tests (real nginx and gunicorn) run with --all when nginx is
+# installed and the caller is root.
+set -Eeuo pipefail
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+cd "$ROOT"
+ALL=false
+[[ "${1:-}" == --all ]] && ALL=true
+FAILED=0
+step() { printf '\n== %s ==\n' "$*"; }
+fail() { printf 'FAILED: %s\n' "$*"; FAILED=$((FAILED + 1)); }
+
+step "syntax"
+for f in getbible.sh src/lib/*.sh src/types/*/type.sh src/bin/getbible-sync src/bin/getbible-notify src/bin/getbible-logrotate-hook tests/run.sh tests/cli/*.sh tests/integration/*.sh; do
+    bash -n "$f" || fail "bash -n $f"
+done
+python3 -m py_compile src/bin/getbible-render src/bin/getbible-tokens src/bin/getbible-verify-tree src/bin/getbible-analytics src/bin/getbible-cloudflare src/bin/getbible-nginx-strip || fail "py_compile tools"
+find src/apps -name '*.py' -not -path '*/build/*' -print0 | xargs -0 python3 -m py_compile || fail "py_compile apps"
+
+step "shellcheck"
+if command -v shellcheck >/dev/null; then
+    shellcheck -x -s bash getbible.sh src/lib/*.sh src/types/*/type.sh src/bin/getbible-sync src/bin/getbible-notify src/bin/getbible-logrotate-hook tests/run.sh tests/cli/*.sh tests/integration/*.sh || fail "shellcheck"
+else
+    echo "shellcheck not installed; skipped"
+fi
+
+step "runtime kinds carry every required file"
+for manifest in src/apps/*/manifest.conf; do
+    kind="$(basename "$(dirname "$manifest")")"
+    for required in pyproject.toml requirements.txt manifest.conf openapi.json.tmpl docs.html.tmpl "getbible_${kind}_api/app.py" "getbible_${kind}_api/config.py" "getbible_${kind}_api/wsgi.py" "getbible_${kind}_api/check.py"; do
+        [[ -e "src/apps/$kind/$required" ]] || fail "src/apps/$kind/$required is missing"
+    done
+    [[ -e "tests/python/test_${kind}_app.py" ]] || fail "tests/python/test_${kind}_app.py is missing"
+done
+echo "ok"
+
+step "python unit tests"
+VENV="${GB_TEST_VENV:-$ROOT/.venv-test}"
+if [[ ! -x "$VENV/bin/python" ]]; then
+    echo "creating $VENV"
+    python3 -m venv "$VENV"
+    "$VENV/bin/python" -m pip install --quiet --upgrade pip
+    "$VENV/bin/python" -m pip install --quiet --requirement src/apps/query/requirements.txt
+fi
+"$VENV/bin/python" -m pip install --quiet --no-deps --force-reinstall src/apps/common src/apps/query src/apps/search
+rm -rf src/apps/*/build src/apps/*/*.egg-info
+"$VENV/bin/python" -m unittest discover -s tests/python -t . -v 2>&1 | tail -30 || true
+"$VENV/bin/python" -m unittest discover -s tests/python -t . >/dev/null 2>&1 || fail "python unit tests"
+
+step "command line tests (sandbox prefix)"
+bash tests/cli/test_cli.sh || fail "cli tests"
+
+if [[ "$ALL" == true ]]; then
+    step "integration"
+    if command -v nginx >/dev/null && [[ "$(id -u)" -eq 0 ]]; then
+        bash tests/integration/static.sh || fail "integration static"
+        bash tests/integration/runtime.sh || fail "integration runtime"
+    else
+        echo "needs nginx and root; skipped"
+    fi
+fi
+
+printf '\n'
+if (( FAILED == 0 )); then
+    echo "ALL TESTS PASSED"
+else
+    echo "$FAILED test group(s) failed"
+    exit 1
+fi

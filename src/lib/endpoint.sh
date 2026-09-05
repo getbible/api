@@ -42,6 +42,9 @@ endpoint_apply() {
         fi
     fi
     "type_${EP_TYPE}_finish" "$domain"
+    if [[ -n "${GB_CLOUDFLARE_LOADED:-}" && "$(ep_get "$domain" CLOUDFLARE_MODE off)" != off ]]; then
+        cloudflare_apply "$domain" || gb_warn "Cloudflare update failed for $domain; nginx is unaffected."
+    fi
     ep_state_set "$domain" LAST_APPLY "$(gb_timestamp)"
     ep_state_set "$domain" LAST_APPLY_COMMIT "$(git -C "$GB_REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 }

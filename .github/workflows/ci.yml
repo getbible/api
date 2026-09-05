@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main, staging]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install nginx, shellcheck and tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nginx shellcheck rsync logrotate openssh-client whiptail
+          sudo systemctl stop nginx || true
+      - name: Lint, unit and command line tests
+        run: tests/run.sh
+      - name: Integration tests (real nginx and gunicorn)
+        run: sudo -E env "PATH=$PATH" GB_TEST_VENV="$PWD/.venv-test" tests/run.sh --all
