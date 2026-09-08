@@ -58,6 +58,8 @@ Endpoints
   remove DOMAIN [--purge]                stop serving an endpoint (purge deletes data)
   filetypes DOMAIN json,sha,txt          change the file types a static endpoint serves
   version add DOMAIN vN --repo URL [--ref master] [--path .]
+  version change DOMAIN vN [--repo URL] [--ref REF] [--path P]
+                                         point a version elsewhere, keeping its releases
   version remove DOMAIN vN
   sync DOMAIN [vN] [--force]             run the synchronisation now
   access DOMAIN open|metered|token       change the access mode
@@ -123,7 +125,7 @@ cmd_deploy() {
 
 cmd_version() {
     local action="${1:-}" domain="${2:-}" label="${3:-}" repo="" ref="master" subpath="."
-    shift 3 || gb_die "version add|remove DOMAIN vN"
+    shift 3 || gb_die "version add|change|remove DOMAIN vN"
     gb_system_init
     ep_exists "$domain" || gb_die "Unknown endpoint: $domain"
     [[ "$(ep_get "$domain" TYPE)" == static ]] || gb_die "$domain is not a static endpoint"
@@ -141,8 +143,21 @@ cmd_version() {
             [[ -n "$repo" ]] || gb_die "version add needs --repo"
             type_static_add_version "$domain" "$label" "$repo" "$ref" "$subpath"
             ;;
+        change)
+            repo=""; ref=""; subpath=""
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --repo) repo="${2:?repository URL}"; shift 2 ;;
+                    --ref) ref="${2:?git reference}"; shift 2 ;;
+                    --path) subpath="${2:?source path}"; shift 2 ;;
+                    *) gb_die "Unknown option: $1" ;;
+                esac
+            done
+            [[ -n "$repo$ref$subpath" ]] || gb_die "version change needs --repo, --ref or --path"
+            type_static_change_version "$domain" "$label" "$repo" "$ref" "$subpath"
+            ;;
         remove) type_static_remove_version "$domain" "$label" ;;
-        *) gb_die "version add|remove DOMAIN vN" ;;
+        *) gb_die "version add|change|remove DOMAIN vN" ;;
     esac
 }
 
