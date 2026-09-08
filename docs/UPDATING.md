@@ -14,7 +14,9 @@ sudo ./getbible.sh update
 The menu also offers "git pull first, then update" and refuses to pull a dirty
 checkout. `update DOMAIN` applies that endpoint; `update` processes all
 registered endpoints and reports failures. Manager mutations are locked to
-prevent concurrent commands from interleaving configuration changes.
+prevent concurrent commands from interleaving configuration changes. Staged
+endpoints (see `NEW_SERVER.md`) are updated like the others and stay staged:
+an update never requests a certificate or changes DNS for them.
 
 ## Choose the operation
 

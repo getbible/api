@@ -35,20 +35,32 @@ endpoint_apply_abort() {
 
 # All stages check their own errors because callers may invoke this function
 # from an if/! condition, where Bash does not apply errexit inside functions.
+#
+# A staged endpoint runs the same pipeline minus everything that needs its
+# public name: no shared-cache protection at the edge, no certificate request
+# and no Cloudflare DNS or rules. It renders TLS with a placeholder
+# certificate so the complete vhost can be tested before go-live.
 endpoint_apply() {
-    local domain="$1" stage
+    local domain="$1" stage live=true
     ep_load "$domain" || return 1
     endpoint_source_type "$EP_TYPE" || return 1
+    ep_is_live "$domain" || live=false
     gb_ensure_base_dirs || return 1
     logs_ensure_endpoint_dir "$domain" || return 1
     EP_ENABLE_BACKUP="$(gb_new_backup_set "site-enable-$EP_SLUG")" || return 1
     gb_backup_file "$(nginx_enabled_file "$domain")" "$EP_ENABLE_BACKUP" || return 1
     nginx_transaction_begin "$domain" || return 1
-    if declare -F cloudflare_protect_access >/dev/null; then
+    if [[ "$live" == true ]] && declare -F cloudflare_protect_access >/dev/null; then
         cloudflare_protect_access "$domain" || { endpoint_apply_abort "$domain" "Could not protect shared-cache access"; return 1; }
     fi
     "type_${EP_TYPE}_prepare" "$domain" || { endpoint_apply_abort "$domain" "Endpoint candidate preparation failed"; return 1; }
     docs_render "$domain" || { endpoint_apply_abort "$domain" "Endpoint documentation rendering failed"; return 1; }
+    if [[ "$live" == false ]] && ! nginx_cert_exists "$domain"; then
+        certs_placeholder_ensure "$domain" || gb_warn "$domain is staged without a placeholder certificate and renders HTTP-only until one exists."
+    fi
+    if [[ "$live" == true ]] && declare -F cloudflare_ensure_origin_files >/dev/null; then
+        cloudflare_ensure_origin_files "$domain" || { endpoint_apply_abort "$domain" "Cloudflare address ranges or origin CA could not be fetched"; return 1; }
+    fi
 
     stage="$(gb_tmpdir)/stage-$EP_SLUG"
     rm -rf -- "$stage" || return 1
@@ -59,7 +71,7 @@ endpoint_apply() {
     fi
     nginx_apply_stage "$stage" "$EP_SLUG" || { endpoint_apply_abort "$domain" "nginx rejected the endpoint configuration"; return 1; }
 
-    if ! nginx_cert_exists "$domain"; then
+    if [[ "$live" == true ]] && ! nginx_cert_exists "$domain"; then
         if certs_obtain "$domain"; then
             rm -rf -- "$stage" || return 1
             nginx_render_global "$stage" && nginx_render_endpoint "$stage" || { endpoint_apply_abort "$domain" "TLS configuration rendering failed"; return 1; }
@@ -71,8 +83,20 @@ endpoint_apply() {
     "type_${EP_TYPE}_finish" "$domain" || { endpoint_apply_abort "$domain" "Endpoint activation failed"; return 1; }
     nginx_transaction_commit "$domain" || return 1
     EP_ENABLE_BACKUP=""
-    if [[ -n "${GB_CLOUDFLARE_LOADED:-}" && "$(ep_get "$domain" CLOUDFLARE_MODE off)" != off ]]; then
-        cloudflare_apply "$domain" || gb_warn "Cloudflare update failed for $domain; nginx is unaffected."
+    if [[ "$live" == true && -n "${GB_CLOUDFLARE_LOADED:-}" && "$(ep_get "$domain" CLOUDFLARE_MODE off)" != off ]]; then
+        if cloudflare_apply "$domain"; then
+            ep_state_set "$domain" CLOUDFLARE_ERROR ""
+        else
+            gb_warn "Cloudflare update failed for $domain; nginx is unaffected."
+            ep_state_set "$domain" CLOUDFLARE_ERROR "Cloudflare update failed at $(gb_timestamp)"
+        fi
+    fi
+    if [[ "$live" == true ]]; then
+        # nginx now serves the Let's Encrypt certificate; a placeholder left
+        # over from staging has no further use.
+        if nginx_cert_exists "$domain"; then certs_placeholder_remove "$domain"; fi
+    else
+        gb_log "$domain is staged: no certificate was requested and DNS was not changed. Choose 'Go live' when it should take over its name."
     fi
     ep_state_set "$domain" LAST_APPLY "$(gb_timestamp)"
     ep_state_set "$domain" LAST_APPLY_COMMIT "$(git -C "$GB_REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
@@ -99,6 +123,7 @@ endpoint_remove() {
     endpoint_source_type "$EP_TYPE"
     "type_${EP_TYPE}_remove" "$domain" "$purge"
     nginx_remove_endpoint "$domain"
+    certs_placeholder_remove "$domain"
     if [[ "$purge" == true ]]; then
         rm -rf -- "$(ep_www_dir "$domain")" "$(ep_log_dir "$domain")"
     fi
@@ -111,12 +136,13 @@ endpoint_status_text() {
     ep_load "$domain"
     endpoint_source_type "$EP_TYPE"
     printf 'Endpoint    : %s (%s%s)\n' "$domain" "$EP_TYPE" "$([[ -n "$EP_KIND" && "$EP_KIND" != static ]] && printf ' %s' "$EP_KIND")"
+    printf 'Publication : %s\n' "$(endpoint_publication_text "$domain")"
     printf 'Access mode : %s\n' "$EP_ACCESS_MODE"
     if [[ "$EP_ACCESS_MODE" == metered ]]; then
         printf 'Limits      : %s r/s burst %s, %s/hour, %s/day, %s connections\n' "$EP_RATE_PER_SECOND" "$EP_RATE_BURST" "$EP_QUOTA_HOUR" "$EP_QUOTA_DAY" "$EP_CONN_LIMIT"
     fi
     printf 'Tokens      : %s active\n' "$(tokens_count "$domain")"
-    printf 'Certificate : %s\n' "$(certs_expiry "$domain")"
+    printf 'Certificate : %s\n' "$(certs_status_line "$domain")"
     printf 'Cloudflare  : %s\n' "$EP_CLOUDFLARE_MODE"
     printf 'nginx site  : %s\n' "$([[ -f "$(nginx_site_file "$domain")" ]] && printf installed || printf missing)"
     printf 'Last apply  : %s (%s)\n' "$(ep_state_get "$domain" LAST_APPLY never)" "$(ep_state_get "$domain" LAST_APPLY_COMMIT -)"
@@ -125,7 +151,33 @@ endpoint_status_text() {
     "type_${EP_TYPE}_status" "$domain"
 }
 
+# endpoint_publication_text DOMAIN: the publication state for status output.
+endpoint_publication_text() {
+    local since
+    if ep_is_live "$1"; then
+        since="$(ep_state_get "$1" LIVE_AT)"
+        printf 'live%s\n' "${since:+ since $since}"
+    else
+        printf 'staged (not live: no certificate or DNS changes until go-live)\n'
+    fi
+}
+
 # --- shared prompts ----------------------------------------------------------
+# Ask whether a new endpoint takes over its name now or stays staged until
+# 'Go live' is chosen. The default comes from Settings. Choosing live makes
+# sure the Let's Encrypt contact exists while dialogs are still possible.
+endpoint_prompt_deploy_mode() {
+    local domain="$1" default mode
+    default="$(ep_deploy_mode_default)"
+    mode="$(ui_radiolist "Go live now?" "Live: request the Let's Encrypt certificate now and, when Cloudflare manages $domain here, point its DNS at this server.\n\nStaged: install everything (code, data, services, nginx with a placeholder certificate) but leave the certificate and DNS alone, so whatever serves $domain today keeps serving until you choose 'Go live' for it." \
+        live "Go live now" "$([[ "$default" == live ]] && echo on || echo off)" \
+        staged "Stage it; go live later from the endpoint menu" "$([[ "$default" == staged ]] && echo on || echo off)")" || return 1
+    if [[ "$mode" == live ]]; then
+        certs_email_interactive || gb_warn "Without a Let's Encrypt contact email the certificate request is skipped; set it under Settings."
+    fi
+    printf '%s\n' "$mode"
+}
+
 endpoint_prompt_access_mode() {
     local default
     default="$(gb_global DEFAULT_ACCESS_MODE metered)"

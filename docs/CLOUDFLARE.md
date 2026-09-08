@@ -12,7 +12,37 @@ Settings > Cloudflare API token stores and verifies a scoped token
 (`/etc/getbible/cloudflare.conf`, root only). Scopes: Zone:Read, DNS:Edit,
 Zone Settings:Edit, Zone WAF:Edit, SSL and Certificates:Edit, and Cache
 Purge:Purge for protected endpoint transitions. Limit the token to the zones
-managed by this installation.
+managed by this installation. DNS:Edit also serves certificate validation
+(below).
+
+## Certificates before DNS changes (DNS-01)
+
+With the `certbot-dns-cloudflare` plugin installed (`install-deps` adds
+`python3-certbot-dns-cloudflare`), certbot proves control of a name by
+publishing a `_acme-challenge` TXT record through the stored token instead of
+answering an HTTP request. The certificate can therefore be issued while the
+name still points at another server: on a staged endpoint (Endpoint >
+Certificate > Issue) or during go-live, before the records are switched.
+Settings > Certificate validation chooses `auto` (DNS-01 for a domain whose
+mode is `dns` or `proxied` whenever the plugin and token are present,
+otherwise HTTP-01, since the token cannot be assumed to cover other zones),
+`http` or `dns-cloudflare`; Go live and Issue can choose per request. certbot
+keeps a root-only copy of the token in `/etc/getbible/certbot-cloudflare.ini`
+for renewals; storing a token writes it, and the host check warns about
+DNS-01 renewals that lack it.
+
+## Staged endpoints
+
+A staged endpoint (deployed with "Stage it", see `NEW_SERVER.md`) records
+its Cloudflare mode, cache and origin-pull settings but applies none of them:
+the DNS records keep pointing at whatever serves the name today, and the
+origin-side real-IP and origin-pull settings are left out of its nginx vhost
+so it can be verified directly. Go live requires the token for such a
+domain, fetches the address ranges and origin CA before rendering the live
+vhost, and applies DNS and rules after the certificate exists. For a proxied
+domain, HTTP-01 validation at go-live is refused unless the name already
+reaches this server, because the records are switched only afterwards; use
+DNS-01.
 
 ## Per domain
 

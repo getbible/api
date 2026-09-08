@@ -74,6 +74,19 @@ nginx_detect() {
 
 nginx_cert_dir() { printf '%s/live/%s\n' "$GB_LETSENCRYPT" "$1"; }
 nginx_cert_exists() { [[ -f "$(nginx_cert_dir "$1")/fullchain.pem" && -f "$(nginx_cert_dir "$1")/privkey.pem" ]]; }
+
+# The directory whose fullchain.pem and privkey.pem the TLS vhost uses: the
+# Let's Encrypt certificate when there is one, otherwise the self-signed
+# placeholder of a staged endpoint, otherwise nothing (HTTP only).
+nginx_tls_cert_dir() {
+    local domain="$1"
+    if nginx_cert_exists "$domain"; then
+        nginx_cert_dir "$domain"
+    elif declare -F certs_placeholder_exists >/dev/null && certs_placeholder_exists "$domain"; then
+        certs_placeholder_dir "$domain"
+    fi
+    return 0
+}
 nginx_site_file() { printf '%s/sites-available/%s.conf\n' "$GB_NGINX" "$1"; }
 nginx_enabled_file() { printf '%s/sites-enabled/%s.conf\n' "$GB_NGINX" "$1"; }
 nginx_ep_http_file() { printf '%s/conf.d/getbible-ep-%s.conf\n' "$GB_NGINX" "$(gb_slug "$1")"; }
@@ -116,9 +129,11 @@ nginx_render_global() {
 nginx_render_endpoint() {
     local stage="$1"
     nginx_detect
-    local slug="$EP_SLUG" domain="$EP_DOMAIN" tls=false
-    nginx_cert_exists "$domain" && tls=true
-    [[ "${GB_FORCE_TLS:-}" == true ]] && tls=true
+    local slug="$EP_SLUG" domain="$EP_DOMAIN" tls=false cert_dir live=true
+    cert_dir="$(nginx_tls_cert_dir "$domain")"
+    [[ -n "$cert_dir" ]] && tls=true
+    [[ "${GB_FORCE_TLS:-}" == true ]] && { tls=true; cert_dir="${cert_dir:-$(nginx_cert_dir "$domain")}"; }
+    [[ "${EP_LIVE:-}" == false ]] && live=false
     install -d -m 0755 "$stage/sites-available" "$stage/conf.d" "$stage/getbible/$domain"
     install -d -m 0700 "$stage/getbible/tokens" "$stage/getbible/token-validity"
 
@@ -132,7 +147,9 @@ nginx_render_endpoint() {
     [[ -n "${TYPE_PROXY_CACHE:-}" ]] && proxy_cache="$TYPE_PROXY_CACHE"
 
     local real_ip=false origin_pulls=false
-    if [[ "$EP_CLOUDFLARE_MODE" == proxied ]]; then
+    # Cloudflare's origin-side settings belong to live routing: a staged copy
+    # has no address-range file yet and must stay reachable for verification.
+    if [[ "$live" == true && "$EP_CLOUDFLARE_MODE" == proxied ]]; then
         real_ip=true
         [[ "$EP_CLOUDFLARE_ORIGIN_PULLS" == true ]] && origin_pulls=true
     fi
@@ -143,7 +160,7 @@ nginx_render_endpoint() {
     gb_render "$GB_NGINX_SRC/site.conf.tmpl" "$stage/sites-available/$domain.conf" \
         "DOMAIN=$domain" "SLUG=$slug" "TYPE=$EP_TYPE" "KIND=$EP_KIND" "TLS=$tls" \
         "IPV6=$NG_IPV6" "HTTP2_NATIVE=$http2_native" "HTTP2_LEGACY=$http2_legacy" \
-        "CERT_DIR=$(nginx_cert_dir "$domain")" "NGINX_GB_DIR=$GB_NGINX_GB" \
+        "CERT_DIR=$cert_dir" "NGINX_GB_DIR=$GB_NGINX_GB" \
         "ORIGIN_PULLS=$origin_pulls" "REAL_IP=$real_ip" "LOG_DIR=$(ep_log_dir "$domain")" \
         "WWW_DIR=$(ep_www_dir "$domain")" "METHODS_REGEX=$methods_regex" "REJECT_ARGS=$reject_args" \
         "LOCATIONS=$(cat "$locations")" || return 1

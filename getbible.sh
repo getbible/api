@@ -18,7 +18,7 @@ for lib in core platform ui config registry users telegram nginx certs systemd l
     # shellcheck source=/dev/null
     source "$GB_REPO_DIR/src/lib/$lib.sh"
 done
-for extra in analytics cloudflare update migrate doctor menu; do
+for extra in analytics cloudflare update migrate doctor golive menu; do
     # shellcheck source=/dev/null
     [[ -f "$GB_REPO_DIR/src/lib/$extra.sh" ]] && source "$GB_REPO_DIR/src/lib/$extra.sh"
 done
@@ -35,9 +35,17 @@ Endpoints
   status [DOMAIN]                        show status of one or all endpoints
   deploy static --domain D --version vN --repo URL [--ref master] [--path .]
                 [--extensions json,sha,txt] [--access open|metered|token]
-                [--schedule daily|weekly|monthly]
+                [--schedule daily|weekly|monthly] [--staged|--live]
   deploy runtime --domain D --kind query|search [--version v2]
                 [--repository PATH] [--access MODE] [--warm kjv] [--python auto|VERSION]
+                [--staged|--live]
+  go-live DOMAIN [--cert auto|http|dns-cloudflare]
+                                         take a staged endpoint live: certificate,
+                                         Cloudflare DNS and rules, HTTPS, verification
+  verify DOMAIN                          check this server end to end for a domain
+  cert DOMAIN status|issue [--method M]|renew
+                                         certificate details; issue one now (a staged
+                                         endpoint stays staged); force a renewal
   apply DOMAIN                           re-render and re-install one endpoint
   update [DOMAIN]                        apply reviewed code and configuration
   runtime versions                       list reviewed managed Python versions
@@ -60,6 +68,8 @@ Observability
   analytics [--window today|24h|7d|30d|all] [--domain D] [--json]
 
 Platform
+  settings [deploy-mode live|staged | cert-method auto|http|dns-cloudflare | certbot-email ADDRESS]
+                                         show or change the defaults used by deploy and go-live
   telegram enable|disable|test
   cloudflare ...                         see: getbible.sh cloudflare help
   migrate                                retire the legacy nginx/systemd setup
@@ -245,6 +255,46 @@ cmd_logs() {
     esac
 }
 
+cmd_golive() {
+    local domain="${1:-}" method=""
+    [[ -n "$domain" ]] || gb_die "go-live DOMAIN [--cert auto|http|dns-cloudflare]"
+    shift
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --cert|--method) [[ -n "${2:-}" ]] || gb_die "$1 needs auto, http or dns-cloudflare"; method="$2"; shift 2 ;;
+            *) gb_die "Unknown option: $1" ;;
+        esac
+    done
+    [[ -z "$method" ]] || certs_valid_method "$method" || gb_die "Certificate methods: auto, http, dns-cloudflare"
+    gb_system_init
+    golive_interactive "$domain" "$method"
+}
+
+cmd_settings() {
+    local key="${1:-}" value="${2:-}"
+    case "$key" in
+        "")
+            printf 'deploy-mode    %s\ncert-method    %s\ncertbot-email  %s\n' \
+                "$(gb_global DEFAULT_DEPLOY_MODE live)" "$(gb_global CERT_METHOD auto)" "$(gb_global CERTBOT_EMAIL)" ;;
+        deploy-mode)
+            [[ -n "$value" ]] || { gb_global DEFAULT_DEPLOY_MODE live; return 0; }
+            [[ "$value" == live || "$value" == staged ]] || gb_die "deploy-mode is live or staged"
+            gb_global_set DEFAULT_DEPLOY_MODE "$value"
+            gb_log "New endpoints are $value by default." ;;
+        cert-method)
+            [[ -n "$value" ]] || { gb_global CERT_METHOD auto; return 0; }
+            certs_valid_method "$value" || gb_die "cert-method is auto, http or dns-cloudflare"
+            gb_global_set CERT_METHOD "$value"
+            gb_log "Certificates are validated with: $value." ;;
+        certbot-email)
+            [[ -n "$value" ]] || { gb_global CERTBOT_EMAIL; return 0; }
+            certs_valid_email "$value" || gb_die "Invalid email address: $value"
+            gb_global_set CERTBOT_EMAIL "$value"
+            gb_log "Let's Encrypt contact email set." ;;
+        *) gb_die "settings [deploy-mode live|staged | cert-method auto|http|dns-cloudflare | certbot-email ADDRESS]" ;;
+    esac
+}
+
 cmd_render() {
     local domain="${1:-}" out=""
     [[ "${2:-}" == --out ]] && out="${3:-}"
@@ -266,6 +316,10 @@ main() {
             if [[ -n "${1:-}" ]]; then endpoint_status_text "$1"; else
                 while read -r d; do [[ -n "$d" ]] && ep_summary_line "$d"; done < <(ep_list); fi ;;
         deploy) cmd_deploy "$@" ;;
+        go-live|golive) cmd_golive "$@" ;;
+        verify) gb_require_root; golive_verify "${1:?domain}" ;;
+        cert) gb_system_init; certs_cli "$@" ;;
+        settings) gb_system_init; cmd_settings "$@" ;;
         apply) gb_system_init; endpoint_apply "${1:?domain}" ;;
         update) gb_system_init; if [[ -n "${1:-}" ]]; then endpoint_apply "$1"; else update_all; fi ;;
         runtime) cmd_runtime "$@" ;;

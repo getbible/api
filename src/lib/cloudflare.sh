@@ -20,6 +20,11 @@ cloudflare_configure() {
     if [[ -n "$token" ]]; then
         cfg_set "$GB_CLOUDFLARE_CONF" CLOUDFLARE_API_TOKEN "$token"
         chmod 0600 "$GB_CLOUDFLARE_CONF" 2>/dev/null || true
+        # certbot renews DNS-01 certificates from its own copy of the token,
+        # also for lineages copied from another server.
+        if declare -F certs_cloudflare_credentials_write >/dev/null; then
+            certs_cloudflare_credentials_write || true
+        fi
     fi
     if result="$(cf_cmd verify 2>&1)"; then
         gb_global_set CLOUDFLARE_ENABLED true
@@ -65,6 +70,12 @@ cloudflare_protect_access() {
 
 cloudflare_apply() {
     local domain="$1" mode cache ipv4 ipv6 proxied
+    # A staged endpoint must not take over its name: the records still point
+    # at whatever serves it today. Go-live applies DNS and rules.
+    if ! ep_is_live "$domain"; then
+        gb_log "$domain is staged; Cloudflare DNS and rules are applied when it goes live."
+        return 0
+    fi
     mode="$(ep_get "$domain" CLOUDFLARE_MODE off)"
     cache="$(ep_get "$domain" CLOUDFLARE_CACHE bypass)"
     if [[ "$(ep_get "$domain" ACCESS_MODE metered)" == token ]]; then
@@ -82,6 +93,7 @@ cloudflare_apply() {
     [[ -n "$ipv4" ]] && args+=(--ipv4 "$ipv4")
     [[ -n "$ipv6" ]] && args+=(--ipv6 "$ipv6")
     cf_cmd "${args[@]}" >&2 || return 1
+    ep_state_set "$domain" CLOUDFLARE_DNS_AT "$(gb_timestamp)"
     if [[ "$mode" == proxied ]]; then
         gb_step "Cloudflare rules for $domain (cache: $cache)"
         cf_cmd host-rules "$domain" --cache "$cache" --security api >&2 || return 1
@@ -96,6 +108,21 @@ cloudflare_apply() {
         cf_cmd host-rules-remove "$domain" >&2 || true
     fi
     tg_notify info "Cloudflare updated: $domain" "Mode: $mode, cache: $cache."
+}
+
+# The vhost of a live proxied endpoint includes the real-IP ranges and, with
+# origin pulls, Cloudflare's client CA. Both are public downloads that need no
+# token and change nothing at Cloudflare, so they can be fetched before the
+# vhost is rendered: a staged endpoint has neither until it goes live.
+cloudflare_ensure_origin_files() {
+    local domain="$1"
+    [[ "$(ep_get "$domain" CLOUDFLARE_MODE off)" == proxied ]] || return 0
+    if [[ ! -f "$(cf_real_ip_file)" ]]; then
+        cloudflare_refresh_ips || return 1
+    fi
+    if [[ "$(ep_get "$domain" CLOUDFLARE_ORIGIN_PULLS false)" == true && ! -f "$(cf_origin_ca_file)" ]]; then
+        cloudflare_install_origin_ca || return 1
+    fi
 }
 
 # Render the real-IP include from Cloudflare's published ranges.
@@ -177,7 +204,7 @@ cloudflare_endpoint_menu() {
         mode="$(ep_get "$domain" CLOUDFLARE_MODE off)"
         cache="$(ep_get "$domain" CLOUDFLARE_CACHE bypass)"
         pulls="$(ep_get "$domain" CLOUDFLARE_ORIGIN_PULLS false)"
-        choice="$(ui_menu "Cloudflare: $domain" "mode: $mode · edge cache: $cache · origin pulls: $pulls" \
+        choice="$(ui_menu "Cloudflare: $domain" "mode: $mode · edge cache: $cache · origin pulls: $pulls$(ep_is_live "$domain" || printf ' · staged: DNS and rules are applied at go-live')" \
             mode "Mode: off (not managed), dns (pass-through), proxied (orange cloud)" \
             cache "Edge caching: bypass (origin logs complete) or respect origin Cache-Control" \
             pulls "Authenticated origin pulls (only Cloudflare can reach the origin)" \

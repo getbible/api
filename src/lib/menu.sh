@@ -10,7 +10,8 @@ menu_main() {
     while true; do
         choice="$(ui_menu "getBible API" "$(menu_overview)" \
             endpoints "Endpoints: status, logs, access, tokens, sync" \
-            deploy "Deploy a new endpoint" \
+            deploy "Deploy a new endpoint (live now, or staged for later)" \
+            golive "Go live: switch a staged endpoint to its public name" \
             update "Update all endpoints (after git pull)" \
             analytics "Traffic analytics: calls and unique callers" \
             logs "Logs: view, archives, rotate" \
@@ -20,6 +21,7 @@ menu_main() {
         case "$choice" in
             endpoints) menu_endpoints ;;
             deploy) menu_deploy ;;
+            golive) golive_menu ;;
             update) menu_update ;;
             analytics) menu_analytics ;;
             logs) menu_logs ;;
@@ -61,14 +63,18 @@ menu_endpoint() {
     ep_load "$domain"
     endpoint_source_type "$EP_TYPE"
     while true; do
-        local -a extra=()
+        local -a extra=() golive=()
         mapfile -t extra < <("type_${EP_TYPE}_menu_items")
-        choice="$(ui_menu "$domain" "$EP_TYPE $EP_KIND · access: $(ep_get "$domain" ACCESS_MODE)" \
+        ep_is_live "$domain" || golive=(golive "Go live: certificate, DNS, HTTPS (this endpoint is staged)")
+        choice="$(ui_menu "$domain" "$EP_TYPE $EP_KIND · access: $(ep_get "$domain" ACCESS_MODE) · $(ep_publication "$domain")" \
             status "Status and health" \
+            verify "Verify this server end to end (service, nginx, TLS)" \
+            "${golive[@]+"${golive[@]}"}" \
             logs "Logs" \
             access "Access mode (open, metered, token only)" \
             limits "Limits for anonymous callers" \
             tokens "Bearer tokens" \
+            certificate "Certificate: status, issue, renew" \
             cloudflare "Cloudflare settings for this domain" \
             "${extra[@]}" \
             apply "Re-apply configuration" \
@@ -79,6 +85,12 @@ menu_endpoint() {
                 out="$(gb_tmpdir)/status.$$"
                 endpoint_status_text "$domain" > "$out" 2>&1 || true
                 ui_textbox "Status: $domain" "$out" ;;
+            verify)
+                out="$(gb_tmpdir)/verify.$$"
+                golive_verify "$domain" > "$out" 2>&1 || true
+                ui_textbox "Verify: $domain" "$out" ;;
+            golive) golive_interactive "$domain" ;;
+            certificate) certs_menu "$domain" ;;
             logs) menu_endpoint_logs "$domain" ;;
             access)
                 local mode
@@ -193,6 +205,8 @@ menu_settings() {
             cloudflare "Cloudflare API token" \
             defaults "Defaults for new endpoints (access, limits, caching, schedule)" \
             retention "Log retention" \
+            deploymode "New endpoints: go live at once, or stage them for a later go-live" \
+            certmethod "Certificate validation: automatic, http, or dns-cloudflare" \
             certbot "Let's Encrypt contact email" \
             hsts "HSTS includeSubDomains" \
             back "Back")" || return 0
@@ -201,6 +215,8 @@ menu_settings() {
             cloudflare) cloudflare_configure ;;
             defaults) menu_settings_defaults ;;
             retention) menu_settings_retention ;;
+            deploymode) menu_settings_deploy_mode ;;
+            certmethod) menu_settings_cert_method ;;
             certbot)
                 local email
                 email="$(ui_input "Let's Encrypt" "Contact email" "$(gb_global CERTBOT_EMAIL)")" || continue
@@ -215,6 +231,27 @@ menu_settings() {
             back) return 0 ;;
         esac
     done
+}
+
+menu_settings_deploy_mode() {
+    local current mode
+    current="$(gb_global DEFAULT_DEPLOY_MODE live)"
+    mode="$(ui_radiolist "New endpoints" "What should a newly deployed endpoint do by default? The deploy walkthrough still asks each time.\n\nStage them while building a replacement server: everything is installed, but no certificate is requested and DNS is untouched until you choose 'Go live' per endpoint." \
+        live "Go live at once: certificate and Cloudflare DNS on deploy" "$([[ "$current" == live ]] && echo on || echo off)" \
+        staged "Stage: prepare everything, go live later per endpoint" "$([[ "$current" == staged ]] && echo on || echo off)")" || return 0
+    gb_global_set DEFAULT_DEPLOY_MODE "$mode"
+    ui_msg "New endpoints" "New endpoints are $mode by default. Existing endpoints are not affected."
+}
+
+menu_settings_cert_method() {
+    local current method
+    current="$(gb_global CERT_METHOD auto)"
+    method="$(ui_radiolist "Certificate validation" "How Let's Encrypt validates a domain when a certificate is requested.\n\nDNS-01 through Cloudflare needs the certbot-dns-cloudflare plugin (System > Install dependencies) and the Cloudflare API token, and works before DNS points at this server: the zero-downtime path for a new server." \
+        auto "Automatic: dns-cloudflare when available, otherwise http" "$([[ "$current" == auto ]] && echo on || echo off)" \
+        http "HTTP-01: DNS must already route the name to this server" "$([[ "$current" == http ]] && echo on || echo off)" \
+        dns-cloudflare "DNS-01 through the Cloudflare API token" "$([[ "$current" == dns-cloudflare ]] && echo on || echo off)")" || return 0
+    gb_global_set CERT_METHOD "$method"
+    ui_msg "Certificate validation" "Certificates are validated with: $method. 'Go live' and 'Issue certificate' can still choose per request."
 }
 
 menu_settings_telegram() {

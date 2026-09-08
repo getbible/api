@@ -44,7 +44,7 @@ ep_load() {
                CONN_LIMIT CLOUDFLARE_MODE CLOUDFLARE_CACHE CLOUDFLARE_ORIGIN_PULLS DOCS_SOURCE \
                EXTENSIONS CACHE_TTL SHA_CACHE_TTL SYNC_SCHEDULE SYNC_USER VERSION REPOSITORY \
                WORKERS THREADS WARM_TRANSLATIONS DEFAULT_TRANSLATION DEFAULT_REFERENCE \
-               ALLOWED_TRANSLATIONS REQUIRE_CHECKSUMS PYTHON_VERSION CREATED ENABLED; do
+               ALLOWED_TRANSLATIONS REQUIRE_CHECKSUMS PYTHON_VERSION CREATED ENABLED LIVE; do
         printf -v "EP_$key" '%s' ""
     done
     cfg_load "$(ep_conf "$domain")" EP
@@ -64,6 +64,7 @@ ep_create() {
     cfg_set "$conf" TYPE "$type"
     cfg_set "$conf" KIND "$kind"
     cfg_set "$conf" ENABLED true
+    cfg_set "$conf" LIVE "$([[ "$(ep_deploy_mode_default)" == staged ]] && printf false || printf true)"
     cfg_set "$conf" ACCESS_MODE "$(gb_global DEFAULT_ACCESS_MODE metered)"
     cfg_set "$conf" RATE_PER_SECOND "$(gb_global DEFAULT_RATE_PER_SECOND 50)"
     cfg_set "$conf" RATE_BURST "$(gb_global DEFAULT_RATE_BURST 250)"
@@ -82,6 +83,20 @@ ep_create() {
 ep_remove_config() {
     local domain="$1"
     rm -rf -- "${GB_ENDPOINTS:?}/$domain" "${GB_STATE:?}/$domain"
+}
+
+# --- publication ------------------------------------------------------------
+# A staged endpoint has everything installed but has not taken over its public
+# name: no certificate was requested and DNS was not changed. Endpoints from
+# before staged deployments carry no LIVE key and are live.
+ep_is_live() { [[ "$(ep_get "$1" LIVE true)" != false ]]; }
+ep_publication() { if ep_is_live "$1"; then printf 'live\n'; else printf 'staged\n'; fi; }
+
+# The mode for a new endpoint: the deploy walkthrough or --staged/--live sets
+# GB_DEPLOY_MODE; otherwise the default from Settings applies.
+ep_deploy_mode_default() {
+    local mode="${GB_DEPLOY_MODE:-$(gb_global DEFAULT_DEPLOY_MODE live)}"
+    if [[ "$mode" == staged ]]; then printf 'staged\n'; else printf 'live\n'; fi
 }
 
 ep_state_get() { cfg_get "$(ep_state_conf "$1")" "$2" "${3:-}"; }
@@ -146,5 +161,5 @@ ep_summary_line() {
     else
         extra="kind: $EP_KIND $EP_VERSION"
     fi
-    printf '%-32s %-8s %-8s %s\n' "$domain" "$EP_TYPE" "$EP_ACCESS_MODE" "$extra"
+    printf '%-32s %-8s %-8s %-7s %s\n' "$domain" "$EP_TYPE" "$EP_ACCESS_MODE" "$(ep_publication "$domain")" "$extra"
 }

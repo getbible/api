@@ -1,6 +1,8 @@
 # Installing on a server
 
-Start with Ubuntu 24.04 or 26.04, DNS for each endpoint domain, and sudo.
+Start with Ubuntu 24.04 or 26.04 and sudo. DNS for each endpoint domain may
+already point at this server or still at another one: an endpoint can be
+deployed staged and go live later (see `NEW_SERVER.md`).
 The manager detects `/etc/os-release`, architecture, glibc, nginx capabilities
 and available tools. `install-deps` uses `apt` on Debian/Ubuntu; on other Linux
 distributions it reports the required packages for manual installation.
@@ -22,7 +24,7 @@ action (see `UPDATING.md`).
 ## 2. Dependencies and first run
 
 ```sh
-sudo ./getbible.sh install-deps     # nginx, certbot, python3-venv, whiptail, rsync, git, acl, ...
+sudo ./getbible.sh install-deps     # nginx, certbot (+ dns-cloudflare plugin), python3-venv, whiptail, rsync, git, acl, ...
 sudo ./getbible.sh doctor           # what the host looks like
 sudo ./getbible.sh runtime versions # reviewed CPython versions and builds
 sudo ./getbible.sh                  # the menu
@@ -60,18 +62,36 @@ certificate renewals, log rotations, token changes.
 
 ## 4. Deploy endpoints
 
-Deploy a new endpoint > Static or Runtime. The static walk-through asks for
-the domain, the first version, the git repository, branch, source folder,
-file types, access mode and check schedule; it then prints the deploy key to
-add to the repository. The runtime walk-through asks for the kind (query or
-search), the domain, the version and the folder that holds the Bible files.
+Deploy a new endpoint > Static or Runtime. Both walk-throughs ask for the
+domain and then **Go live now?**
+
+- **Go live now**: the endpoint takes over its name at once. A certificate
+  is requested from Let's Encrypt as soon as the HTTP vhost is up, and when
+  Cloudflare manages the domain here its DNS records are pointed at this
+  server.
+- **Stage it**: everything is installed and verified (data, services,
+  nginx with a self-signed placeholder certificate) but no certificate is
+  requested and DNS is not changed, so whatever serves the name today keeps
+  serving. Main menu > Go live, or Endpoint > Go live, switches it later.
+  Settings > New endpoints chooses the default answer; `NEW_SERVER.md`
+  walks through rebuilding a whole server this way.
+
+The static walk-through then asks for the first version, the git repository,
+branch, source folder, file types, access mode and check schedule, and prints
+the deploy key to add to the repository. The runtime walk-through asks for the
+kind (query or search), the version and the folder that holds the Bible files.
 Details: `STATIC_ENDPOINTS.md`, `RUNTIME_ENDPOINTS.md`.
 
-Certificates are requested from Let's Encrypt automatically once the domain's
-HTTP vhost is up. When certbot cannot reach Let's Encrypt (DNS not yet live,
-port 80 blocked), HTTPS deployment is incomplete: HTTP serves ACME challenges
-and redirects normal requests to HTTPS. Fix certificate issuance and run
-"Re-apply configuration" before exposing the endpoint to clients.
+Certificates are validated over HTTP-01 through the challenge directory, or
+over DNS-01 through the stored Cloudflare API token when the
+`certbot-dns-cloudflare` plugin is installed (Settings > Certificate
+validation; automatic uses DNS-01 for Cloudflare-managed domains). DNS-01
+works before DNS points here,
+so a staged endpoint can already hold its real certificate: Endpoint >
+Certificate > Issue. When a live deploy's certificate request fails (DNS not
+yet here, port 80 blocked), the endpoint serves HTTP only: ACME challenges
+are answered and normal requests redirect to HTTPS. Fix the cause and use
+Endpoint > Certificate > Issue.
 
 ## 5. Migrating an existing server
 
@@ -87,7 +107,9 @@ and reloads nginx. Deploy the new endpoints first, then migrate.
 | --- | --- |
 | `/etc/getbible/getbible.conf` | global defaults (access mode, limits, caching, schedule, log retention) |
 | `/etc/getbible/telegram.conf`, `cloudflare.conf` | notification and Cloudflare credentials (root only) |
-| `/etc/getbible/endpoints/<domain>/` | `endpoint.conf`, `versions/*.conf`, `tokens.json`, `runtime.env` |
+| `/etc/getbible/certbot-cloudflare.ini` | the Cloudflare token as certbot's DNS-01 plugin reads it (root only, written from `cloudflare.conf`) |
+| `/etc/getbible/placeholder-certs/<domain>/` | the self-signed certificate of a staged endpoint (removed at go-live) |
+| `/etc/getbible/endpoints/<domain>/` | `endpoint.conf` (including `LIVE=true|false`), `versions/*.conf`, `tokens.json`, `runtime.env` |
 | `/etc/nginx/sites-available/<domain>.conf` | the rendered vhost (`conf.d/getbible-*.conf`, `snippets/getbible/`, `getbible/` hold the shared pieces) |
 | `/srv/getbible/<domain>/<version>` | the live static tree (a symlink to a release under `releases/`) |
 | `/opt/getbible/<kind>/current` | the live runtime release (a symlink under `releases/`) |

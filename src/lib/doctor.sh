@@ -31,6 +31,14 @@ doctor_run() {
         if [[ -z "$GB_PREFIX" ]] && "$GB_NGINX_BIN" -t >/dev/null 2>&1; then doctor_check "nginx configuration" ok "nginx -t passes"; else doctor_check "nginx configuration" WARN "nginx -t fails or nginx missing"; fi
         sd_is_active nginx && doctor_check "nginx service" ok active || doctor_check "nginx service" WARN "not active"
     fi
+    if certs_can_run; then
+        if certs_dns_cloudflare_installed; then
+            doctor_check "certbot dns-cloudflare" ok "DNS-01 available: certificates can be issued before DNS points here"
+        else
+            doctor_check "certbot dns-cloudflare" info "plugin not installed (python3-certbot-dns-cloudflare); only HTTP-01 is possible"
+        fi
+    fi
+    doctor_check_dns_renewals
     if sd_available; then
         sd_is_active certbot.timer && doctor_check "certbot.timer" ok active || doctor_check "certbot.timer" WARN "not active (snap certbot uses its own timer)"
         sd_is_active getbible-logrotate.timer && doctor_check "log rotation timer" ok active || doctor_check "log rotation timer" WARN "not active; run any deploy or update"
@@ -41,7 +49,26 @@ doctor_run() {
     [[ -n "$(cfg_get "$GB_CLOUDFLARE_CONF" CLOUDFLARE_API_TOKEN)" ]] && doctor_check "cloudflare token" ok stored || doctor_check "cloudflare token" info "not stored"
     printf '\nDisk: %s\n' "$(df -h / 2>/dev/null | awk 'NR==2 {print $4" free of "$2" ("$5" used)"}')"
     printf 'Endpoints: %s\n' "$(ep_list | tr '\n' ' ')"
+    printf 'Staged (not live): %s\n' "$(golive_staged_domains | tr '\n' ' ')"
+    printf 'Defaults: new endpoints %s, certificate validation %s\n' "$(gb_global DEFAULT_DEPLOY_MODE live)" "$(gb_global CERT_METHOD auto)"
     printf '\nListening: %s\n' "$(ss -ltn 2>/dev/null | awk 'NR>1 {print $4}' | grep -E ':(80|443)$' | sort -u | tr '\n' ' ')"
+}
+
+# Certificates issued (or copied from another server) with DNS-01 renew
+# through the credentials file named in their renewal configuration.
+doctor_check_dns_renewals() {
+    local conf credentials broken=""
+    for conf in "$GB_LETSENCRYPT"/renewal/*.conf; do
+        [[ -f "$conf" ]] || continue
+        grep -q '^authenticator[[:space:]]*=[[:space:]]*dns-cloudflare' "$conf" || continue
+        credentials="$(sed -n 's/^dns_cloudflare_credentials[[:space:]]*=[[:space:]]*//p' "$conf" | head -1)"
+        if [[ -z "$credentials" || ! -f "$credentials" ]] || ! certs_dns_cloudflare_installed; then
+            broken="$broken $(basename "$conf" .conf)"
+        fi
+    done
+    if [[ -n "$broken" ]]; then
+        doctor_check "DNS-01 renewals" WARN "missing credentials file or plugin for:$broken (store the Cloudflare token under Settings; install python3-certbot-dns-cloudflare)"
+    fi
 }
 
 doctor_install_deps() {
@@ -54,6 +81,15 @@ doctor_install_deps() {
     DEBIAN_FRONTEND=noninteractive apt-get install -y "${GB_APT_PACKAGES[@]}" || return 1
     if apt-cache show libnginx-mod-http-brotli-static >/dev/null 2>&1; then
         DEBIAN_FRONTEND=noninteractive apt-get install -y libnginx-mod-http-brotli-static || true
+    fi
+    # DNS-01 validation through Cloudflare: lets a staged endpoint or a new
+    # server obtain certificates before DNS changes. Best effort: HTTP-01
+    # still works without it.
+    if apt-cache show python3-certbot-dns-cloudflare >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y python3-certbot-dns-cloudflare \
+            || gb_warn "python3-certbot-dns-cloudflare could not be installed; certificates are validated over HTTP-01 only."
+    else
+        gb_warn "python3-certbot-dns-cloudflare is not available from apt; with snap certbot install the certbot-dns-cloudflare snap for DNS-01."
     fi
     gb_ensure_dir "$GB_ACME_ROOT" 0755
     sd_enable --now nginx || true

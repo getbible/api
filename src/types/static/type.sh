@@ -121,9 +121,10 @@ type_static_create() {
 # Interactive deployment of a new static endpoint.
 type_static_deploy_interactive() {
     local domain label repo ref subpath extensions mode schedule selection
-    domain="$(ui_input "New static endpoint" "Domain name (DNS must already point at this server)" "")" || return 1
+    domain="$(ui_input "New static endpoint" "Domain name (DNS may still point at another server; you choose when it goes live)" "")" || return 1
     gb_valid_domain "$domain" || { ui_msg "Invalid" "That is not a valid domain name."; return 1; }
     ep_exists "$domain" && { ui_msg "Exists" "$domain is already an endpoint."; return 1; }
+    GB_DEPLOY_MODE="$(endpoint_prompt_deploy_mode "$domain")" || return 1
     label="$(ui_input "Version" "Version served under https://$domain/<version>/ (v1, v2, ...)" "v2")" || return 1
     gb_valid_version "$label" || { ui_msg "Invalid" "Version labels look like v1, v2, v3."; return 1; }
     repo="$(ui_input "Repository" "Git repository holding the files (ssh URL for private repositories)" "git@github.com:getbible/")" || return 1
@@ -156,6 +157,8 @@ type_static_deploy_cli() {
             --extensions) extensions="$2"; shift 2 ;;
             --access) mode="$2"; shift 2 ;;
             --schedule) schedule="$2"; shift 2 ;;
+            --staged) GB_DEPLOY_MODE=staged; shift ;;
+            --live) GB_DEPLOY_MODE=live; shift ;;
             *) gb_die "Unknown option for deploy static: $1" ;;
         esac
     done
@@ -183,7 +186,12 @@ type_static_deploy_finish() {
         fi
     fi
     endpoint_apply "$domain"
-    tg_notify ok "Endpoint deployed: $domain" "Static endpoint with version $label. The first sync runs once the deploy key is authorised on the repository."
+    if ep_is_live "$domain"; then
+        tg_notify ok "Endpoint deployed: $domain" "Static endpoint with version $label. The first sync runs once the deploy key is authorised on the repository."
+    else
+        tg_notify ok "Endpoint staged: $domain" "Static endpoint with version $label, prepared on $(hostname -f 2>/dev/null || hostname). Not live: no certificate or DNS change until 'Go live'."
+        ui_msg "Staged" "$domain is staged on this server: synchronisation, nginx and a placeholder certificate are in place, but no certificate was requested and DNS was not changed.\n\nSync its data, verify it, and choose 'Go live' from the main menu or the endpoint menu when it should take over."
+    fi
     type_static_show_key "$domain"
     if ui_yesno "First sync" "Has the deploy key been added to the repository? Run the first sync now?" no; then
         sync_run_now "$domain" "$label"
