@@ -19,12 +19,13 @@ it_log "sandbox $IT_SB"
 install -d -m 0755 "$IT_SB/fixtures"
 cp -a "$IT_ROOT/tests/python/fixtures/repository" "$FIXTURE"
 chmod -R a+rX "$FIXTURE"
-# query goes live with a preseeded certificate; search stays staged and
-# serves through its placeholder certificate until go-live.
+# query goes live with a preseeded certificate and serves /v2/; search stays
+# staged, serves through its placeholder certificate until go-live, and serves
+# its single version at the domain root.
 for kind in query search; do
     domain="$kind.example.test"
     flags=()
-    [[ "$kind" != search ]] || flags=(--staged)
+    [[ "$kind" != search ]] || flags=(--staged --root)
     "$IT_ROOT/getbible.sh" deploy runtime --domain "$domain" --kind "$kind" --repository "$FIXTURE" \
         --require-checksums false --default-translation test --default-reference Ge1:1 --warm test \
         --access metered "${flags[@]+"${flags[@]}"}" >/dev/null 2>&1 || { echo "deploy $kind failed"; exit 1; }
@@ -35,16 +36,16 @@ for kind in query search; do
 done
 
 start_gunicorn() {
-    local kind="$1" release deployment env_file socket socket_dir
-    release="$(readlink -f "$IT_SB/opt/getbible/$kind/current")"
-    deployment="$(readlink -f "$IT_SB/opt/getbible/$kind/active")"
+    local kind="$1" label="$2" release deployment env_file socket socket_dir
+    release="$(readlink -f "$IT_SB/opt/getbible/$kind/$label/current")"
+    deployment="$(readlink -f "$IT_SB/opt/getbible/$kind/$label/active")"
     env_file="$deployment/runtime.env"
     socket="$( # shellcheck source=/dev/null
         source "$env_file"; bind_name="${kind^^}_BIND"; printf '%s' "${!bind_name}"
     )"
     socket="${socket#unix:}"
     socket_dir="$(dirname "$socket")"
-    mkdir -p "$socket_dir" "$IT_SB/var/log/getbible/$kind.example.test/app" "$IT_SB/var/cache/getbible/$kind/librarian"
+    mkdir -p "$socket_dir" "$IT_SB/var/log/getbible/$kind.example.test/app" "$IT_SB/var/cache/getbible/$kind/$label/librarian"
     # The sandbox cannot create the production accounts. Run unprivileged
     # here; systemd.sh separately verifies the actual account/ACL/unit setup.
     chown -R "$IT_NGINX_USER:" "$socket_dir" "$IT_SB/var/log/getbible/$kind.example.test/app" "$IT_SB/var/cache/getbible/$kind"
@@ -59,8 +60,8 @@ start_gunicorn() {
         (( waited < 60 )) || { echo "gunicorn $kind did not become ready"; tail -20 "$IT_SB/gunicorn-$kind.log"; exit 1; }
     done
 }
-start_gunicorn query
-start_gunicorn search
+start_gunicorn query v2
+start_gunicorn search root
 it_nginx_start || exit 1
 
 Q="query.example.test"; S="search.example.test"
@@ -92,34 +93,40 @@ it_check "folder with args is the service" '"code":"parameters_not_accepted"' "$
 it_check "healthz proxied"           '{"status":"ok"}'           "$(it_body "$Q" /healthz)"
 it_check "readyz proxied"            '{"status":"ready"}'        "$(it_body "$Q" /readyz)"
 it_check "unknown route problem"     '"code":"not_found"'        "$(it_body "$Q" /a/b/c/d)"
-it_check "app log has reference"     '"reference":"Ge1:1"'       "$(it_wait_log "$IT_SB/var/log/getbible/$Q/app/app.log" '"reference":"Ge1:1"')"
+it_check "app log has reference"     '"reference":"Ge1:1"'       "$(it_wait_log "$IT_SB/var/log/getbible/$Q/app/v2.log" '"reference":"Ge1:1"')"
 it_check "nginx log has uri"         '"uri":"/v2/test/Ge1:1?x=1"' "$(it_wait_log "$IT_SB/var/log/getbible/$Q/access.log" '/v2/test/Ge1:1?x=1')"
 
-echo "-- search endpoint through nginx --"
-it_check "search 200"                "200"                       "$(it_status "$S" /v2/test/beginning)"
-it_check "search envelope"           '"kind":"search"'           "$(it_body "$S" /v2/test/beginning)"
-it_check "search with filters"       '"words":"any"'             "$(it_body "$S" '/v2/test/beginning?words=any&limit=5')"
-it_check "search total"              '"total":1'                 "$(it_body "$S" /v2/test/beginning)"
-it_check "reference typed as search" '"kind":"reference"'        "$(it_body "$S" /v2/test/Ge1:1)"
-it_check "q parameter form"          '"kind":"search"'           "$(it_body "$S" '/v2/test?q=beginning')"
-it_check "translation parameter"     '"abbreviation":"test"'     "$(it_body "$S" '/v2?q=beginning&translation=test')"
-it_check "no search string"          '"code":"missing_search"'   "$(it_body "$S" /v2/test)"
-it_check "unknown parameter"         '"code":"unknown_parameter"' "$(it_body "$S" '/v2/test/beginning?nope=1')"
-it_check "post json body"            '"kind":"search"'           "$(it_body "$S" /v2/test -X POST -H 'Content-Type: application/json' -d '{"q":"beginning","limit":2}')"
-it_check "post filters on path"      '"words":"any"'             "$(it_body "$S" /v2/test/beginning -X POST -H 'Content-Type: application/json' -d '{"words":"any"}')"
-it_check "post form rejected"        "415"                       "$(it_status "$S" /v2/test -X POST -H 'Content-Type: application/x-www-form-urlencoded' -d 'q=beginning')"
-it_check "post not cached"           "cache-control: no-store"   "$(it_headers "$S" /v2/test -X POST -H 'Content-Type: application/json' -d '{"q":"beginning"}' | grep -i '^cache-control')"
-it_check "get cached header"         "max-age=60"                "$(it_header "$S" /v2/test/beginning cache-control)"
-it_check "search string redirect"    "location: /v2/test/beginning" "$(it_header "$S" /v2/beginning location)"
-it_check "redirect keeps filters"    "location: /v2/test/beginning?limit=3" "$(it_header "$S" '/v2/beginning?limit=3' location)"
-it_check "put rejected by nginx"     "405"                       "$(it_status "$S" /v2/test/x -X PUT)"
-it_check "docs page"                 "text/html"                 "$(it_header "$S" / content-type)"
-it_check "endpoint page"             "text/html"                 "$(it_header "$S" /v2/ content-type)"
-it_check "openapi served"            '"openapi":"3.1.0"'         "$(it_body "$S" /openapi.json | tr -d ' \n')"
-it_check "endpoint openapi"          '"openapi":"3.1.0"'         "$(it_body "$S" /v2/openapi.json | tr -d ' \n')"
-it_check "folder with query searches" '"kind":"search"'          "$(it_body "$S" '/v2/?q=beginning&translation=test')"
-it_check "folder with body searches" '"kind":"search"'           "$(it_body "$S" /v2/ -X POST -H 'Content-Type: application/json' -d '{"q":"beginning","translation":"test"}')"
-it_check "app log has search text"   '"search":"beginning"'      "$(it_wait_log "$IT_SB/var/log/getbible/$S/app/app.log" '"search":"beginning"')"
+echo "-- search endpoint at the domain root through nginx --"
+it_check "root endpoint recorded"    "LABEL=root"                "$(cat "$IT_SB/etc/getbible/endpoints/$S/versions/root.conf")"
+it_check "search 200"                "200"                       "$(it_status "$S" /test/beginning)"
+it_check "search envelope"           '"kind":"search"'           "$(it_body "$S" /test/beginning)"
+it_check "search with filters"       '"words":"any"'             "$(it_body "$S" '/test/beginning?words=any&limit=5')"
+it_check "search total"              '"total":1'                 "$(it_body "$S" /test/beginning)"
+it_check "reference typed as search" '"kind":"reference"'        "$(it_body "$S" /test/Ge1:1)"
+it_check "q parameter form"          '"kind":"search"'           "$(it_body "$S" '/test?q=beginning')"
+it_check "translation parameter"     '"abbreviation":"test"'     "$(it_body "$S" '/?q=beginning&translation=test')"
+it_check "no search string"          '"code":"missing_search"'   "$(it_body "$S" /test)"
+it_check "unknown parameter"         '"code":"unknown_parameter"' "$(it_body "$S" '/test/beginning?nope=1')"
+it_check "post json body"            '"kind":"search"'           "$(it_body "$S" /test -X POST -H 'Content-Type: application/json' -d '{"q":"beginning","limit":2}')"
+it_check "post to the root"          '"kind":"search"'           "$(it_body "$S" / -X POST -H 'Content-Type: application/json' -d '{"q":"beginning","translation":"test"}')"
+it_check "post filters on path"      '"words":"any"'             "$(it_body "$S" /test/beginning -X POST -H 'Content-Type: application/json' -d '{"words":"any"}')"
+it_check "post form rejected"        "415"                       "$(it_status "$S" /test -X POST -H 'Content-Type: application/x-www-form-urlencoded' -d 'q=beginning')"
+it_check "post not cached"           "cache-control: no-store"   "$(it_headers "$S" /test -X POST -H 'Content-Type: application/json' -d '{"q":"beginning"}' | grep -i '^cache-control')"
+it_check "get cached header"         "max-age=60"                "$(it_header "$S" /test/beginning cache-control)"
+# nginx rewrites the service's Location (/v2/test/beginning) for the root and
+# makes it absolute on the way.
+it_check "search string redirect"    "$S/test/beginning"         "$(it_header "$S" /beginning location)"
+it_check "redirect keeps filters"    "$S/test/beginning?limit=3" "$(it_header "$S" '/beginning?limit=3' location)"
+it_check "redirect has no version"   ""                          "$(it_header "$S" /beginning location | grep -c '/v2/' | sed 's/^0$//')"
+it_check "put rejected by nginx"     "405"                       "$(it_status "$S" /test/x -X PUT)"
+it_check "root page"                 "text/html"                 "$(it_header "$S" / content-type)"
+it_check "root page routes"          "https://$S/{translation}/{search string}" "$(it_body "$S" /)"
+it_check "root openapi"              '"openapi":"3.1.0"'         "$(it_body "$S" /openapi.json | tr -d ' \n')"
+it_check "root openapi paths"        '"/{translation}/{search}"' "$(it_body "$S" /openapi.json | tr -d ' \n')"
+it_check "no version folder at root" "404"                       "$(it_status "$S" /v2/test/beginning)"
+it_check "no versions.json at root"  ""                          "$(ls "$IT_SB/var/www/getbible/$S/versions.json" 2>/dev/null)"
+it_check "internal prefix hidden"    "404"                       "$(it_status "$S" /.gb/v2)"
+it_check "app log has search text"   '"search":"beginning"'      "$(it_wait_log "$IT_SB/var/log/getbible/$S/app/root.log" '"search":"beginning"')"
 it_check "nginx log keeps query"     'q=beginning'               "$(it_wait_log "$IT_SB/var/log/getbible/$S/access.log" 'q=beginning')"
 
 echo "-- the staged search endpoint served through its placeholder --"
@@ -129,8 +136,10 @@ it_check "search placeholder cert"   "$S"              "$(openssl s_client -conn
 it_check "search readyz via nginx"   '{"status":"ready"}' "$(it_body "$S" /readyz)"
 
 echo "-- release rebuild is skipped when inputs are unchanged --"
-BEFORE="$(readlink -f "$IT_SB/opt/getbible/query/current")"
+BEFORE="$(readlink -f "$IT_SB/opt/getbible/query/v2/current")"
 "$IT_ROOT/getbible.sh" apply "$Q" >/dev/null 2>&1
-it_check "same release kept"         "$BEFORE"                   "$(readlink -f "$IT_SB/opt/getbible/query/current")"
+it_check "same release kept"         "$BEFORE"                   "$(readlink -f "$IT_SB/opt/getbible/query/v2/current")"
+it_check "endpoint recorded"         "LAYOUT=versioned"          "$(cat "$IT_SB/etc/getbible/endpoints/$Q/versions/v2.conf")"
+it_check "status per endpoint"       "Endpoint v2 of $Q (v2, versioned layout)" "$("$IT_ROOT/getbible.sh" status "$Q" 2>/dev/null)"
 
 it_summary

@@ -11,7 +11,7 @@ applies per domain.
 Settings > Cloudflare API token stores and verifies a scoped token
 (`/etc/getbible/cloudflare.conf`, root only). Scopes: Zone:Read, DNS:Edit,
 Zone Settings:Edit, Zone WAF:Edit, SSL and Certificates:Edit, and Cache
-Purge:Purge for protected endpoint transitions. Limit the token to the zones
+Purge:Purge for protected domain transitions. Limit the token to the zones
 managed by this installation. DNS:Edit also serves certificate validation
 (below).
 
@@ -21,7 +21,7 @@ With the `certbot-dns-cloudflare` plugin installed (`install-deps` adds
 `python3-certbot-dns-cloudflare`), certbot proves control of a name by
 publishing a `_acme-challenge` TXT record through the stored token instead of
 answering an HTTP request. The certificate can therefore be issued while the
-name still points at another server: on a staged endpoint (Endpoint >
+name still points at another server: on a staged domain (Domain >
 Certificate > Issue) or during go-live, before the records are switched.
 Settings > Certificate validation chooses `auto` (DNS-01 for a domain whose
 mode is `dns` or `proxied` whenever the plugin and token are present,
@@ -31,14 +31,14 @@ keeps a root-only copy of the token in `/etc/getbible/certbot-cloudflare.ini`
 for renewals; storing a token writes it, and the host check warns about
 DNS-01 renewals that lack it.
 
-## Staged endpoints
+## Staged domains
 
-A staged endpoint (deployed with "Stage it", see `NEW_SERVER.md`) records
+A staged domain (deployed with "Stage it", see `NEW_SERVER.md`) records
 its Cloudflare mode and cache setting but applies neither: the DNS records
 keep pointing at whatever serves the name today. The origin-side real-IP
 and origin-pull directives are rendered whenever the mode is `proxied` and
 the files they need exist; on a freshly built server they do not exist
-until the first go-live fetches them, so a staged endpoint there stays
+until the first go-live fetches them, so a staged domain there stays
 verifiable directly, while a serving vhost never loses them (also not
 through "Stage again"). The origin-pulls toggle itself is a zone-wide
 Cloudflare setting and takes effect at Cloudflare as soon as it is switched
@@ -47,13 +47,13 @@ the address ranges and origin CA before rendering the live vhost, and
 applies DNS and rules after nginx serves the certificate. For a domain
 managed here (mode `dns` or `proxied`), HTTP-01 validation at go-live is
 refused unless the name already reaches this server, because the records
-are switched only afterwards; use DNS-01. "Stage again" (endpoint menu or
+are switched only afterwards; use DNS-01. "Stage again" (domain menu or
 `stage DOMAIN`) stops the tool from applying DNS and rules for a live
-endpoint, for rolling back; it does not change DNS itself.
+domain, for rolling back; it does not change DNS itself.
 
 ## Per domain
 
-Endpoint > Cloudflare settings, or `getbible.sh cloudflare mode DOMAIN off|dns|proxied`:
+Domain > Cloudflare settings, or `getbible.sh cloudflare mode DOMAIN off|dns|proxied`:
 
 | Mode | Effect |
 | --- | --- |
@@ -69,7 +69,7 @@ hostname so the rest of the zone is untouched:
 - cache rule: `bypass` (default) so every request reaches the origin and its
   logs stay complete, or `respect` to cache per the origin's `Cache-Control`
   (then origin logs only see cache misses). `respect` is available for
-  open/metered endpoints; token-only endpoints always bypass caching;
+  open/metered domains; token-only domains always bypass caching;
 - WAF custom rule skipping managed challenges and Cloudflare rate limiting
   for the host (DDoS protection stays on).
 

@@ -3,26 +3,27 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{DOMAIN}}/{{VERSION}}/ · getBible search API</title>
+<title>{{DOMAIN}}{{PREFIX}} · getBible search API</title>
 {{#IF FAVICON}}<link rel="icon" href="/favicon.ico">
 {{/IF}}<style>{{CSS}}</style>
 </head>
 <body>
 <main>
-<h1>{{DOMAIN}} <code>/{{VERSION}}/</code></h1>
+<h1>{{DOMAIN}}{{#UNLESS IS_ROOT}} <code>{{PREFIX}}</code>{{/UNLESS}}</h1>
 <p class="lead">The getBible search endpoint: give it words, get the verses that contain them. <span class="badge">{{ACCESS_MODE_LABEL}}</span> <span class="badge">API {{VERSION}}</span></p>
 
 <h2>Routes</h2>
-<pre><code>GET  https://{{DOMAIN}}/{{VERSION}}/{translation}/{search string}
-GET  https://{{DOMAIN}}/{{VERSION}}/{translation}?q={search string}
-GET  https://{{DOMAIN}}/{{VERSION}}?q={search string}&amp;translation={translation}
-POST https://{{DOMAIN}}/{{VERSION}}/{translation}          (JSON body)
-POST https://{{DOMAIN}}/{{VERSION}}                        (JSON body with translation)</code></pre>
-<p>The search string is the last path segment when present. <code>/{{VERSION}}/{search string}</code> without a translation redirects to <code>{{DEFAULT_TRANSLATION}}</code>. Filters travel as query parameters or as a JSON body; both work with GET and POST. When the same value appears in more than one place, the path wins, then the query string, then the body, then the endpoint's defaults.</p>
-<pre><code>curl https://{{DOMAIN}}/{{VERSION}}/{{DEFAULT_TRANSLATION}}/faith%20hope
-curl "https://{{DOMAIN}}/{{VERSION}}/{{DEFAULT_TRANSLATION}}/faith%20hope?words=all&amp;scope=new_testament&amp;limit=25"
+<pre><code>GET  https://{{DOMAIN}}{{PREFIX}}{translation}/{search string}
+GET  https://{{DOMAIN}}{{PREFIX}}{translation}?q={search string}
+GET  https://{{DOMAIN}}{{VERSION_PATH}}?q={search string}&amp;translation={translation}
+POST https://{{DOMAIN}}{{PREFIX}}{translation}          (JSON body)
+POST https://{{DOMAIN}}{{VERSION_PATH}}                        (JSON body with translation)</code></pre>
+{{#IF IS_ROOT}}<p>This domain serves API version {{VERSION}} at its root: there is no version segment in its paths.</p>
+{{/IF}}<p>The search string is the last path segment when present. <code>{{PREFIX}}{search string}</code> without a translation redirects to <code>{{DEFAULT_TRANSLATION}}</code>. Filters travel as query parameters or as a JSON body; both work with GET and POST. When the same value appears in more than one place, the path wins, then the query string, then the body, then the endpoint's defaults.</p>
+<pre><code>curl https://{{DOMAIN}}{{PREFIX}}{{DEFAULT_TRANSLATION}}/faith%20hope
+curl "https://{{DOMAIN}}{{PREFIX}}{{DEFAULT_TRANSLATION}}/faith%20hope?words=all&amp;scope=new_testament&amp;limit=25"
 curl -X POST -H "Content-Type: application/json" \
-     -d '{"q":"faith hope","scope":"new_testament","limit":25}' https://{{DOMAIN}}/{{VERSION}}/{{DEFAULT_TRANSLATION}}</code></pre>
+     -d '{"q":"faith hope","scope":"new_testament","limit":25}' https://{{DOMAIN}}{{PREFIX}}{{DEFAULT_TRANSLATION}}</code></pre>
 <p>A search string that is a scripture reference, such as <code>John 3:16</code>, returns that scripture instead of searching; the <code>query.kind</code> field says which happened.</p>
 
 <h2>Filters</h2>
@@ -56,8 +57,8 @@ curl -X POST -H "Content-Type: application/json" \
 <tr><td>400</td><td>invalid_search, unknown_parameter, repeated_parameter, request_limit</td><td>The filters are invalid or over their limits.</td></tr>
 <tr><td>401</td><td>unauthorized</td><td>A bearer token is required and was missing or invalid.</td></tr>
 <tr><td>404</td><td>translation_not_found</td><td>No such translation.</td></tr>
-<tr><td>404</td><td>unknown_version</td><td>Only <code>{{VERSION}}</code> is served here.</td></tr>
-<tr><td>415</td><td>unsupported_media_type</td><td>A POST body that is not JSON.</td></tr>
+{{#UNLESS IS_ROOT}}<tr><td>404</td><td>unknown_version</td><td>Only <code>{{VERSION}}</code> is served here.</td></tr>
+{{/UNLESS}}<tr><td>415</td><td>unsupported_media_type</td><td>A POST body that is not JSON.</td></tr>
 <tr><td>429</td><td>rate_limited</td><td>The public budget for your address is used up.</td></tr>
 <tr><td>503</td><td>busy, search_timeout, repository_unavailable</td><td>Temporary; retry after the <code>Retry-After</code> seconds.</td></tr>
 </table>

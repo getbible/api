@@ -1,6 +1,6 @@
-    # {{DOMAIN}} endpoint {{VERSION}}: its documentation page and OpenAPI
-    # document. A request for /{{VERSION}}/ that carries a query string or a
-    # body is the service's business and is handed to its /{{VERSION}} route.
+{{#UNLESS IS_ROOT}}    # {{DOMAIN}} endpoint {{VERSION}}: its documentation page and OpenAPI
+    # document, then its own service. A request for /{{VERSION}}/ that carries
+    # a query string or a body is the service's business.
 {{#IF DOCS_FILE}}
     location = /{{VERSION}}/ {
         if ($args != "") { rewrite ^ /{{VERSION}} last; }
@@ -21,3 +21,11 @@
         add_header Cache-Control "public, max-age=300" always;
     }
 {{/IF}}
+    location = /{{VERSION}} {
+{{PROXY_BODY}}
+    }
+
+    location ^~ /{{VERSION}}/ {
+{{PROXY_BODY}}
+    }
+{{/UNLESS}}

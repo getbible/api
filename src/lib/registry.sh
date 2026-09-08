@@ -122,10 +122,14 @@ ep_version_exists() { [[ -f "$(ep_version_conf "$1" "$2")" ]]; }
 ep_version_get() { cfg_get "$(ep_version_conf "$1" "$2")" "$3" "${4:-}"; }
 ep_version_set() { cfg_set "$(ep_version_conf "$1" "$2")" "$3" "$4"; }
 
-# ep_version_load DOMAIN LABEL: define EV_* variables.
+# ep_version_load DOMAIN LABEL: define EV_* variables. Static endpoints carry
+# the repository keys, runtime endpoints the service settings and layout.
 ep_version_load() {
     local key
-    for key in LABEL REPO_URL REPO_REF SOURCE_PATH ENABLED CREATED DOCS_SOURCE DOCS_REPO_PATH OPENAPI_SOURCE OPENAPI_REPO_PATH; do
+    for key in LABEL ENABLED CREATED DOCS_SOURCE DOCS_REPO_PATH OPENAPI_SOURCE OPENAPI_REPO_PATH \
+               REPO_URL REPO_REF SOURCE_PATH \
+               LAYOUT APP_VERSION REPOSITORY WORKERS THREADS WARM_TRANSLATIONS DEFAULT_TRANSLATION DEFAULT_REFERENCE \
+               ALLOWED_TRANSLATIONS REQUIRE_CHECKSUMS PYTHON_VERSION CACHE_TTL; do
         printf -v "EV_$key" '%s' ""
     done
     ep_version_exists "$1" "$2" || gb_die "Unknown endpoint $2 for $1"

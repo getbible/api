@@ -8,7 +8,7 @@ Everything about a request is logged; only bearer tokens are not.
 | --- | --- | --- |
 | `/var/log/getbible/<domain>/access.log` | nginx | request: time, host, endpoint, version, client address, method, full URI including the query string, status, bytes, request length, timing, upstream time, proxy cache state, referer, user agent, request id, token id, scheme, protocol, TLS version, Cloudflare country |
 | `/var/log/getbible/<domain>/error.log` | nginx | warning or error |
-| `/var/log/getbible/<domain>/app/app.log` | the runtime app | request: everything above plus the parsed reference, translation, search string, criteria, kind, totals, and the problem code on errors |
+| `/var/log/getbible/<domain>/app/<label>.log` | the runtime endpoint's service (`app.log` for a domain from before endpoints had records) | request: everything above plus the parsed reference, translation, search string, criteria, kind, totals, and the problem code on errors |
 | systemd journal | services, sync, timers | lifecycle messages |
 
 All lines are JSON. The runtime apps also send warnings and errors to the
@@ -34,13 +34,13 @@ Analytics > window, or:
 getbible.sh analytics [--window today|24h|7d|30d|all] [--domain D] [--json]
 ```
 
-Reads the live log and the archives inside the window, per endpoint and
+Reads the live log and the archives inside the window, per domain and
 combined:
 
 - **total calls**: every request except CORS preflights (`OPTIONS`);
 - **unique callers**: distinct token ids, or distinct client addresses when
   no token was presented, IPv6 collapsed to its /64; the combined figure is
-  the union across endpoints, so one client using two endpoints counts once;
+  the union across domains, so one client using two domains counts once;
 - status classes, rate-limited requests, bytes, latency percentiles, proxy
   cache hit ratio, top paths, versions, tokens, user agents, calls per day.
 

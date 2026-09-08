@@ -8,7 +8,7 @@
   },
   "servers": [{"url": "https://{{DOMAIN}}"}],
   "paths": {
-    "/{{VERSION}}/{translation}/{search}": {
+    "{{PREFIX}}{translation}/{search}": {
       "get": {
         "summary": "Search a translation",
         "operationId": "search",
@@ -35,12 +35,12 @@
         "responses": {"200": {"$ref": "#/components/responses/SearchResult"}, "400": {"$ref": "#/components/responses/Problem"}, "415": {"$ref": "#/components/responses/Problem"}}
       }
     },
-    "/{{VERSION}}/{translation}": {
+    "{{PREFIX}}{translation}": {
       "get": {
         "summary": "Search with the string in the q parameter",
         "operationId": "searchQuery",
         "parameters": [{"name": "translation", "in": "path", "required": true, "schema": {"type": "string"}}, {"$ref": "#/components/parameters/q"}],
-        "responses": {"200": {"$ref": "#/components/responses/SearchResult"}, "301": {"description": "When the segment is not a translation it is taken as the search string: Location: /{{VERSION}}/{{DEFAULT_TRANSLATION}}/{segment}"}, "400": {"$ref": "#/components/responses/Problem"}}
+        "responses": {"200": {"$ref": "#/components/responses/SearchResult"}, "301": {"description": "When the segment is not a translation it is taken as the search string: Location: {{PREFIX}}{{DEFAULT_TRANSLATION}}/{segment}"}, "400": {"$ref": "#/components/responses/Problem"}}
       },
       "post": {
         "summary": "Search with everything in the JSON body",
@@ -50,7 +50,7 @@
         "responses": {"200": {"$ref": "#/components/responses/SearchResult"}, "308": {"description": "Search-string aliases preserve the POST method, JSON body and query string in Location"}, "400": {"$ref": "#/components/responses/Problem"}}
       }
     },
-    "/{{VERSION}}": {
+    "{{VERSION_PATH}}": {
       "get": {
         "summary": "Search the default translation ({{DEFAULT_TRANSLATION}}) or the one given in `translation`",
         "operationId": "searchDefault",

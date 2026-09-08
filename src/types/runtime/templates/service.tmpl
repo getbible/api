@@ -1,6 +1,6 @@
 [Unit]
-Description=getBible {{KIND}} endpoint ({{DOMAIN}})
-Documentation=https://{{DOMAIN}}/
+Description=getBible {{KIND}} service ({{DOMAIN}} {{LABEL}})
+Documentation=https://{{DOMAIN}}{{PREFIX}}
 After=network-online.target {{UNIT}}.socket
 Wants=network-online.target
 Requires={{UNIT}}.socket
@@ -15,9 +15,9 @@ SupplementaryGroups={{READERS_GROUP}}
 WorkingDirectory={{RELEASE}}
 EnvironmentFile={{ENV_FILE}}
 Environment=PYTHONUNBUFFERED=1
-CacheDirectory=getbible/{{KIND}}
+CacheDirectory={{CACHE_SUBDIR}}
 CacheDirectoryMode=0750
-LogsDirectory=getbible/{{DOMAIN}}/app
+LogsDirectory={{LOGS_SUBDIR}}
 LogsDirectoryMode=0750
 ExecStartPre={{RELEASE}}/.venv/bin/python -m {{CHECK}}
 ExecStart={{RELEASE}}/.venv/bin/gunicorn --config {{GENERATION}}/gunicorn.conf.py {{WSGI}}

@@ -96,6 +96,9 @@ pages_openapi_location() {
 pages_domain_docs_location() {
     local domain="$1"
     if pages_has_root_endpoint "$domain"; then
+        # A runtime domain renders the location itself: a request for / with
+        # a query string or a body belongs to its service, not to the page.
+        [[ "$(ep_get "$domain" TYPE)" != runtime ]] || return 0
         pages_docs_location "$domain" "$GB_ROOT_LABEL"
         return 0
     fi
