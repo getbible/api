@@ -128,7 +128,7 @@ type_static_deploy_interactive() {
     GB_DEPLOY_MODE="$(endpoint_prompt_deploy_mode "$domain")" || return 1
     label="$(ui_input "Version" "Version served under https://$domain/<version>/ (v1, v2, ...)" "v2")" || return 1
     gb_valid_version "$label" || { ui_msg "Invalid" "Version labels look like v1, v2, v3."; return 1; }
-    repo="$(ui_input "Repository" "Git repository holding the files (ssh URL for private repositories)" "git@github.com:getbible/")" || return 1
+    repo="$(ui_input "Repository" "Git repository holding the files, as an SSH URL for private repositories: git@github.com:owner/repo.git. The user before @ is the host's SSH user (always git on GitHub, GitLab and Gitea), not your account; this server's deploy key is the identity. Self-hosted with another user or port: ssh://user@host:port/path/repo.git. Public repositories may use https://." "git@github.com:getbible/")" || return 1
     gb_valid_repo_url "$repo" || { ui_msg "Invalid" "That does not look like a git URL."; return 1; }
     ref="$(ui_input "Branch or tag" "Git branch or tag to publish" "master")" || return 1
     subpath="$(ui_input "Source path" "Folder inside the repository that holds this version (. for the repository root)" ".")" || return 1
@@ -206,7 +206,7 @@ type_static_deploy_finish() {
 
 type_static_show_key() {
     local domain="$1" text
-    text="Add this public key to the repository as a read-only deploy key (GitHub: Settings > Deploy keys; Gitea: Settings > Deploy Keys), then run 'Sync now'.
+    text="Add this public key to the repository as a read-only deploy key (GitHub: Settings > Deploy keys; Gitea: Settings > Deploy Keys), then run 'Sync now'. The key is the whole identity: no account name or password is used, and the SSH user in the repository URL stays the host's (git).
 
 $(sync_public_key "$domain")
 
@@ -222,6 +222,25 @@ type_static_add_version() {
     ep_version_create "$domain" "$label" "$repo" "$ref" "$subpath"
     endpoint_apply "$domain"
     tg_notify ok "Version added: $domain $label" "Repository $repo ($ref). The timer will publish it on the next check; use 'Sync now' to publish immediately."
+}
+
+# type_static_change_version DOMAIN LABEL REPO REF SUBPATH: point an existing
+# version at another repository, branch or folder without losing its
+# releases. Empty values keep the current ones; the next sync applies it.
+type_static_change_version() {
+    local domain="$1" label="$2" repo="$3" ref="$4" subpath="$5"
+    ep_version_exists "$domain" "$label" || gb_die "No version $label on $domain"
+    repo="${repo:-$(ep_version_get "$domain" "$label" REPO_URL)}"
+    ref="${ref:-$(ep_version_get "$domain" "$label" REPO_REF)}"
+    subpath="${subpath:-$(ep_version_get "$domain" "$label" SOURCE_PATH)}"
+    gb_valid_repo_url "$repo" || gb_die "Invalid repository URL: $repo"
+    gb_valid_subpath "$subpath" || gb_die "Invalid source path: $subpath"
+    [[ "$ref" =~ ^[A-Za-z0-9._/-]{1,120}$ ]] || gb_die "Invalid git reference: $ref"
+    ep_version_set "$domain" "$label" REPO_URL "$repo"
+    ep_version_set "$domain" "$label" REPO_REF "$ref"
+    ep_version_set "$domain" "$label" SOURCE_PATH "$subpath"
+    endpoint_apply "$domain" || return 1
+    tg_notify info "Version source changed: $domain $label" "Repository $repo ($ref), folder $subpath. The next sync publishes from there; use 'Sync now' to do it at once."
 }
 
 type_static_remove_version() {
@@ -305,7 +324,11 @@ type_static_versions_menu() {
     local domain="$1" choice label repo ref subpath
     while true; do
         choice="$(ui_menu "Versions of $domain" "$(ep_versions "$domain" | tr '\n' ' ')" \
-            add "Add a version" remove "Remove a version" status "Show version status" back "Back")" || return 0
+            add "Add a version" \
+            change "Change a version's repository, branch or folder (keeps its releases)" \
+            remove "Remove a version" \
+            status "Show version status" \
+            back "Back")" || return 0
         case "$choice" in
             add)
                 label="$(ui_input "Version" "New version label (v1, v2, ...)" "")" || continue
@@ -313,12 +336,23 @@ type_static_versions_menu() {
                 repo="$(ui_input "Repository" "Git repository" "$(ep_version_get "$domain" "$(ep_versions "$domain" | head -1)" REPO_URL)")" || continue
                 ref="$(ui_input "Branch or tag" "Git branch or tag" "master")" || continue
                 subpath="$(ui_input "Source path" "Folder inside the repository (. for the root)" ".")" || continue
-                ui_run "Add version" type_static_add_version "$domain" "$label" "$repo" "$ref" "$subpath"
+                ui_run "Add version" type_static_add_version "$domain" "$label" "$repo" "$ref" "$subpath" || true
+                ;;
+            change)
+                label="$(type_static_pick_version "$domain")" || continue
+                repo="$(ui_input "Repository" "Git repository (SSH URL; the user before @ is the host's SSH user, the deploy key is the identity)" "$(ep_version_get "$domain" "$label" REPO_URL)")" || continue
+                gb_valid_repo_url "$repo" || { ui_msg "Invalid" "That does not look like a git URL."; continue; }
+                ref="$(ui_input "Branch or tag" "Git branch or tag" "$(ep_version_get "$domain" "$label" REPO_REF)")" || continue
+                subpath="$(ui_input "Source path" "Folder inside the repository (. for the root)" "$(ep_version_get "$domain" "$label" SOURCE_PATH)")" || continue
+                gb_valid_subpath "$subpath" || { ui_msg "Invalid" "Source paths are relative, without '..'."; continue; }
+                endpoint_confirm_hand_edits "$domain" || continue
+                ui_run "Change version source" type_static_change_version "$domain" "$label" "$repo" "$ref" "$subpath" || true
+                GB_OVERWRITE_HAND_EDITS=false
                 ;;
             remove)
                 label="$(type_static_pick_version "$domain")" || continue
                 ui_yesno "Remove version" "Remove $label from $domain? Its releases on disk are deleted." no || continue
-                ui_run "Remove version" type_static_remove_version "$domain" "$label"
+                ui_run "Remove version" type_static_remove_version "$domain" "$label" || true
                 ;;
             status)
                 label="$(type_static_pick_version "$domain")" || continue

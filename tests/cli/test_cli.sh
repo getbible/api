@@ -80,6 +80,14 @@ echo "-- versions --"
 check "second version"           "v1"                      "$("$GB" list >/dev/null; ls "$SB/etc/getbible/endpoints/$D/versions/")"
 check "v1 location"              "location ^~ /v1/"        "$(cat "$SITE")"
 check "v1 unit path"             "GB_SYNC_SUBPATH=data"    "$(cat "$SB/etc/systemd/system/getbible-sync-static_example_test-v1.service")"
+"$GB" version change "$D" v1 --ref release --path files >/dev/null 2>&1
+check "v1 ref changed"           "REPO_REF=release"        "$(cat "$SB/etc/getbible/endpoints/$D/versions/v1.conf")"
+check "v1 path changed"          "GB_SYNC_SUBPATH=files"   "$(cat "$SB/etc/systemd/system/getbible-sync-static_example_test-v1.service")"
+check "v1 repo kept"             "REPO_URL=git@github.com:getbible/v1_scripture.git" "$(cat "$SB/etc/getbible/endpoints/$D/versions/v1.conf")"
+"$GB" version change "$D" v1 --repo deploy@git.example.test:scripture/v1.git >/dev/null 2>&1
+check "custom ssh user accepted" "GB_SYNC_REPO=deploy@git.example.test:scripture/v1.git" "$(cat "$SB/etc/systemd/system/getbible-sync-static_example_test-v1.service")"
+check "change needs an option"   "needs --repo"            "$("$GB" version change "$D" v1 2>&1 || true)"
+check "change rejects bad url"   "Invalid repository"      "$("$GB" version change "$D" v1 --repo nope 2>&1 || true)"
 "$GB" version remove "$D" v1 >/dev/null 2>&1
 check "v1 removed"               ""                        "$(grep -c 'location ^~ /v1/' "$SITE" | sed 's/^0$//')"
 

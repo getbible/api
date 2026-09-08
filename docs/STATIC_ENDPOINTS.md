@@ -28,6 +28,17 @@ deploy key under `/var/lib/getbible/sync/<user>/.ssh/`. Add the public key
 as a read-only deploy key on GitHub or Gitea. The repository host's SSH key is
 pinned in the user's `known_hosts` at deployment.
 
+There is no account name or password anywhere: the deploy key is the whole
+identity, and git runs as the sync user with that key only. The SSH user in
+the repository URL is the host's, not yours: `git@github.com:owner/repo.git`
+on GitHub, GitLab and Gitea (they accept nothing but `git`). A self-hosted
+server with another SSH user or port is written `ssh://user@host:port/path`
+or `user@host:path`. Public repositories may use `https://`; private ones
+need SSH. Endpoint > Test repository access proves the key and URL work
+before the first sync. A version's repository, branch or folder can be
+changed later under Endpoint > Manage versions > Change (or `version change`)
+without losing its releases; the next sync publishes from the new source.
+
 A timer per version (`getbible-sync-<slug>-<version>.timer`, weekly by
 default, daily or monthly on request, "Sync now" any time) runs
 `/usr/local/lib/getbible/getbible-sync` as that user:
@@ -79,6 +90,7 @@ Access mode, limits and tokens are per endpoint; see `ACCESS_MODES.md`.
 
 ```sh
 getbible.sh deploy static --domain D --version v2 --repo git@github.com:org/repo.git [--ref master] [--path .] [--extensions json,sha,txt] [--access metered] [--schedule weekly]
+getbible.sh version change D v2 [--repo URL] [--ref REF] [--path P]
 getbible.sh version add D v1 --repo URL [--ref main] [--path v1]
 getbible.sh version remove D v1
 getbible.sh sync D [v2] [--force]

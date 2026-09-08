@@ -122,7 +122,9 @@ gb_valid_extension() { [[ "$1" =~ ^[a-z0-9]{1,10}$ ]]; }
 gb_valid_translation() { [[ "$1" =~ ^[a-z0-9][a-z0-9_-]{0,29}$ ]]; }
 GB_RE_LABEL='^[A-Za-z0-9][A-Za-z0-9._ -]{0,63}$'
 gb_valid_label() { [[ "$1" =~ $GB_RE_LABEL ]]; }
-GB_RE_REPO_URL='^(git@[A-Za-z0-9.-]+:[A-Za-z0-9._/-]+|ssh://[A-Za-z0-9@.:/_-]+|https://[A-Za-z0-9./_-]+|file:///[A-Za-z0-9./_-]+)$'
+# SSH URLs carry the host's SSH user (git on GitHub, GitLab and Gitea; anything
+# on a self-hosted server); the deploy key, not an account, is the identity.
+GB_RE_REPO_URL='^([A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[A-Za-z0-9._/-]+|ssh://[A-Za-z0-9@.:/_-]+|https://[A-Za-z0-9./_-]+|file:///[A-Za-z0-9./_-]+)$'
 gb_valid_repo_url() { [[ "$1" =~ $GB_RE_REPO_URL ]]; }
 GB_RE_SUBPATH='^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$'
 gb_valid_subpath() { [[ "$1" == "." ]] || { [[ "$1" =~ $GB_RE_SUBPATH ]] && [[ "$1" != *..* ]]; }; }
