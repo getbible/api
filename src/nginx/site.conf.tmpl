@@ -54,6 +54,9 @@ server {
     # The domain page, or the root endpoint's page when there are no version folders.
     location = / {
         root {{DOMAIN_PAGE_ROOT}};
+        open_file_cache off;
+        types { }
+        default_type text/html;
         try_files {{DOMAIN_PAGE_FILE}} =404;
         include snippets/getbible/headers-html.conf;
     }
@@ -76,6 +79,9 @@ server {
 {{/IF}}{{#IF DOMAIN_OPENAPI}}
     location = /openapi.json {
         root {{DOMAIN_OPENAPI_ROOT}};
+        open_file_cache off;
+        types { }
+        default_type application/json;
         try_files {{DOMAIN_OPENAPI_FILE}} =404;
         include snippets/getbible/headers.conf;
         add_header Cache-Control "public, max-age=300" always;

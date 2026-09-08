@@ -129,6 +129,25 @@ it_check "internal prefix hidden"    "404"                       "$(it_status "$
 it_check "app log has search text"   '"search":"beginning"'      "$(it_wait_log "$IT_SB/var/log/getbible/$S/app/root.log" '"search":"beginning"')"
 it_check "nginx log keeps query"     'q=beginning'               "$(it_wait_log "$IT_SB/var/log/getbible/$S/access.log" 'q=beginning')"
 
+echo "-- token-only access at the domain root --"
+# The service moves to a new generation (its socket changes with the access
+# mode); the sandbox has no systemd, so the test starts that generation itself.
+TOKEN_S="$("$IT_ROOT/getbible.sh" token "$S" add "root test" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')"
+"$IT_ROOT/getbible.sh" access "$S" token >/dev/null 2>&1
+start_gunicorn search root
+it_nginx_reload
+it_check "root data needs a token"   "401"                       "$(it_status "$S" /test/beginning)"
+it_check "root query needs a token"  "401"                       "$(it_status "$S" '/?q=beginning&translation=test')"
+it_check "root body needs a token"   "401"                       "$(it_status "$S" / -X POST -H 'Content-Type: application/json' -d '{"q":"beginning","translation":"test"}')"
+it_check "root token accepted"       "200"                       "$(it_status "$S" /test/beginning -H "Authorization: Bearer $TOKEN_S")"
+it_check "root token query accepted" '"kind":"search"'           "$(it_body "$S" '/?q=beginning&translation=test' -H "Authorization: Bearer $TOKEN_S")"
+it_check "root page still public"    "200"                       "$(it_status "$S" /)"
+it_check "root openapi still public" "200"                       "$(it_status "$S" /openapi.json)"
+"$IT_ROOT/getbible.sh" access "$S" metered >/dev/null 2>&1
+start_gunicorn search root
+it_nginx_reload
+it_check "root metered again"        "200"                       "$(it_status "$S" /test/beginning)"
+
 echo "-- the staged search endpoint served through its placeholder --"
 it_check "search recorded staged"    "LIVE=false"      "$(cat "$IT_SB/etc/getbible/endpoints/$S/endpoint.conf")"
 it_check "search has no letsencrypt" ""                "$(ls "$IT_SB/etc/letsencrypt/live/$S" 2>/dev/null)"

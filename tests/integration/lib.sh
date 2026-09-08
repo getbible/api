@@ -130,8 +130,9 @@ it_wait_log() {
     printf 'pattern not found in %s\n' "$file"
 }
 it_header() {
-    # it_header DOMAIN PATH HEADER
+    # it_header DOMAIN PATH HEADER. The body may be binary (the favicon);
+    # newer grep would otherwise answer "binary file matches" instead of the line.
     local header="$3"
-    it_curl "$1" "$2" | grep -i "^$header:" | tr -d '\r' | tail -1
+    it_curl "$1" "$2" | grep -a -i "^$header:" | tr -d '\r' | tail -1
 }
 it_body() { it_curl "$@" | sed '/^__STATUS__:/d' | awk 'body {print} /^\r?$/ {body=1}'; }

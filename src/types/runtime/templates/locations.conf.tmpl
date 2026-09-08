@@ -14,11 +14,11 @@
     }
 {{#IF ROOT_ENDPOINT}}{{#IF ROOT_DOCS_FILE}}
     # The page at /. A request that carries a query string or a body is the
-    # service's; it is handed over through an internal-only prefix so the
-    # root rewrite below does not apply to it twice.
+    # service's; it is handed over through an internal-only prefix that
+    # clients cannot reach.
     location = / {
-        if ($args != "") { rewrite ^ /.gb/{{APP_VERSION}} last; }
-        if ($request_method !~ ^(GET|HEAD)$) { rewrite ^ /.gb/{{APP_VERSION}} last; }
+        if ($args != "") { rewrite ^ /.gb/service last; }
+        if ($request_method !~ ^(GET|HEAD)$) { rewrite ^ /.gb/service last; }
         root {{ROOT_DOCS_ROOT}};
         types { }
         default_type text/html;
@@ -28,15 +28,16 @@
 
     location ^~ /.gb/ {
         internal;
-        rewrite ^/\.gb(/.*)$ $1 break;
         proxy_redirect ~^(https?://[^/]+)?/{{APP_VERSION}}(/.*)$ $1$2;
         proxy_redirect ~^(https?://[^/]+)?/{{APP_VERSION}}$ $1/;
 {{PROXY_BODY}}
     }
 {{/IF}}
-    # The service speaks /{{APP_VERSION}}/...; this domain serves it at its root.
+    # The service speaks /{{APP_VERSION}}/...; this domain serves it at its
+    # root: proxy_pass prepends the version to the request URI as the client
+    # sent it (no rewrite, so the access rules above it still run), and the
+    # service's redirects lose the version again on the way out.
     location / {
-        rewrite ^/(.*)$ /{{APP_VERSION}}/$1 break;
         proxy_redirect ~^(https?://[^/]+)?/{{APP_VERSION}}(/.*)$ $1$2;
         proxy_redirect ~^(https?://[^/]+)?/{{APP_VERSION}}$ $1/;
 {{PROXY_BODY}}

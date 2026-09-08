@@ -128,9 +128,11 @@ check "no versions.json for root"    ""                        "$(ls "$SB/var/ww
 check "no folders next to root"      "remove that endpoint"    "$(rt_check_new_endpoint "$S" v2 v2 2>&1 || true)"
 check "cannot remove the last"       "only endpoint"           "$(rt_remove_endpoint "$S" root 2>&1 || true)"
 SITE="$(render "$S")" || exit 1
-check "root rewrite to the service"  'rewrite ^/(.*)$ /v2/$1 break;' "$SITE"
+check "root proxies with the version" "proxy_pass http://unix:$SB/run/getbible/search/root/gunicorn.sock:/v2\$request_uri;" "$SITE"
+check "root has no rewrite"          ""                        "$(grep -c 'rewrite ^/(' <<< "$SITE" | sed 's/^0$//')"
+check "root access rules kept"       "$(sed -n '/^    location \/ {/,/^    }/p' <<< "$SITE" | grep -c 'auth.conf')" "1"
 check "root redirects stripped"      'proxy_redirect ~^(https?://[^/]+)?/v2(/.*)$ $1$2;' "$SITE"
-check "root page hands args over"    'rewrite ^ /.gb/v2 last;' "$SITE"
+check "root page hands args over"    'rewrite ^ /.gb/service last;' "$SITE"
 check "internal hand-over prefix"    "location ^~ /.gb/ {"     "$SITE"
 check "root openapi at /"            "location = /openapi.json {" "$SITE"
 check "no version folder location"   ""                        "$(grep -c 'location ^~ /v2/' <<< "$SITE" | sed 's/^0$//')"
@@ -159,6 +161,8 @@ check "legacy env file kept"         "$SB/etc/getbible/endpoints/$L/runtime.env"
 check "legacy app log kept"          "app/app.log"             "$(rt_app_log "$L" v2)"
 check "legacy socket dir kept"       "$SB/run/getbible/query"  "$(rt_socket_dir "$L" v2)"
 check "migration is idempotent"      "1"                       "$(type_runtime_endpoints "$L" >/dev/null; grep -c '^LAYOUT=' "$SB/etc/getbible/endpoints/$L/versions/v2.conf")"
+check "VERSION left endpoint.conf"   ""                        "$(grep -c '^VERSION=\|^WORKERS=\|^REPOSITORY=' "$SB/etc/getbible/endpoints/$L/endpoint.conf" | sed 's/^0$//')"
+check "settings kept in the record"  "REPOSITORY=$REPO"        "$(cat "$SB/etc/getbible/endpoints/$L/versions/v2.conf")"
 
 echo "-- nginx -t on the rendered configuration --"
 if command -v nginx >/dev/null; then
@@ -184,6 +188,10 @@ EOF
 else
     echo "  (nginx not installed; skipped)"
 fi
+
+echo "-- a removed endpoint stays removed --"
+ep_version_remove_config "$L" v2
+check "no resurrection from VERSION" ""                        "$(type_runtime_endpoints "$L")"
 
 printf '\n== %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

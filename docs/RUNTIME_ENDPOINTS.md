@@ -44,8 +44,9 @@ and deletes its releases and cache; the last endpoint cannot be removed
 A domain may instead serve a **single version at its root** (deploy with
 `--root`, or answer yes to "Serve it at the domain root"): the endpoint's
 label is `root`, `https://search.getbible.net/kjv/faith%20hope` is the route,
-and nginx rewrites every request to the version the service speaks and
-strips it from the service's redirects again. Such a domain cannot add other
+and nginx prepends the version the service speaks to every request on its
+way to the service and strips it from the service's redirects again; the
+access rules apply as on any other domain. Such a domain cannot add other
 versions later; a domain with version folders can.
 
 Installations from before endpoints had their own records (a `VERSION` key
