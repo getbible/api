@@ -7,6 +7,7 @@ GB_MENU_LOADED=1
 
 menu_main() {
     local choice
+    menu_check_tools
     while true; do
         choice="$(ui_menu "getBible API" "$(menu_overview)" \
             endpoints "Endpoints: status, logs, access, tokens, sync" \
@@ -30,6 +31,24 @@ menu_main() {
             exit) return 0 ;;
         esac
     done
+}
+
+# On start, make sure the host has what a complete deployment needs and offer
+# to install it, so no walkthrough runs into a missing tool halfway through.
+menu_check_tools() {
+    local tool missing=""
+    for tool in nginx certbot rsync git ssh-keygen openssl curl flock; do
+        gb_have "$tool" || missing="$missing $tool"
+    done
+    [[ -n "$missing" ]] || return 0
+    platform_detect
+    if [[ "$PLATFORM_PACKAGE_MANAGER" == apt ]]; then
+        if ui_yesno "Missing tools" "This host lacks:$missing\n\nEndpoints cannot be deployed completely without them. Install them now with apt (the same as System > Install dependencies)?" yes; then
+            ui_run "Install dependencies" doctor_install_deps || true
+            return 0
+        fi
+    fi
+    ui_msg "Missing tools" "This host lacks:$missing\n\nInstall them before deploying (System > Install dependencies on Debian/Ubuntu, or your package manager:$(printf ' %s' "${GB_APT_PACKAGES[@]}")). Deployments warn about what is missing."
 }
 
 menu_overview() {

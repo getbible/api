@@ -48,7 +48,7 @@ ui_menu() {
         cli)
             local -a tags=() descs=()
             while [[ $# -gt 0 ]]; do tags+=("$1"); descs+=("$2"); shift 2; done
-            printf '\n== %s ==\n%s\n' "$title" "$text" >&2
+            printf '\n== %s ==\n%b\n' "$title" "$text" >&2
             local i
             for i in "${!tags[@]}"; do printf '  %2d) %-18s %s\n' "$((i + 1))" "${tags[$i]}" "${descs[$i]}" >&2; done
             printf '   0) back\n' >&2
@@ -77,7 +77,7 @@ ui_input() {
             ;;
         cli)
             local answer
-            read -r -p "$prompt [$default]: " answer
+            read -r -p "$(printf '%b' "$prompt") [$default]: " answer
             printf '%s\n' "${answer:-$default}"
             ;;
         *)
@@ -123,7 +123,7 @@ ui_yesno() {
             ;;
         cli)
             local answer
-            read -r -p "$question [$([[ "$default" == yes ]] && printf 'Y/n' || printf 'y/N')]: " answer
+            read -r -p "$(printf '%b' "$question") [$([[ "$default" == yes ]] && printf 'Y/n' || printf 'y/N')]: " answer
             answer="${answer:-$default}"
             [[ "${answer,,}" == y* ]]
             ;;
@@ -143,7 +143,7 @@ ui_msg() {
             whiptail --backtitle "$GB_UI_BACKTITLE" --title "$title" --msgbox "$text" "$h" "$w"
             ;;
         *)
-            printf '\n== %s ==\n%s\n\n' "$title" "$text" >&2
+            printf '\n== %s ==\n%b\n\n' "$title" "$text" >&2
             ;;
     esac
 }
@@ -182,7 +182,7 @@ ui_checklist() {
         cli)
             local -a tags=() states=()
             while [[ $# -gt 0 ]]; do tags+=("$1"); states+=("$3"); shift 3; done
-            printf '\n== %s ==\n%s\n' "$title" "$text" >&2
+            printf '\n== %s ==\n%b\n' "$title" "$text" >&2
             local i
             for i in "${!tags[@]}"; do printf '  %s [%s]\n' "${tags[$i]}" "${states[$i]}" >&2; done
             local answer
@@ -220,7 +220,7 @@ ui_radiolist() {
             local -a tags=() descs=() states=() default=""
             while [[ $# -gt 0 ]]; do tags+=("$1"); descs+=("$2"); [[ "$3" == on ]] && default="$1"; shift 3; done
             if [[ "$GB_UI" == none ]]; then printf '%s\n' "$default"; return 0; fi
-            printf '\n== %s ==\n%s\n' "$title" "$text" >&2
+            printf '\n== %s ==\n%b\n' "$title" "$text" >&2
             local i answer
             for i in "${!tags[@]}"; do printf '  %-14s %s\n' "${tags[$i]}" "${descs[$i]}" >&2; done
             while true; do

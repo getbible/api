@@ -565,8 +565,9 @@ rt_default_repository() {
 }
 
 type_runtime_deploy_interactive() {
-    local domain kind version repository mode warm choice
+    local domain kind version repository mode warm choice cfmode
     local -a kinds=()
+    ui_msg "New runtime endpoint" "This walkthrough asks for: the service (query or search), the domain, whether to go live now or stage the endpoint, the API version, the folder holding the scripture files (a static endpoint's data root), the access mode$(cf_enabled 2>/dev/null && printf ', the Cloudflare mode' || true) and, for search, the translations to warm up.\n\nIt then installs managed Python, builds the release (a few minutes on first use), starts the service, which must pass readiness, and routes nginx to it. Cancel at any question to stop without changes."
     while read -r kind; do
         [[ -n "$kind" ]] || continue
         rt_manifest_load "$kind"
@@ -581,12 +582,17 @@ type_runtime_deploy_interactive() {
     version="$(ui_input "Version" "API version to serve (supported: $RM_SUPPORTED_VERSIONS)" "$RM_DEFAULT_VERSION")" || return 1
     repository="$(rt_default_repository "$version")"
     repository="$(ui_input "Scripture files" "Folder holding the Bible files (must contain $version/), usually a static endpoint's data root" "${repository:-$GB_SRV/api.getbible.net}")" || return 1
+    if [[ "$repository" == /* && ! -d "$repository/$version" ]]; then
+        ui_yesno "Scripture files" "$repository does not contain $version/ yet. The $kind service reads its files from there and cannot pass readiness until they exist: deploy the static endpoint that provides them and run its first sync first.\n\nContinue anyway? (The deployment will fail readiness and can be completed later with Re-apply configuration.)" no || return 1
+    fi
     mode="$(endpoint_prompt_access_mode)" || return 1
     warm="$RM_WARM_TRANSLATIONS"
     if [[ "$kind" == search ]]; then
         warm="$(ui_input "Warm-up" "Translations to index at start (comma separated)" "$warm")" || return 1
     fi
+    cfmode="$(endpoint_prompt_cloudflare_mode "$domain")" || return 1
     type_runtime_create "$domain" "$kind" "$version" "$repository" "$mode" "$warm"
+    ep_set "$domain" CLOUDFLARE_MODE "$cfmode"
     type_runtime_deploy_finish "$domain"
 }
 
@@ -603,6 +609,9 @@ type_runtime_deploy_finish() {
     endpoint_apply "$domain" || return 1
     if ep_is_live "$domain"; then
         tg_notify ok "Endpoint deployed: $domain" "Runtime $(ep_get "$domain" KIND) endpoint, version $(ep_get "$domain" VERSION)."
+        if ! nginx_cert_exists "$domain"; then
+            ui_msg "No certificate yet" "$domain is live but has no Let's Encrypt certificate, so it answers HTTP only (challenges are served, everything else redirects to HTTPS). Once DNS reaches this server, choose Endpoint > Certificate > Issue."
+        fi
     else
         tg_notify ok "Endpoint staged: $domain" "Runtime $(ep_get "$domain" KIND) endpoint, version $(ep_get "$domain" VERSION), prepared on $(hostname -f 2>/dev/null || hostname). Not live: no certificate or DNS change until 'Go live'."
         ui_msg "Staged" "$domain is staged on this server: the service runs and passed readiness, nginx routes to it with a placeholder certificate, but no certificate was requested and DNS was not changed.\n\nVerify it, and choose 'Go live' from the main menu or the endpoint menu when it should take over."

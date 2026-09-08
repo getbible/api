@@ -86,8 +86,9 @@ A staged deploy does everything except take over the public name:
   must pass readiness, nginx routes to it, a placeholder certificate is
   created.
 
-Then set per endpoint whatever the old server has: access mode, limits,
-Cloudflare mode, edge cache and origin pulls. On the old server,
+The walkthrough asks for the access mode and, since the token is stored,
+the Cloudflare mode. Then set per endpoint whatever else the old server has:
+limits, edge cache and origin pulls. On the old server,
 `/etc/getbible/endpoints/<domain>/endpoint.conf` lists all of them (the
 status page shows the Cloudflare mode, cache and origin pulls as well).
 Setting the Cloudflare mode on a staged endpoint records it only; note that

@@ -56,6 +56,7 @@ Endpoints
   runtime DOMAIN rollback                 restore the previous healthy deployment
   runtime DOMAIN set KEY VALUE            validate and apply one runtime setting
   remove DOMAIN [--purge]                stop serving an endpoint (purge deletes data)
+  filetypes DOMAIN json,sha,txt          change the file types a static endpoint serves
   version add DOMAIN vN --repo URL [--ref master] [--path .]
   version remove DOMAIN vN
   sync DOMAIN [vN] [--force]             run the synchronisation now
@@ -343,6 +344,12 @@ main() {
             local purge=false; [[ "${2:-}" == --purge ]] && purge=true
             endpoint_remove "${1:?domain}" "$purge" ;;
         version) cmd_version "$@" ;;
+        filetypes)
+            gb_system_init
+            ep_exists "${1:-}" || gb_die "filetypes DOMAIN json,sha,txt"
+            [[ "$(ep_get "$1" TYPE)" == static ]] || gb_die "$1 is not a static endpoint"
+            endpoint_source_type static
+            type_static_set_extensions "$1" "${2:?file types}" ;;
         sync) cmd_sync "$@" ;;
         access) gb_system_init; endpoint_set_access "${1:?domain}" "${2:?mode}" ;;
         limits) cmd_limits "$@" ;;
