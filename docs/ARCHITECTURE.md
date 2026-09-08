@@ -3,9 +3,18 @@
 ```
 client / Cloudflare
     -> nginx  (TLS, methods, limits, tokens, CORS, problem documents, cache)
-        -> static: /srv/getbible/<domain>/<version> -> releases/<version>/<stamp>
-        -> runtime: unix socket -> gunicorn -> Flask app -> librarian -> local Bible files
+        -> static: /srv/getbible/<domain>/<endpoint> -> releases/<endpoint>/<stamp>
+        -> runtime: /<endpoint>/ -> unix socket -> gunicorn -> Flask app -> librarian -> local Bible files
+        -> pages: /var/www/getbible/<domain>/ (domain page, endpoint pages, OpenAPI documents, favicon, versions.json)
 ```
+
+A **domain** is a host name: one vhost, one certificate, one go-live. Its
+**endpoints** are its version folders (`/v2/`), or the domain root itself
+when it was set up without version folders (the label `root`). The registry
+directory, the pipeline's function names and the `endpoint.conf` file name
+predate this vocabulary and were kept so existing installations keep working:
+`/etc/getbible/endpoints/<domain>/endpoint.conf` describes the domain and
+`versions/<label>.conf` its endpoints.
 
 ## The tool
 
@@ -20,19 +29,32 @@ the menu. The libraries:
 | `users`, `systemd`, `certs`, `nginx` | system users and groups; units and timers; certbot over HTTP-01 or DNS-01 through Cloudflare, placeholder certificates for staged endpoints; render, stage, test, install, reload, drift |
 | `access` | access modes, limits, tokens and their nginx snippets |
 | `sync` | sync users, deploy keys, sync units |
+| `pages` | the files a domain publishes besides its data: pages, OpenAPI documents, favicon, versions.json, and where each comes from (`PAGES.md`) |
 | `platform`, `python` | host capability detection, reviewed standalone CPython distributions and immutable runtime releases |
 | `logs`, `analytics`, `telegram`, `cloudflare` | rotation, reports, notifications, Cloudflare |
-| `docs`, `endpoint`, `update`, `migrate`, `doctor`, `menu` | documentation pages, the endpoint pipeline, update, legacy migration, host checks, the menu tree |
+| `docs`, `endpoint`, `update`, `migrate`, `doctor`, `menu` | shared pieces of the documentation pages, the domain pipeline, update, legacy migration, host checks, the menu tree |
 | `golive` | staged endpoints going live: preflight, certificate first, then the switch, Cloudflare DNS, verification |
 
-Endpoint types live in `src/types/<type>/type.sh` and implement
+Domain types live in `src/types/<type>/type.sh` and implement
 `type_<type>_prepare`, `_render_locations`, `_finish`, `_remove`,
-`_status`, `_render_docs`, `_deploy_cli`, `_deploy_interactive`,
-`_menu_items` and `_menu_action`. `endpoint_apply` is the one pipeline both
-share: protect shared-cache access, prepare a ready candidate, render docs and
-nginx files, snapshot routing, install/test/reload, certificate (two-phase TLS),
-commit activation, retire old workers' backends, Cloudflare and state. Failed
-activation restores prior nginx files and runtime generation state.
+`_status`, `_deploy_cli`, `_deploy_interactive`, `_menu_items`,
+`_menu_action`, and for the pages library `_endpoints` (the labels),
+`_openapi_default`, `_render_docs` (the domain page),
+`_render_endpoint_docs` and `_render_openapi`. `endpoint_apply` is the one
+pipeline both share: protect shared-cache access, prepare a ready candidate
+for every endpoint, publish the pages, render the nginx files, snapshot
+routing, install/test/reload, certificate (two-phase TLS), commit activation,
+retire old workers' backends, Cloudflare and state. Failed activation
+restores prior nginx files and every endpoint's generation state.
+
+A runtime domain runs one service per endpoint: `/opt/getbible/<kind>/<label>/`
+holds its releases and generations, `getbible-<kind>-<label>-<generation>`
+are its units, `/run/getbible/<kind>/<label>/` its sockets. The endpoint's
+record (`versions/<label>.conf`) carries its settings, `APP_VERSION` (the
+version the implementation speaks; differs from the label only for a root
+endpoint) and `LAYOUT`: `versioned` for these paths, `legacy` for a domain
+recorded before endpoints had records, which keeps `/opt/getbible/<kind>`
+and `getbible-<kind>-<generation>` so nothing running is moved.
 
 An endpoint carries `LIVE=true|false` in its `endpoint.conf` (absent means
 live). A staged endpoint runs the same pipeline without the steps that touch
@@ -62,8 +84,12 @@ rest (`getbible-render`, `getbible-tokens`, `getbible-analytics`,
   endpoint identity and per-request UTC token expiry. Map directories are
   root-only; all hosts' maps migrate together with the shared configuration.
 - `sites-available/<domain>.conf`: the vhost, port 80 with the ACME
-  location and a redirect, port 443 with everything above and the type's
-  locations.
+  location and a redirect, port 443 with everything above, the exact
+  locations of the domain page, favicon, `versions.json` and `/openapi.json`,
+  and the type's locations: per endpoint its page and OpenAPI document (exact
+  locations) and its tree (`^~ /vN/`, static) or its service (`= /vN`,
+  `^~ /vN/`, runtime), then health and the fallback. A root endpoint's tree or
+  service takes `/` itself.
 
 ## State
 
@@ -71,7 +97,9 @@ rest (`getbible-render`, `getbible-tokens`, `getbible-analytics`,
 per-endpoint state, sync homes), `/var/backups/getbible` holds backup sets,
 `/var/log/getbible` holds logs. Data roots are `/srv/getbible` (static) and
 `/opt/getbible` (runtime releases), with librarian caches under
-`/var/cache/getbible/<kind>`.
+`/var/cache/getbible/<kind>`; `/var/www/getbible/<domain>` holds the
+generated and operator-maintained pages and documents, and
+`/etc/getbible/favicon.ico` the system favicon.
 
 Runtime code releases and deployment generations are distinct. A generation
 holds environment, service/socket configuration and a release reference;

@@ -40,9 +40,9 @@ Domains
   deploy static --domain D --version vN|root --repo URL [--ref master] [--path .]
                 [--extensions json,sha,txt] [--access open|metered|token]
                 [--schedule daily|weekly|monthly] [--staged|--live]
-  deploy runtime --domain D --kind query|search [--version v2]
+  deploy runtime --domain D --kind query|search [--version v2] [--root]
                 [--repository PATH] [--access MODE] [--warm kjv] [--python auto|VERSION]
-                [--staged|--live]
+                [--staged|--live]      (--root serves the version at https://D/ instead of /v2/)
   go-live DOMAIN [--cert auto|http|dns-cloudflare]
                                          take a staged domain live: certificate,
                                          Cloudflare DNS and rules, HTTPS, verification
@@ -55,16 +55,22 @@ Domains
   apply DOMAIN                           re-render and re-install one domain
   update [DOMAIN]                        apply reviewed code and configuration
   runtime versions                       list reviewed managed Python versions
-  runtime DOMAIN update [--python VERSION] update packages and managed Python
-  runtime DOMAIN redeploy                 rebuild using the selected Python
-  runtime DOMAIN rollback                 restore the previous healthy deployment
-  runtime DOMAIN set KEY VALUE            validate and apply one runtime setting
+  runtime DOMAIN [ENDPOINT] update [--python VERSION]
+                                         update packages and managed Python (every endpoint,
+                                         or the named one)
+  runtime DOMAIN redeploy                 redeploy every endpoint's current release
+  runtime DOMAIN [ENDPOINT] rollback      restore an endpoint's previous healthy deployment
+  runtime DOMAIN [ENDPOINT] set KEY VALUE validate and apply one endpoint setting
+                                         (ENDPOINT may be left out when the domain has one)
   remove DOMAIN [--purge]                stop serving a domain (purge deletes data)
   filetypes DOMAIN json,sha,txt          change the file types a static domain serves
   version add DOMAIN vN --repo URL [--ref master] [--path .]
                                          add a version folder (an endpoint) to a static domain
+  version add DOMAIN vN [--repository PATH] [--warm LIST] [--python V]
+                                         add a version to a runtime domain: its own service
   version change DOMAIN vN|root [--repo URL] [--ref REF] [--path P]
-                                         point an endpoint elsewhere, keeping its releases
+                                         point a static endpoint elsewhere, keeping its releases
+  version default DOMAIN vN              the runtime endpoint that answers / and the short forms
   version remove DOMAIN vN|root
   sync DOMAIN [vN|root] [--force]        run the synchronisation now
   access DOMAIN open|metered|token       change the access mode
@@ -88,7 +94,7 @@ Pages and OpenAPI (every domain page, endpoint page and document is public)
   docs DOMAIN                            same as pages DOMAIN publish
 
 Observability
-  logs DOMAIN [access|error|app] [--lines N]
+  logs DOMAIN [access|error|app|journal] [ENDPOINT] [--lines N]
   logs archives DOMAIN | logs rotate
   analytics [--window today|24h|7d|30d|all] [--domain D] [--json]
 
@@ -145,10 +151,13 @@ cmd_deploy() {
 
 cmd_version() {
     local action="${1:-}" domain="${2:-}" label="${3:-}" repo="" ref="master" subpath="."
-    shift 3 || gb_die "version add|change|remove DOMAIN vN|root"
+    shift 3 || gb_die "version add|change|remove|default DOMAIN vN|root"
     gb_system_init
     ep_exists "$domain" || gb_die "Unknown domain: $domain"
-    [[ "$(ep_get "$domain" TYPE)" == static ]] || gb_die "$domain is not a static domain"
+    if [[ "$(ep_get "$domain" TYPE)" == runtime ]]; then
+        cmd_runtime_version "$action" "$domain" "$label" "$@"
+        return
+    fi
     endpoint_source_type static
     case "$action" in
         add)
@@ -177,7 +186,32 @@ cmd_version() {
             type_static_change_version "$domain" "$label" "$repo" "$ref" "$subpath"
             ;;
         remove) type_static_remove_version "$domain" "$label" ;;
-        *) gb_die "version add|change|remove DOMAIN vN|root" ;;
+        *) gb_die "version add|change|remove DOMAIN vN|root (static domains)" ;;
+    esac
+}
+
+# The endpoints of a runtime domain: one service per version.
+cmd_runtime_version() {
+    local action="$1" domain="$2" label="$3" repository="" warm="" python="" translation="" reference="" checksums=""
+    shift 3
+    endpoint_source_type runtime
+    case "$action" in
+        add)
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --repository) repository="${2:?path}"; shift 2 ;;
+                    --warm) warm="${2:?translations}"; shift 2 ;;
+                    --python) python="${2:?version}"; shift 2 ;;
+                    --default-translation) translation="${2:?translation}"; shift 2 ;;
+                    --default-reference) reference="${2:?reference}"; shift 2 ;;
+                    --require-checksums) checksums="${2:?true or false}"; shift 2 ;;
+                    *) gb_die "Unknown option: $1" ;;
+                esac
+            done
+            rt_add_endpoint "$domain" "$label" "$repository" "$warm" "$python" "$translation" "$reference" "$checksums" ;;
+        remove) rt_remove_endpoint "$domain" "$label" ;;
+        default) rt_set_default "$domain" "$label" ;;
+        *) gb_die "version add DOMAIN vN [--repository PATH] [--warm LIST] [--python V] | remove DOMAIN vN | default DOMAIN vN (runtime domains)" ;;
     esac
 }
 
@@ -207,19 +241,30 @@ cmd_sync() {
 }
 
 cmd_runtime() {
-    local domain="${1:-}" action="${2:-}"
+    local domain="${1:-}" action="${2:-}" label=""
     if [[ "$domain" == versions ]]; then py_catalog; return; fi
-    [[ -n "$domain" && -n "$action" ]] || gb_die "runtime DOMAIN update|redeploy|rollback|set KEY VALUE"
+    [[ -n "$domain" && -n "$action" ]] || gb_die "runtime DOMAIN [ENDPOINT] update|redeploy|rollback|set KEY VALUE"
     shift 2
     gb_system_init || return 1
     ep_exists "$domain" || gb_die "Unknown domain: $domain"
     [[ "$(ep_get "$domain" TYPE)" == runtime ]] || gb_die "$domain is not a runtime domain"
     endpoint_source_type runtime
+    # An endpoint may be named before the action: runtime D v2 rollback.
+    if gb_valid_endpoint_label "$action"; then
+        label="$action"; action="${1:-}"; shift || true
+        [[ -n "$action" ]] || gb_die "runtime DOMAIN ENDPOINT update|rollback|set KEY VALUE"
+    fi
     case "$action" in
-        update) rt_update "$domain" "$@" ;;
-        redeploy) [[ $# == 0 ]] || gb_die "runtime DOMAIN redeploy"; rt_redeploy "$domain" ;;
-        rollback) [[ $# == 0 ]] || gb_die "runtime DOMAIN rollback"; rt_rollback "$domain" ;;
-        set) [[ $# == 2 ]] || gb_die "runtime DOMAIN set KEY VALUE"; rt_set_setting "$domain" "$1" "$2" ;;
+        update) rt_update "$domain" ${label:+"$label"} "$@" ;;
+        redeploy) [[ $# == 0 && -z "$label" ]] || gb_die "runtime DOMAIN redeploy (every endpoint)"; rt_redeploy "$domain" ;;
+        rollback)
+            [[ $# == 0 ]] || gb_die "runtime DOMAIN [ENDPOINT] rollback"
+            label="$(rt_resolve_label "$domain" "$label")" || exit 1
+            rt_rollback "$domain" "$label" ;;
+        set)
+            [[ $# == 2 ]] || gb_die "runtime DOMAIN [ENDPOINT] set KEY VALUE"
+            label="$(rt_resolve_label "$domain" "$label")" || exit 1
+            rt_set_setting "$domain" "$label" "$1" "$2" ;;
         *) gb_die "Unknown runtime action: $action" ;;
     esac
 }
@@ -270,25 +315,35 @@ cmd_token() {
 }
 
 cmd_logs() {
-    local domain="${1:-}" which="${2:-access}" lines=200
+    local domain="${1:-}" which="${2:-access}" lines=200 label=""
     case "$domain" in
         rotate) gb_system_init; logs_rotate_now; return ;;
         archives) logs_archives "${2:?domain}"; return ;;
-        "") gb_die "logs DOMAIN [access|error|app] [--lines N]" ;;
+        "") gb_die "logs DOMAIN [access|error|app|journal] [ENDPOINT] [--lines N]" ;;
     esac
-    [[ "${3:-}" == --lines ]] && lines="${4:-200}"
-    [[ "$which" == --lines ]] && { lines="${3:-200}"; which=access; }
+    shift; [[ $# -eq 0 ]] || shift
+    if [[ -n "${1:-}" ]] && gb_valid_endpoint_label "$1"; then label="$1"; shift; fi
+    [[ "${1:-}" == --lines ]] && lines="${2:-200}"
+    [[ "$which" == --lines ]] && { lines="${1:-200}"; which=access; }
     ep_exists "$domain" || gb_die "Unknown domain: $domain"
+    ep_load "$domain"
+    endpoint_source_type "$EP_TYPE"
     case "$which" in
         access|error) logs_tail "$(ep_log_dir "$domain")/$which.log" "$lines" ;;
-        app) logs_tail "$(ep_log_dir "$domain")/app/app.log" "$lines" ;;
+        app)
+            [[ "$EP_TYPE" == runtime ]] || gb_die "$domain is a static domain; it has no application log."
+            for label in $(if [[ -n "$label" ]]; then printf '%s\n' "$label"; else type_runtime_endpoints "$domain"; fi); do
+                printf '== %s %s: %s ==\n' "$domain" "$label" "$(rt_app_log "$domain" "$label")"
+                logs_tail "$(rt_app_log "$domain" "$label")" "$lines"
+            done ;;
         journal)
-            ep_load "$domain"
             if [[ "$EP_TYPE" == runtime ]]; then
-                endpoint_source_type runtime
-                sd_journal "$(rt_live_unit "$EP_KIND").service" "$lines"
+                for label in $(if [[ -n "$label" ]]; then printf '%s\n' "$label"; else type_runtime_endpoints "$domain"; fi); do
+                    printf '== %s %s ==\n' "$domain" "$label"
+                    sd_journal "$(rt_live_unit "$domain" "$label").service" "$lines"
+                done
             else
-                sd_journal "getbible-sync-$EP_SLUG-$(ep_versions "$domain" | head -1).service" "$lines"
+                sd_journal "getbible-sync-$EP_SLUG-${label:-$(ep_versions "$domain" | head -1)}.service" "$lines"
             fi ;;
         *) gb_die "Unknown log: $which (access, error, app, journal)" ;;
     esac

@@ -39,19 +39,23 @@ golive_static_unpublished() {
 }
 
 golive_runtime_ready() {
-    local domain="$1" kind unit socket
+    local domain="$1" kind unit socket label
     endpoint_source_type runtime
-    kind="$(ep_get "$domain" KIND)"; unit="$(rt_live_unit "$kind")"; socket="$(rt_socket "$kind")"
+    kind="$(ep_get "$domain" KIND)"
     if ! sd_available; then
         gb_log "(no systemd) runtime readiness of $domain is not checked here."
         return 0
     fi
-    sd_is_active "$unit.service" || { gb_warn "$unit.service is not running; re-apply $domain and check its journal before going live."; return 1; }
-    sd_wait_ready "$socket" /readyz 15 || { gb_warn "$domain does not answer /readyz on $socket; check its journal before going live."; return 1; }
-    if [[ "$kind" == search ]]; then
-        sd_wait_ready "$socket" /probez 15 || { gb_warn "$domain does not pass its search probe; check its journal before going live."; return 1; }
-    fi
-    gb_log "$domain is ready: $unit.service answers /readyz."
+    while read -r label; do
+        [[ -n "$label" ]] || continue
+        unit="$(rt_live_unit "$domain" "$label")"; socket="$(rt_socket "$domain" "$label")"
+        sd_is_active "$unit.service" || { gb_warn "$unit.service is not running; re-apply $domain and check its journal before going live."; return 1; }
+        sd_wait_ready "$socket" /readyz 15 || { gb_warn "$domain $label does not answer /readyz on $socket; check its journal before going live."; return 1; }
+        if [[ "$kind" == search ]]; then
+            sd_wait_ready "$socket" /probez 15 || { gb_warn "$domain $label does not pass its search probe; check its journal before going live."; return 1; }
+        fi
+    done < <(type_runtime_endpoints "$domain")
+    gb_log "$domain is ready: every endpoint's service answers /readyz."
 }
 
 # golive_preflight DOMAIN METHOD: everything that must hold before the
@@ -305,15 +309,18 @@ golive_verify() {
     golive_row "Publication" info "$(endpoint_publication_text "$domain")"
     golive_row "Access mode" info "$EP_ACCESS_MODE, $(tokens_count "$domain") active token(s)"
     if [[ "$EP_TYPE" == runtime ]]; then
-        kind="$EP_KIND"; unit="$(rt_live_unit "$kind")"; socket="$(rt_socket "$kind")"
         paths+=(/readyz)
-        golive_row "Release" info "$(py_current_release "$kind")"
-        if sd_available; then
-            if sd_is_active "$unit.service"; then golive_row "Service" ok "$unit.service active"; else golive_row "Service" FAIL "$unit.service is not active"; failed=$((failed + 1)); fi
-            if sd_wait_ready "$socket" /readyz 15; then golive_row "Readiness" ok "$socket answers /readyz"; else golive_row "Readiness" FAIL "$socket does not answer /readyz"; failed=$((failed + 1)); fi
-        else
-            golive_row "Service" skip "no systemd in this environment"
-        fi
+        while read -r label; do
+            [[ -n "$label" ]] || continue
+            unit="$(rt_live_unit "$domain" "$label")"; socket="$(rt_socket "$domain" "$label")"
+            golive_row "Release $label" info "$(py_current_release "$(rt_root "$domain" "$label")")"
+            if sd_available; then
+                if sd_is_active "$unit.service"; then golive_row "Service $label" ok "$unit.service active"; else golive_row "Service $label" FAIL "$unit.service is not active"; failed=$((failed + 1)); fi
+                if sd_wait_ready "$socket" /readyz 15; then golive_row "Readiness $label" ok "$socket answers /readyz"; else golive_row "Readiness $label" FAIL "$socket does not answer /readyz"; failed=$((failed + 1)); fi
+            else
+                golive_row "Service $label" skip "no systemd in this environment"
+            fi
+        done < <(type_runtime_endpoints "$domain")
     else
         while read -r label; do
             [[ -n "$label" ]] || continue

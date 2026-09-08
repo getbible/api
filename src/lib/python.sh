@@ -7,9 +7,12 @@ GB_PYTHON_LOADED=1
 # shellcheck source=platform.sh
 source "${GB_LIB:-$(dirname -- "${BASH_SOURCE[0]}")}/platform.sh"
 
-py_app_root() { printf '%s/%s\n' "$GB_OPT" "$1"; }
-py_releases_dir() { printf '%s/%s/releases\n' "$GB_OPT" "$1"; }
-py_current_link() { printf '%s/%s/current\n' "$GB_OPT" "$1"; }
+# A root holds one service's releases/, deployments/ and current link. It is
+# given as an absolute path, or as a kind name for the layout of installations
+# from before every version had its own service (/opt/getbible/<kind>).
+py_app_root() { if [[ "$1" == /* ]]; then printf '%s\n' "$1"; else printf '%s/%s\n' "$GB_OPT" "$1"; fi; }
+py_releases_dir() { printf '%s/releases\n' "$(py_app_root "$1")"; }
+py_current_link() { printf '%s/current\n' "$(py_app_root "$1")"; }
 py_current_release() { readlink -f -- "$(py_current_link "$1")" 2>/dev/null || true; }
 py_distributions_file() { printf '%s/python/distributions.lock\n' "$GB_SRC"; }
 
@@ -115,7 +118,8 @@ py_managed_install() (
     printf '%s/bin/python3\n' "$target"
 )
 
-# Hash all release inputs by relative name, so moving/updating the manager
+# py_inputs_hash APP [PYTHON]: hash all release inputs of the implementation
+# directory src/apps/APP by relative name, so moving/updating the manager
 # checkout does not cause a rebuild. Interpreter/build tooling are inputs too.
 py_inputs_hash() {
     local kind="$1" distribution
@@ -132,12 +136,15 @@ py_inputs_hash() {
     } | sha256sum | cut -c1-16
 }
 
-# py_build_release KIND DOMAIN [PYTHON_VERSION] -> new release directory.
-# Build in its final path so venv shebangs survive activation; this directory
-# remains unreachable from serving symlinks until the caller verifies it.
+# py_build_release ROOT DOMAIN [PYTHON_VERSION] [APP] -> new release directory
+# under ROOT (see py_app_root), built from src/apps/APP (default: the root's
+# name). Build in its final path so venv shebangs survive activation; this
+# directory remains unreachable from serving symlinks until the caller
+# verifies it.
 py_build_release() (
-    local kind="$1" domain="$2" requested="${3:-auto}" hash release='' stamp python version app complete=false
-    hash="$(py_inputs_hash "$kind" "$requested")" || exit 1
+    local kind="$1" domain="$2" requested="${3:-auto}" app_dir="${4:-}" hash release='' stamp python version app complete=false
+    [[ -n "$app_dir" ]] || app_dir="$(basename -- "$kind")"
+    hash="$(py_inputs_hash "$app_dir" "$requested")" || exit 1
     version="$(py_resolve_version "$requested")" || exit 1
     stamp="$(date -u +%Y%m%dT%H%M%SZ)"
     if [[ "$GB_DRY_RUN" == true ]]; then
@@ -151,7 +158,7 @@ py_build_release() (
     trap '[[ "$complete" == true || -z "$release" ]] || rm -rf -- "$release"' EXIT
     gb_step "Building $domain release $release with managed Python $version"
     install -d -m 0755 "$release/src" || exit 1
-    for app in common "$kind"; do
+    for app in common "$app_dir"; do
         install -d -m 0755 "$release/src/$app" || exit 1
         tar --exclude=build --exclude='*.egg-info' --exclude=__pycache__ --exclude='*.pyc' \
             -C "$GB_APPS/$app" -cf - . | tar -C "$release/src/$app" -xf - || exit 1
@@ -167,9 +174,9 @@ assert pathlib.Path(encodings.__file__).resolve().is_relative_to(root)
         --require-virtualenv --only-binary=:all: --no-deps --require-hashes \
         --requirement "$GB_SRC/python/build-requirements.txt" >&2 || exit 1
     "$release/.venv/bin/python" -I -m pip --disable-pip-version-check install --quiet --require-virtualenv --no-cache-dir \
-        --only-binary=:all: --requirement "$release/src/$kind/requirements.txt" >&2 || exit 1
+        --only-binary=:all: --requirement "$release/src/$app_dir/requirements.txt" >&2 || exit 1
     "$release/.venv/bin/python" -I -m pip --disable-pip-version-check install --quiet --require-virtualenv \
-        --no-deps --no-build-isolation "$release/src/common" "$release/src/$kind" >&2 || exit 1
+        --no-deps --no-build-isolation "$release/src/common" "$release/src/$app_dir" >&2 || exit 1
     "$release/.venv/bin/python" -I -m pip check >&2 || exit 1
     "$release/.venv/bin/python" -I -m pip freeze --all > "$release/packages.lock" || exit 1
     printf '%s\n' "$hash" > "$release/.inputs" || exit 1

@@ -3,23 +3,26 @@
 Every path, parameter, header and body is untrusted. nginx is the only
 process that faces the network; everything behind it is isolated.
 
-## Static endpoints
+## Static domains
 
 - One system user per domain synchronises files with a read-only deploy key
   and a pinned host key; it can write only its own home and data root, runs
   under a hardened oneshot unit, and never touches nginx.
 - Only allowed extensions are exported from a repository and only those are
-  served; dotfiles never reach the live root. JSON syntax, available sibling
+  served, plus the page and OpenAPI document an endpoint takes from the
+  repository by explicit path (no dot segments, never a symlink); dotfiles
+  never reach the live root. JSON syntax, available sibling
   checksums and hash manifests are verified before publication. Malformed
   manifests, unsafe paths and symlinks are rejected.
 - nginx: no directory listings, no query strings, safe methods only, 1 KB
   body limit, short header and body timeouts, `server_tokens off`, locked
   CSP, `nosniff`, HSTS, JSON problem documents for every error.
 
-## Runtime endpoints
+## Runtime domains
 
-- One system user per kind, no shell, no home; an immutable root-owned
-  release; a systemd socket owns the unix socket (0660, nginx's group);
+- One system user per kind, no shell, no home; one service per endpoint, each
+  an immutable root-owned release; a systemd socket owns the unix socket
+  (0660, nginx's group);
   the service sandbox has no capabilities, read-only file system except its
   cache and log directory, private devices and tmp, no writable-executable
   memory, memory, CPU and task ceilings.
@@ -28,15 +31,25 @@ process that faces the network; everything behind it is isolated.
   verses, query length, page size and offset, and answers with problem
   documents that never contain tracebacks or paths.
 - nginx strips the `Authorization` header before proxying and passes only
-  the token id; upstream CORS headers are replaced with the endpoint's own.
+  the token id; upstream CORS headers are replaced with the domain's own.
+  For a domain that serves its endpoint at the root, nginx adds the version
+  segment and strips it from redirects; the internal prefix it uses for the
+  page's hand-over is marked `internal` and answers 404 to clients.
 - Candidate deployments run with their real service identity and must pass
   scripture readiness (plus a search probe for search) before traffic changes.
 
 ## Platform
 
-- Secrets (`telegram.conf`, `cloudflare.conf`, `tokens.json`, `runtime.env`)
-  are root-only or group-restricted; tokens are 256-bit random and never
-  logged; token maps are readable by the nginx master only.
+- Secrets (`telegram.conf`, `cloudflare.conf`, `tokens.json`,
+  `runtime-<label>.env`) are root-only or group-restricted; tokens are
+  256-bit random and never logged; token maps are readable by the nginx
+  master only.
+- Pages, OpenAPI documents, the favicon and `versions.json` are served by
+  exact nginx locations with fixed media types and the HTML or API security
+  headers; a page an operator takes over lives under `/var/www/getbible/`,
+  root-owned, and is never rewritten by the tool. The sync units' post-run
+  refresh of generated files runs as root outside the sync sandbox and only
+  writes generated files under that directory.
 - Token map files are root-owned mode 0600 in mode 0700 directories; updates
   also repair unchanged maps from older installations. Token lifetime is
   checked against nginx's current epoch time on every request. An expiry date
@@ -52,12 +65,12 @@ process that faces the network; everything behind it is isolated.
   with a reload hook; the rendered vhosts are never edited by certbot. For
   DNS-01 the token is handed to certbot in a root-only ini file (0600)
   generated from `cloudflare.conf`.
-- A staged endpoint never requests a certificate or changes DNS on its own
+- A staged domain never requests a certificate or changes DNS on its own
   (an operator may issue its certificate explicitly); it serves a
   self-signed placeholder certificate (root-only key under
   `/etc/getbible/placeholder-certs`) so its vhost can be verified before the
-  switch, and the placeholder is deleted when the endpoint goes live or is
-  removed. Go-live obtains the certificate first and leaves the endpoint
+  switch, and the placeholder is deleted when the domain goes live or is
+  removed. Go-live obtains the certificate first and leaves the domain
   staged if that fails.
 - Rate limits (metered mode) protect the origin from abuse without
   throttling token holders; Cloudflare, when proxied, adds DDoS protection

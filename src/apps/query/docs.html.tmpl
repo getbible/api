@@ -3,36 +3,38 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{DOMAIN}}/{{VERSION}}/ · getBible query API</title>
+<title>{{DOMAIN}}{{PREFIX}} · getBible query API</title>
 {{#IF FAVICON}}<link rel="icon" href="/favicon.ico">
 {{/IF}}<style>{{CSS}}</style>
 </head>
 <body>
 <main>
-<h1>{{DOMAIN}} <code>/{{VERSION}}/</code></h1>
+<h1>{{DOMAIN}}{{#UNLESS IS_ROOT}} <code>{{PREFIX}}</code>{{/UNLESS}}</h1>
 <p class="lead">The getBible query endpoint: give it a scripture reference, get the verses. <span class="badge">{{ACCESS_MODE_LABEL}}</span> <span class="badge">API {{VERSION}}</span></p>
 
 <h2>The one route</h2>
-<pre><code>GET https://{{DOMAIN}}/{{VERSION}}/{translation}/{reference}</code></pre>
-<table>
+<pre><code>GET https://{{DOMAIN}}{{PREFIX}}{translation}/{reference}</code></pre>
+{{#IF IS_ROOT}}<p>This domain serves API version {{VERSION}} (Bible data version {{VERSION}}) at its root: there is no version segment in its paths.</p>
+{{/IF}}<table>
 <tr><th>Part</th><th>Meaning</th><th>Examples</th></tr>
-<tr><td><code>{{VERSION}}</code></td><td>API version; serves Bible data version {{VERSION}}.</td><td><code>{{VERSION}}</code></td></tr>
+{{#UNLESS IS_ROOT}}<tr><td><code>{{VERSION}}</code></td><td>API version; serves Bible data version {{VERSION}}.</td><td><code>{{VERSION}}</code></td></tr>
+{{/UNLESS}}
 <tr><td><code>translation</code></td><td>Translation abbreviation.</td><td><code>{{DEFAULT_TRANSLATION}}</code>, <code>aov</code>, <code>vulgate</code></td></tr>
 <tr><td><code>reference</code></td><td>A scripture reference, or several separated by <code>;</code>. Book names, abbreviations, chapters, verses and ranges are all understood.</td><td><code>John3:16</code>, <code>Genesis 1:1-3</code>, <code>Ps23;Mat7:7</code></td></tr>
 </table>
-<pre><code>curl https://{{DOMAIN}}/{{VERSION}}/{{DEFAULT_TRANSLATION}}/John%203:16</code></pre>
+<pre><code>curl https://{{DOMAIN}}{{PREFIX}}{{DEFAULT_TRANSLATION}}/John%203:16</code></pre>
 <p>The response is a JSON object with one entry per chapter, keyed <code>{translation}_{book}_{chapter}</code>, each holding the translation metadata, the references that selected it, and its verses. Responses carry <code>Cache-Control: public, max-age={{CACHE_SECONDS}}</code> and an <code>ETag</code>{{#IF OPENAPI_URL}}; the full description is in <a href="{{OPENAPI_URL}}">openapi.json</a>{{/IF}}.</p>
 
 <h2>Short forms</h2>
 <p>Anything shorter than the full route is a permanent redirect (<code>301</code>) to it. A missing translation becomes <code>{{DEFAULT_TRANSLATION}}</code>; a reference that cannot be resolved becomes <code>{{DEFAULT_REFERENCE}}</code>.</p>
 <table>
 <tr><th>Request</th><th>Redirects to</th></tr>
-<tr><td><code>/{{VERSION}}</code></td><td><code>/{{VERSION}}/{{DEFAULT_TRANSLATION}}/{{DEFAULT_REFERENCE}}</code></td></tr>
-<tr><td><code>/{{VERSION}}/aov</code></td><td><code>/{{VERSION}}/aov/{{DEFAULT_REFERENCE}}</code></td></tr>
-<tr><td><code>/{{VERSION}}/John3:16</code></td><td><code>/{{VERSION}}/{{DEFAULT_TRANSLATION}}/John3:16</code></td></tr>
-<tr><td><code>/aov/John3:16</code></td><td><code>/{{VERSION}}/aov/John3:16</code></td></tr>
-<tr><td><code>/John3:16</code></td><td><code>/{{VERSION}}/{{DEFAULT_TRANSLATION}}/John3:16</code></td></tr>
-</table>
+{{#UNLESS IS_ROOT}}<tr><td><code>/{{VERSION}}</code></td><td><code>{{PREFIX}}{{DEFAULT_TRANSLATION}}/{{DEFAULT_REFERENCE}}</code></td></tr>
+{{/UNLESS}}<tr><td><code>{{PREFIX}}aov</code></td><td><code>{{PREFIX}}aov/{{DEFAULT_REFERENCE}}</code></td></tr>
+<tr><td><code>{{PREFIX}}John3:16</code></td><td><code>{{PREFIX}}{{DEFAULT_TRANSLATION}}/John3:16</code></td></tr>
+{{#UNLESS IS_ROOT}}<tr><td><code>/aov/John3:16</code></td><td><code>{{PREFIX}}aov/John3:16</code></td></tr>
+<tr><td><code>/John3:16</code></td><td><code>{{PREFIX}}{{DEFAULT_TRANSLATION}}/John3:16</code></td></tr>
+{{/UNLESS}}</table>
 <p>The full route itself is strict: an unknown translation answers <code>404</code>, an unresolvable reference answers <code>400</code>, and a query string answers <code>400</code>, because this endpoint takes no parameters.</p>
 
 <h2>Access</h2>
@@ -47,8 +49,8 @@
 <tr><td>400</td><td>parameters_not_accepted</td><td>A query string was sent.</td></tr>
 <tr><td>401</td><td>unauthorized</td><td>A bearer token is required and was missing or invalid.</td></tr>
 <tr><td>404</td><td>translation_not_found</td><td>No such translation.</td></tr>
-<tr><td>404</td><td>unknown_version</td><td>Only <code>{{VERSION}}</code> is served here.</td></tr>
-<tr><td>429</td><td>rate_limited</td><td>The public budget for your address is used up.</td></tr>
+{{#UNLESS IS_ROOT}}<tr><td>404</td><td>unknown_version</td><td>Only <code>{{VERSION}}</code> is served here.</td></tr>
+{{/UNLESS}}<tr><td>429</td><td>rate_limited</td><td>The public budget for your address is used up.</td></tr>
 <tr><td>503</td><td>repository_unavailable</td><td>The Scripture files are temporarily unreadable.</td></tr>
 </table>
 

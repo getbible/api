@@ -4,13 +4,25 @@ Read this before changing anything. It applies to the whole repository.
 
 ## Purpose
 
-`getbible.sh` deploys and maintains every public getBible API endpoint on a
-server: static endpoints (versioned file trees synced from git repositories
-and served by nginx) and runtime endpoints (the `query` and `search`
-services built on the getBible librarian, run by gunicorn behind nginx).
-Everything the tool installs is rendered from `src/` and recorded, so
-`git pull` followed by `getbible.sh update` brings every endpoint to the
-current templates.
+`getbible.sh` deploys and maintains every public getBible API domain on a
+server: static domains (file trees synced from git repositories and served
+by nginx) and runtime domains (the `query` and `search` services built on
+the getBible librarian, run by gunicorn behind nginx). Everything the tool
+installs is rendered from `src/` and recorded, so `git pull` followed by
+`getbible.sh update` brings every domain to the current templates.
+
+## Vocabulary
+
+- A **domain** is a host name: one nginx vhost, one certificate, one go-live.
+- An **endpoint** is one of a domain's version folders (`/v2/`): a tree
+  synced from its own repository (static) or a service of its own (runtime).
+  A domain set up without version folders serves a single endpoint at its
+  root, label `root`; domain and endpoint are then the same thing.
+- Use these words in the menu, in output and in documentation. The registry
+  directory (`/etc/getbible/endpoints/<domain>/endpoint.conf` for the
+  domain, `versions/<label>.conf` for its endpoints), the `endpoint_*`
+  pipeline functions and the `ep_*` registry functions predate the
+  vocabulary and keep their names so installations keep working.
 
 ## Layout
 
@@ -18,9 +30,12 @@ current templates.
 - `src/lib/` - bash libraries, sourced by `getbible.sh`, never executed.
 - `src/bin/` - helper programs installed to `/usr/local/lib/getbible`.
 - `src/nginx/` - nginx templates and snippets.
-- `src/types/<type>/` - one endpoint type each (`static`, `runtime`).
-- `src/apps/<kind>/` - runtime applications (`common`, `query`, `search`).
-- `src/docs-site/` - documentation page templates served at domain roots.
+- `src/types/<type>/` - one domain type each (`static`, `runtime`).
+- `src/apps/<kind>/` - runtime applications (`common`, `query`, `search`);
+  `src/apps/<kind>-<version>/` an implementation for one version that needs
+  its own code. A kind's manifests declare the versions it can serve.
+- `src/docs-site/` - templates of the domain pages and the static endpoint
+  pages; the runtime kinds carry their own page and OpenAPI templates.
 - `tests/` - lint, unit, CLI and integration tests (`tests/run.sh`).
 - `docs/` - operator documentation.
 
@@ -37,13 +52,19 @@ current templates.
   Neither exposes the other's routes.
 - Every error is an RFC 9457 problem document (`application/problem+json`).
 - nginx is only ever reloaded, never restarted, and only after `nginx -t`.
-- A staged endpoint (`LIVE=false`) never takes over its public name on its
+- A staged domain (`LIVE=false`) never takes over its public name on its
   own: no apply requests a certificate or changes Cloudflare DNS or rules
   until go-live, which obtains the certificate before marking it live. The
-  operator may issue a certificate for it explicitly (Endpoint >
+  operator may issue a certificate for it explicitly (Domain >
   Certificate > Issue; DNS-01 publishes a TXT record) without it going live.
 - Anything that changes files on the server sends a Telegram notification
   when Telegram is enabled.
+- A page or OpenAPI document an operator has taken over (`custom` source)
+  is never rewritten by the tool; generated ones are rewritten on every
+  apply. Never hard-code a runtime version: the implementations under
+  `src/apps/` declare what they serve.
+- Everything is operable from the whiptail menu; a command line form exists
+  for every action, and the menu gathers every input before running it.
 - Never log a bearer token. Everything else about a request is logged.
 - Keep `tests/run.sh` green: shellcheck, Python unit tests, CLI tests. The
   integration tests need nginx and are run when it is present.

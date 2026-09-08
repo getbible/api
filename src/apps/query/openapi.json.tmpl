@@ -8,7 +8,7 @@
   },
   "servers": [{"url": "https://{{DOMAIN}}"}],
   "paths": {
-    "/{{VERSION}}/{translation}/{reference}": {
+    "{{PREFIX}}{translation}/{reference}": {
       "get": {
         "summary": "Verses for one or more references",
         "operationId": "getScripture",
@@ -27,19 +27,19 @@
         }
       }
     },
-    "/{{VERSION}}/{translation}": {
+    "{{PREFIX}}{translation}": {
       "get": {
-        "summary": "Redirect to the default reference in a translation",
+        "summary": "Redirect to the default reference in a translation (or, for a reference, to the default translation)",
         "operationId": "redirectTranslation",
         "parameters": [{"name": "translation", "in": "path", "required": true, "schema": {"type": "string"}}],
-        "responses": {"301": {"description": "Location: /{{VERSION}}/{translation}/{{DEFAULT_REFERENCE}}"}}
+        "responses": {"301": {"description": "Location: {{PREFIX}}{translation}/{{DEFAULT_REFERENCE}}"}}
       }
-    },
+    },{{#UNLESS IS_ROOT}}
     "/{{VERSION}}": {
       "get": {
         "summary": "Redirect to the default translation and reference",
         "operationId": "redirectVersion",
-        "responses": {"301": {"description": "Location: /{{VERSION}}/{{DEFAULT_TRANSLATION}}/{{DEFAULT_REFERENCE}}"}}
+        "responses": {"301": {"description": "Location: {{PREFIX}}{{DEFAULT_TRANSLATION}}/{{DEFAULT_REFERENCE}}"}}
       }
     },
     "/{reference}": {
@@ -47,9 +47,9 @@
         "summary": "Short form: reference in the default translation",
         "operationId": "redirectReference",
         "parameters": [{"name": "reference", "in": "path", "required": true, "schema": {"type": "string"}}],
-        "responses": {"301": {"description": "Location: /{{VERSION}}/{{DEFAULT_TRANSLATION}}/{reference}; an unresolvable reference falls back to {{DEFAULT_REFERENCE}}"}}
+        "responses": {"301": {"description": "Location: {{PREFIX}}{{DEFAULT_TRANSLATION}}/{reference}; an unresolvable reference falls back to {{DEFAULT_REFERENCE}}"}}
       }
-    },
+    },{{/UNLESS}}
     "/healthz": {"get": {"summary": "Liveness", "operationId": "health", "responses": {"200": {"description": "{\"status\":\"ok\"}"}}}},
     "/readyz": {"get": {"summary": "Readiness: read the default scripture reference", "operationId": "readiness", "responses": {"200": {"description": "Scripture is readable"}, "503": {"description": "Scripture is unavailable"}}}}
   },

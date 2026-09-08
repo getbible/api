@@ -59,8 +59,8 @@ request() {
         --resolve "$domain:443:127.0.0.1" "https://$domain$path"
 }
 
-deployment() { readlink -f "/opt/getbible/$1/active"; }
-unit() { printf 'getbible-%s-%s.service\n' "$1" "$(basename "$(deployment "$1")")"; }
+deployment() { readlink -f "/opt/getbible/$1/v2/active"; }
+unit() { printf 'getbible-%s-v2-%s.service\n' "$1" "$(basename "$(deployment "$1")")"; }
 main_pid() { systemctl show --property=MainPID --value "$(unit "$1")"; }
 env_value() (
     # shellcheck source=/dev/null
@@ -134,9 +134,9 @@ for kind in query search; do
     check "$kind ready through nginx" '{"status":"ready"}' "$(request "$domain" /readyz | tr -d '\n')"
     check "$kind runs as the production account" "$(id -u "getbible-$kind")" "$(ps -o uid= -p "$(main_pid "$kind")" | tr -d ' ')"
     check "$kind systemd isolation enabled" strict "$(systemctl show --property=ProtectSystem --value "$(unit "$kind")")"
-    check "$kind code is read-only to its account" no "$(runuser -u "getbible-$kind" -- test -w "/opt/getbible/$kind/current" && echo yes || echo no)"
+    check "$kind code is read-only to its account" no "$(runuser -u "getbible-$kind" -- test -w "/opt/getbible/$kind/v2/current" && echo yes || echo no)"
     check "$kind cannot read token configuration" no "$(runuser -u "getbible-$kind" -- test -r /etc/getbible/getbible.conf && echo yes || echo no)"
-    release="$(readlink -f "/opt/getbible/$kind/current")"
+    release="$(readlink -f "/opt/getbible/$kind/v2/current")"
     base_python="$("$release/.venv/bin/python" -c 'import sys; print(sys.base_prefix)')"
     [[ "$base_python" == /opt/getbible/* ]] || { echo "Runtime depends on host Python: $base_python" >&2; exit 1; }
     check "$kind pinned dependencies consistent" 'No broken requirements found.' "$("$release/.venv/bin/python" -m pip check)"
@@ -147,7 +147,7 @@ request "$S" /v2/test/beginning | /usr/bin/python3 -c 'import json,sys; payload=
 NGINX_PID="$(systemctl show --property=MainPID --value nginx)"
 OLD_DEPLOYMENT="$(deployment query)"
 OLD_PID="$(main_pid query)"
-OLD_RELEASE="$(readlink -f /opt/getbible/query/current)"
+OLD_RELEASE="$(readlink -f /opt/getbible/query/v2/current)"
 
 "$GB" apply "$Q"
 check 'idempotent apply preserves process' "$OLD_PID" "$(main_pid query)"
@@ -158,7 +158,7 @@ start_probe
 stop_probe
 NEW_DEPLOYMENT="$(deployment query)"
 [[ "$NEW_DEPLOYMENT" != "$OLD_DEPLOYMENT" ]] || { echo 'Configuration update reused the active generation.' >&2; exit 1; }
-check 'configuration update reuses immutable code' "$OLD_RELEASE" "$(readlink -f /opt/getbible/query/current)"
+check 'configuration update reuses immutable code' "$OLD_RELEASE" "$(readlink -f /opt/getbible/query/v2/current)"
 check 'old configuration retained for rollback' Ge1:1 "$(env_value "$OLD_DEPLOYMENT/runtime.env" QUERY_DEFAULT_REFERENCE)"
 check 'new service reads updated configuration' QUERY_DEFAULT_REFERENCE=Ge1:2 "$(tr '\0' '\n' < "/proc/$(main_pid query)/environ" | grep '^QUERY_DEFAULT_REFERENCE=')"
 
@@ -177,7 +177,7 @@ fi
 stop_probe
 check 'failed upgrade preserves active generation' "$NEW_DEPLOYMENT" "$(deployment query)"
 check 'failed upgrade preserves active process' "$ACTIVE_PID" "$(main_pid query)"
-check 'failed upgrade preserves active code' "$OLD_RELEASE" "$(readlink -f /opt/getbible/query/current)"
+check 'failed upgrade preserves active code' "$OLD_RELEASE" "$(readlink -f /opt/getbible/query/v2/current)"
 check 'failed upgrade preserves configuration' Ge1:2 "$(env_value "$(deployment query)/runtime.env" QUERY_DEFAULT_REFERENCE)"
 
 start_probe

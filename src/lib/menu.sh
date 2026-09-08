@@ -70,7 +70,7 @@ menu_endpoints() {
     local -a items=()
     while read -r domain; do
         [[ -n "$domain" ]] || continue
-        items+=("$domain" "$(ep_get "$domain" TYPE) $(ep_get "$domain" KIND) · $(ep_get "$domain" ACCESS_MODE)")
+        items+=("$domain" "$(ep_summary_line "$domain" | sed 's/^[^ ]* *//; s/  */ /g')")
     done < <(ep_list)
     [[ ${#items[@]} -gt 0 ]] || { ui_msg "Domains" "No domains are deployed yet."; return 0; }
     domain="$(ui_menu "Domains" "Choose a domain" "${items[@]}")" || return 0

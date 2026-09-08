@@ -1,30 +1,45 @@
-# Static endpoints
+# Static domains and their endpoints
 
-A static endpoint is a domain serving one or more **versions**, each a tree of
-files synchronised from a git repository and served by nginx exactly as
-published. The tool never writes into a version's files; it only decides
-which files are copied out of the repository and how they are served.
+A static domain serves one or more **endpoints**, each a tree of files
+synchronised from a git repository and served by nginx exactly as published.
+The tool never writes into an endpoint's files; it only decides which files
+are copied out of the repository and how they are served.
 
-## Versions
+## Endpoints
 
-Each version is its own record: label (`v1`, `v2`, ...), repository, branch
-or tag, and the folder inside the repository that holds the tree (`.` when
-the repository root is the version, `v1` when the repository keeps a version
-folder). Versions are served under their label:
+An endpoint is a version folder of the domain: `/v1/`, `/v2/`, each its own
+record (label, repository, branch or tag, and the folder inside the
+repository that holds the tree: `.` when the repository root is the tree,
+`v1` when the repository keeps a version folder). Endpoints are served under
+their label:
 
 ```
 https://api.getbible.net/v2/kjv/1/1.json   ->   /srv/getbible/api.getbible.net/v2/kjv/1/1.json
 ```
 
-`/srv/getbible/<domain>/<version>` is a symlink to the current release under
-`releases/<version>/`. Add or retire versions from the endpoint's menu
-(Manage versions) or with `getbible.sh version add|remove`.
+`/srv/getbible/<domain>/<label>` is a symlink to the current release under
+`releases/<label>/`. Add, change or retire endpoints from the domain's menu
+(Endpoints) or with `getbible.sh version add|change|remove`.
+
+A domain may instead serve a single endpoint at its **root**: leave the
+version folder empty in the deploy walkthrough (`--version root` on the
+command line). Its tree is served at `/`
+(`https://files.getbible.net/kjv/1/1.json`), its page at `/` and its OpenAPI
+document at `/openapi.json`; the record and the release directory carry the
+label `root`. Such a domain cannot add version folders later, and a domain
+with version folders cannot add a root endpoint: remove the one to switch to
+the other.
+
+Every endpoint has a documentation page at `/vN/` and may have an OpenAPI
+document at `/vN/openapi.json`; the domain page at `/` lists the endpoints
+and `/versions.json` maps them to their documents. See [PAGES.md](PAGES.md)
+for where these come from and how to take them over.
 
 ## Synchronisation
 
 Every domain gets its own system user (`gb-sync-<name>`) with an ed25519
 deploy key under `/var/lib/getbible/sync/<user>/.ssh/`. Add the public key
-(shown after deployment, or Endpoint > Show the deploy key) to the repository
+(shown after deployment, or Domain > Show the deploy key) to the repository
 as a read-only deploy key on GitHub or Gitea. The repository host's SSH key is
 pinned in the user's `known_hosts` at deployment.
 
@@ -34,12 +49,12 @@ the repository URL is the host's, not yours: `git@github.com:owner/repo.git`
 on GitHub, GitLab and Gitea (they accept nothing but `git`). A self-hosted
 server with another SSH user or port is written `ssh://user@host:port/path`
 or `user@host:path`. Public repositories may use `https://`; private ones
-need SSH. Endpoint > Test repository access proves the key and URL work
-before the first sync. A version's repository, branch or folder can be
-changed later under Endpoint > Manage versions > Change (or `version change`)
+need SSH. Domain > Test repository access proves the key and URL work
+before the first sync. An endpoint's repository, branch or folder can be
+changed later under Domain > Endpoints > Change (or `version change`)
 without losing its releases; the next sync publishes from the new source.
 
-A timer per version (`getbible-sync-<slug>-<version>.timer`, weekly by
+A timer per endpoint (`getbible-sync-<slug>-<label>.timer`, weekly by
 default, daily or monthly on request, "Sync now" any time) runs
 `/usr/local/lib/getbible/getbible-sync` as that user:
 
@@ -47,24 +62,30 @@ default, daily or monthly on request, "Sync now" any time) runs
 2. Telegram: "Update started".
 3. Fetch into a persistent shallow checkout.
 4. Export the source folder into a new release directory with rsync, copying
-   only the allowed file types, skipping dotfiles, and **hard-linking every
-   unchanged file from the previous release** so inodes and ETags survive.
+   only the allowed file types plus the page and OpenAPI document the
+   endpoint takes from the repository (by path, whatever their type),
+   skipping dotfiles, and **hard-linking every unchanged file from the
+   previous release** so inodes and ETags survive.
 5. Verify every JSON document; every `.sha` must have a JSON sibling and hold
    that file's SHA-1; every
    `hashes.json` manifest must describe existing files with matching
    digests. A failure deletes the export and leaves the old release live.
-6. Flip the version symlink (atomic for the whole tree; nginx keeps running).
+6. Flip the endpoint's symlink (atomic for the whole tree; nginx keeps
+   running).
 7. Keep the actual current and previous releases, including same-second
    syncs. Older releases have a minimum one-hour cleanup grace period.
 8. Telegram: "Update live" with the commit, file count and changed count.
+9. As root, outside the sandbox and without affecting the sync's result,
+   refresh the domain's generated pages and `versions.json`, so a document
+   that arrived with this sync is linked at once.
 
-Nothing in this pipeline runs as root and nothing reloads nginx. Release
-directories are unique, concurrent runs are locked, and hard-linked files
-are never rewritten or have their metadata changed after export. Verification
-failure removes only the unpublished candidate. Responses already streaming
-keep their open file descriptors across rotation. Multiple independent HTTP
-requests can span different releases; the symlink switch is not a client-wide
-snapshot transaction.
+Nothing in the export pipeline runs as root and nothing reloads nginx.
+Release directories are unique, concurrent runs are locked, and hard-linked
+files are never rewritten or have their metadata changed after export.
+Verification failure removes only the unpublished candidate. Responses
+already streaming keep their open file descriptors across rotation. Multiple
+independent HTTP requests can span different releases; the symlink switch is
+not a client-wide snapshot transaction.
 
 ## Serving
 
@@ -78,21 +99,26 @@ snapshot transaction.
   both with stale-while-revalidate in open/metered mode. Token-only documents,
   checksums and HTML use `private, no-store` with `Vary: Authorization`.
   ETags and conditional requests remain available; gzip and optional brotli.
-- The domain root serves the documentation page; `/healthz` answers for
-  monitors. A version's own `openapi.json`, when the repository ships one,
-  is linked from that page.
+- The domain page, the endpoint pages, the OpenAPI documents, `versions.json`
+  and the favicon are public in every access mode, served by exact locations
+  independent of the allowed file types; `/vN` redirects to `/vN/`;
+  `/healthz` answers for monitors.
 
 ## Access
 
-Access mode, limits and tokens are per endpoint; see `ACCESS_MODES.md`.
+Access mode, limits and tokens are per domain and apply to every endpoint;
+see `ACCESS_MODES.md`.
 
 ## Commands
 
 ```sh
 getbible.sh deploy static --domain D --version v2 --repo git@github.com:org/repo.git [--ref master] [--path .] [--extensions json,sha,txt] [--access metered] [--schedule weekly]
+getbible.sh deploy static --domain D --version root --repo git@github.com:org/repo.git   # the tree at https://D/
 getbible.sh version change D v2 [--repo URL] [--ref REF] [--path P]
 getbible.sh version add D v1 --repo URL [--ref main] [--path v1]
 getbible.sh version remove D v1
-getbible.sh sync D [v2] [--force]
+getbible.sh sync D [v2|root] [--force]
+getbible.sh pages D docs v2 repository docs/index.html
+getbible.sh pages D openapi v2 repository openapi.json
 getbible.sh status D
 ```

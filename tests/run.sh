@@ -26,12 +26,18 @@ else
 fi
 
 step "runtime kinds carry every required file"
+# An implementation directory is src/apps/<kind> or src/apps/<kind>-<version>;
+# its manifest names the kind and the Python package.
 for manifest in src/apps/*/manifest.conf; do
-    kind="$(basename "$(dirname "$manifest")")"
-    for required in pyproject.toml requirements.txt manifest.conf openapi.json.tmpl docs.html.tmpl "getbible_${kind}_api/app.py" "getbible_${kind}_api/config.py" "getbible_${kind}_api/wsgi.py" "getbible_${kind}_api/check.py"; do
-        [[ -e "src/apps/$kind/$required" ]] || fail "src/apps/$kind/$required is missing"
+    dir="$(basename "$(dirname "$manifest")")"
+    kind="$(sed -n 's/^KIND=//p' "$manifest")"
+    package="$(sed -n 's/^PACKAGE=//p' "$manifest")"
+    [[ "$dir" == "$kind" || "$dir" == "$kind"-v[0-9]* ]] || fail "src/apps/$dir must be named after its kind ($kind), optionally with -vN"
+    [[ -n "$package" ]] || fail "$manifest declares no PACKAGE"
+    for required in pyproject.toml requirements.txt manifest.conf openapi.json.tmpl docs.html.tmpl "$package/app.py" "$package/config.py" "$package/wsgi.py" "$package/check.py"; do
+        [[ -e "src/apps/$dir/$required" ]] || fail "src/apps/$dir/$required is missing"
     done
-    [[ -e "tests/python/test_${kind}_app.py" ]] || fail "tests/python/test_${kind}_app.py is missing"
+    [[ -e "tests/python/test_${dir//-/_}_app.py" ]] || fail "tests/python/test_${dir//-/_}_app.py is missing"
 done
 echo "ok"
 
