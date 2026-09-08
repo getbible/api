@@ -65,7 +65,11 @@ menu_endpoint() {
     while true; do
         local -a extra=() golive=()
         mapfile -t extra < <("type_${EP_TYPE}_menu_items")
-        ep_is_live "$domain" || golive=(golive "Go live: certificate, DNS, HTTPS (this endpoint is staged)")
+        if ep_is_live "$domain"; then
+            golive=(stage "Stage again: stop taking over this name (for rolling back; DNS is not changed)")
+        else
+            golive=(golive "Go live: certificate, DNS, HTTPS (this endpoint is staged)")
+        fi
         choice="$(ui_menu "$domain" "$EP_TYPE $EP_KIND · access: $(ep_get "$domain" ACCESS_MODE) · $(ep_publication "$domain")" \
             status "Status and health" \
             verify "Verify this server end to end (service, nginx, TLS)" \
@@ -90,6 +94,7 @@ menu_endpoint() {
                 golive_verify "$domain" > "$out" 2>&1 || true
                 ui_textbox "Verify: $domain" "$out" ;;
             golive) golive_interactive "$domain" || true ;;
+            stage) golive_stage_again_interactive "$domain" ;;
             certificate) certs_menu "$domain" ;;
             logs) menu_endpoint_logs "$domain" ;;
             access)
@@ -211,6 +216,7 @@ menu_settings() {
             deploymode "New endpoints: go live at once, or stage them for a later go-live" \
             certmethod "Certificate validation: automatic, http, or dns-cloudflare" \
             certbot "Let's Encrypt contact email" \
+            addresses "Public addresses used for DNS records (empty: detected)" \
             hsts "HSTS includeSubDomains" \
             back "Back")" || return 0
         case "$choice" in
@@ -220,6 +226,7 @@ menu_settings() {
             retention) menu_settings_retention ;;
             deploymode) menu_settings_deploy_mode ;;
             certmethod) menu_settings_cert_method ;;
+            addresses) menu_settings_addresses ;;
             certbot)
                 local email
                 email="$(ui_input "Let's Encrypt" "Contact email" "$(gb_global CERTBOT_EMAIL)")" || continue
@@ -256,6 +263,17 @@ menu_settings_cert_method() {
         dns-cloudflare "DNS-01 through the Cloudflare API token" "$([[ "$current" == dns-cloudflare ]] && echo on || echo off)")" || return 0
     gb_global_set CERT_METHOD "$method"
     ui_msg "Certificate validation" "Certificates are validated with: $method. 'Go live' and 'Issue certificate' can still choose per request."
+}
+
+menu_settings_addresses() {
+    local ipv4 ipv6
+    ipv4="$(ui_input "Public addresses" "IPv4 address for this server's DNS records (empty: detected through api.ipify.org)" "$(gb_global SERVER_PUBLIC_IPV4)")" || return 0
+    [[ -z "$ipv4" || "$ipv4" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || { ui_msg "Invalid" "$ipv4 is not an IPv4 address."; return 0; }
+    ipv6="$(ui_input "Public addresses" "IPv6 address for this server's DNS records (empty: first global address found)" "$(gb_global SERVER_PUBLIC_IPV6)")" || return 0
+    [[ -z "$ipv6" || "$ipv6" =~ ^[0-9A-Fa-f:]+$ && "$ipv6" == *:* ]] || { ui_msg "Invalid" "$ipv6 is not an IPv6 address."; return 0; }
+    gb_global_set SERVER_PUBLIC_IPV4 "$ipv4"
+    gb_global_set SERVER_PUBLIC_IPV6 "$ipv6"
+    ui_msg "Public addresses" "DNS records point at: IPv4 ${ipv4:-detected}, IPv6 ${ipv6:-detected}. Go live and Cloudflare apply use these."
 }
 
 menu_settings_telegram() {

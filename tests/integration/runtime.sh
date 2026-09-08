@@ -19,13 +19,19 @@ it_log "sandbox $IT_SB"
 install -d -m 0755 "$IT_SB/fixtures"
 cp -a "$IT_ROOT/tests/python/fixtures/repository" "$FIXTURE"
 chmod -R a+rX "$FIXTURE"
+# query goes live with a preseeded certificate; search stays staged and
+# serves through its placeholder certificate until go-live.
 for kind in query search; do
     domain="$kind.example.test"
+    flags=()
+    [[ "$kind" != search ]] || flags=(--staged)
     "$IT_ROOT/getbible.sh" deploy runtime --domain "$domain" --kind "$kind" --repository "$FIXTURE" \
         --require-checksums false --default-translation test --default-reference Ge1:1 --warm test \
-        --access metered >/dev/null 2>&1 || { echo "deploy $kind failed"; exit 1; }
-    it_selfsigned "$domain"
-    "$IT_ROOT/getbible.sh" apply "$domain" >/dev/null 2>&1
+        --access metered "${flags[@]+"${flags[@]}"}" >/dev/null 2>&1 || { echo "deploy $kind failed"; exit 1; }
+    if [[ "$kind" != search ]]; then
+        it_selfsigned "$domain"
+        "$IT_ROOT/getbible.sh" apply "$domain" >/dev/null 2>&1
+    fi
 done
 
 start_gunicorn() {
@@ -105,6 +111,12 @@ it_check "docs page"                 "text/html"                 "$(it_header "$
 it_check "openapi served"            '"openapi":"3.1.0"'         "$(it_body "$S" /openapi.json | tr -d ' \n')"
 it_check "app log has search text"   '"search":"beginning"'      "$(it_wait_log "$IT_SB/var/log/getbible/$S/app/app.log" '"search":"beginning"')"
 it_check "nginx log keeps query"     'q=beginning'               "$(it_wait_log "$IT_SB/var/log/getbible/$S/access.log" 'q=beginning')"
+
+echo "-- the staged search endpoint served through its placeholder --"
+it_check "search recorded staged"    "LIVE=false"      "$(cat "$IT_SB/etc/getbible/endpoints/$S/endpoint.conf")"
+it_check "search has no letsencrypt" ""                "$(ls "$IT_SB/etc/letsencrypt/live/$S" 2>/dev/null)"
+it_check "search placeholder cert"   "$S"              "$(openssl s_client -connect "127.0.0.1:$IT_HTTPS_PORT" -servername "$S" </dev/null 2>/dev/null | openssl x509 -noout -subject)"
+it_check "search readyz via nginx"   '{"status":"ready"}' "$(it_body "$S" /readyz)"
 
 echo "-- release rebuild is skipped when inputs are unchanged --"
 BEFORE="$(readlink -f "$IT_SB/opt/getbible/query/current")"

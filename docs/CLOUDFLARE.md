@@ -34,15 +34,22 @@ DNS-01 renewals that lack it.
 ## Staged endpoints
 
 A staged endpoint (deployed with "Stage it", see `NEW_SERVER.md`) records
-its Cloudflare mode, cache and origin-pull settings but applies none of them:
-the DNS records keep pointing at whatever serves the name today, and the
-origin-side real-IP and origin-pull settings are left out of its nginx vhost
-so it can be verified directly. Go live requires the token for such a
-domain, fetches the address ranges and origin CA before rendering the live
-vhost, and applies DNS and rules after the certificate exists. For a proxied
-domain, HTTP-01 validation at go-live is refused unless the name already
-reaches this server, because the records are switched only afterwards; use
-DNS-01.
+its Cloudflare mode and cache setting but applies neither: the DNS records
+keep pointing at whatever serves the name today. The origin-side real-IP
+and origin-pull directives are rendered whenever the mode is `proxied` and
+the files they need exist; on a freshly built server they do not exist
+until the first go-live fetches them, so a staged endpoint there stays
+verifiable directly, while a serving vhost never loses them (also not
+through "Stage again"). The origin-pulls toggle itself is a zone-wide
+Cloudflare setting and takes effect at Cloudflare as soon as it is switched
+on, staged or not. Go live requires the token for such a domain, fetches
+the address ranges and origin CA before rendering the live vhost, and
+applies DNS and rules after nginx serves the certificate. For a domain
+managed here (mode `dns` or `proxied`), HTTP-01 validation at go-live is
+refused unless the name already reaches this server, because the records
+are switched only afterwards; use DNS-01. "Stage again" (endpoint menu or
+`stage DOMAIN`) stops the tool from applying DNS and rules for a live
+endpoint, for rolling back; it does not change DNS itself.
 
 ## Per domain
 

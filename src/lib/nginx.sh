@@ -129,11 +129,10 @@ nginx_render_global() {
 nginx_render_endpoint() {
     local stage="$1"
     nginx_detect
-    local slug="$EP_SLUG" domain="$EP_DOMAIN" tls=false cert_dir live=true
+    local slug="$EP_SLUG" domain="$EP_DOMAIN" tls=false cert_dir
     cert_dir="$(nginx_tls_cert_dir "$domain")"
     [[ -n "$cert_dir" ]] && tls=true
     [[ "${GB_FORCE_TLS:-}" == true ]] && { tls=true; cert_dir="${cert_dir:-$(nginx_cert_dir "$domain")}"; }
-    [[ "${EP_LIVE:-}" == false ]] && live=false
     install -d -m 0755 "$stage/sites-available" "$stage/conf.d" "$stage/getbible/$domain"
     install -d -m 0700 "$stage/getbible/tokens" "$stage/getbible/token-validity"
 
@@ -147,11 +146,13 @@ nginx_render_endpoint() {
     [[ -n "${TYPE_PROXY_CACHE:-}" ]] && proxy_cache="$TYPE_PROXY_CACHE"
 
     local real_ip=false origin_pulls=false
-    # Cloudflare's origin-side settings belong to live routing: a staged copy
-    # has no address-range file yet and must stay reachable for verification.
-    if [[ "$live" == true && "$EP_CLOUDFLARE_MODE" == proxied ]]; then
-        real_ip=true
-        [[ "$EP_CLOUDFLARE_ORIGIN_PULLS" == true ]] && origin_pulls=true
+    # Cloudflare's origin-side directives follow the endpoint's mode and the
+    # files they include, never the publication state: a vhost that serves
+    # the name keeps them through "Stage again", while a freshly built server
+    # has no ranges file yet (go-live fetches it) and stays verifiable directly.
+    if [[ "$EP_CLOUDFLARE_MODE" == proxied ]]; then
+        [[ -f "$GB_NGINX_GB/cloudflare-real-ip.conf" ]] && real_ip=true
+        [[ "$EP_CLOUDFLARE_ORIGIN_PULLS" == true && -f "$GB_NGINX_GB/cloudflare-origin-pull-ca.pem" ]] && origin_pulls=true
     fi
 
     local http2_native=false http2_legacy=false

@@ -52,11 +52,13 @@ process that faces the network; everything behind it is isolated.
   with a reload hook; the rendered vhosts are never edited by certbot. For
   DNS-01 the token is handed to certbot in a root-only ini file (0600)
   generated from `cloudflare.conf`.
-- A staged endpoint never requests a certificate or changes DNS; it serves a
+- A staged endpoint never requests a certificate or changes DNS on its own
+  (an operator may issue its certificate explicitly); it serves a
   self-signed placeholder certificate (root-only key under
   `/etc/getbible/placeholder-certs`) so its vhost can be verified before the
-  switch, and the placeholder is deleted once the Let's Encrypt certificate
-  is served. Going live is refused until the certificate exists.
+  switch, and the placeholder is deleted when the endpoint goes live or is
+  removed. Go-live obtains the certificate first and leaves the endpoint
+  staged if that fails.
 - Rate limits (metered mode) protect the origin from abuse without
   throttling token holders; Cloudflare, when proxied, adds DDoS protection
   and can restrict origin access to its own certificate.

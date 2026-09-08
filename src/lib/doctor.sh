@@ -31,14 +31,16 @@ doctor_run() {
         if [[ -z "$GB_PREFIX" ]] && "$GB_NGINX_BIN" -t >/dev/null 2>&1; then doctor_check "nginx configuration" ok "nginx -t passes"; else doctor_check "nginx configuration" WARN "nginx -t fails or nginx missing"; fi
         sd_is_active nginx && doctor_check "nginx service" ok active || doctor_check "nginx service" WARN "not active"
     fi
-    if certs_can_run; then
+    if ! gb_is_root && [[ -z "$GB_PREFIX" ]]; then
+        doctor_check "certificate checks" info "run as root to inspect the certbot plugins and renewals"
+    elif certs_can_run; then
         if certs_dns_cloudflare_installed; then
             doctor_check "certbot dns-cloudflare" ok "DNS-01 available: certificates can be issued before DNS points here"
         else
             doctor_check "certbot dns-cloudflare" info "plugin not installed (python3-certbot-dns-cloudflare); only HTTP-01 is possible"
         fi
+        doctor_check_dns_renewals
     fi
-    doctor_check_dns_renewals
     if sd_available; then
         sd_is_active certbot.timer && doctor_check "certbot.timer" ok active || doctor_check "certbot.timer" WARN "not active (snap certbot uses its own timer)"
         sd_is_active getbible-logrotate.timer && doctor_check "log rotation timer" ok active || doctor_check "log rotation timer" WARN "not active; run any deploy or update"
@@ -54,20 +56,35 @@ doctor_run() {
     printf '\nListening: %s\n' "$(ss -ltn 2>/dev/null | awk 'NR>1 {print $4}' | grep -E ':(80|443)$' | sort -u | tr '\n' ' ')"
 }
 
-# Certificates issued (or copied from another server) with DNS-01 renew
-# through the credentials file named in their renewal configuration.
+# Certificates issued here, or copied from another server, renew through
+# what their renewal configuration names: the webroot this tool serves, or
+# the DNS-01 credentials file. Anything else (a lineage from `certbot
+# --nginx`, say) would edit the rendered vhosts and is better reissued.
 doctor_check_dns_renewals() {
-    local conf credentials broken=""
+    local conf domain authenticator credentials webroot dns_broken="" foreign=""
     for conf in "$GB_LETSENCRYPT"/renewal/*.conf; do
         [[ -f "$conf" ]] || continue
-        grep -q '^authenticator[[:space:]]*=[[:space:]]*dns-cloudflare' "$conf" || continue
-        credentials="$(sed -n 's/^dns_cloudflare_credentials[[:space:]]*=[[:space:]]*//p' "$conf" | head -1)"
-        if [[ -z "$credentials" || ! -f "$credentials" ]] || ! certs_dns_cloudflare_installed; then
-            broken="$broken $(basename "$conf" .conf)"
-        fi
+        domain="$(basename "$conf" .conf)"
+        ep_exists "$domain" || continue
+        authenticator="$(sed -n 's/^authenticator[[:space:]]*=[[:space:]]*//p' "$conf" | head -1)"
+        case "$authenticator" in
+            dns-cloudflare)
+                credentials="$(sed -n 's/^dns_cloudflare_credentials[[:space:]]*=[[:space:]]*//p' "$conf" | head -1)"
+                if [[ -z "$credentials" || ! -f "$credentials" ]] || ! certs_dns_cloudflare_installed; then
+                    dns_broken="$dns_broken $domain"
+                fi ;;
+            webroot)
+                webroot="$(sed -n 's/^webroot_path[[:space:]]*=[[:space:]]*//p' "$conf" | head -1)"
+                [[ "$webroot" == *"$GB_ACME_ROOT"* ]] || foreign="$foreign $domain"
+                ;;
+            *) foreign="$foreign $domain" ;;
+        esac
     done
-    if [[ -n "$broken" ]]; then
-        doctor_check "DNS-01 renewals" WARN "missing credentials file or plugin for:$broken (store the Cloudflare token under Settings; install python3-certbot-dns-cloudflare)"
+    if [[ -n "$dns_broken" ]]; then
+        doctor_check "DNS-01 renewals" WARN "missing credentials file or plugin for:$dns_broken (store the Cloudflare token under Settings; install python3-certbot-dns-cloudflare)"
+    fi
+    if [[ -n "$foreign" ]]; then
+        doctor_check "certificate renewals" WARN "not issued by this tool:$foreign (renewal would use another method and could edit the rendered vhosts: certbot delete --cert-name DOMAIN, then Endpoint > Certificate > Issue)"
     fi
 }
 

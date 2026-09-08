@@ -37,9 +37,11 @@ current templates.
   Neither exposes the other's routes.
 - Every error is an RFC 9457 problem document (`application/problem+json`).
 - nginx is only ever reloaded, never restarted, and only after `nginx -t`.
-- A staged endpoint (`LIVE=false`) never touches its public name: no
-  certificate request, no Cloudflare DNS or rules, until go-live, which
-  obtains the certificate before marking it live.
+- A staged endpoint (`LIVE=false`) never takes over its public name on its
+  own: no apply requests a certificate or changes Cloudflare DNS or rules
+  until go-live, which obtains the certificate before marking it live. The
+  operator may issue a certificate for it explicitly (Endpoint >
+  Certificate > Issue; DNS-01 publishes a TXT record) without it going live.
 - Anything that changes files on the server sends a Telegram notification
   when Telegram is enabled.
 - Never log a bearer token. Everything else about a request is logged.
