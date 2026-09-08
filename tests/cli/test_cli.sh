@@ -185,6 +185,11 @@ check "no folders next to root"  "remove that endpoint before adding version fol
 check "no root next to folders"  "its root cannot become an endpoint" "$("$GB" version add "$D" root --repo git@github.com:getbible/v1.git 2>&1 || true)"
 "$GB" pages "$R" docs root repository docs/index.html >/dev/null 2>&1
 check "root repository page"     "try_files /root/docs/index.html =404;" "$(cat "$RSITE")"
+"$GB" pages "$R" docs from "$SB/domain.html" >/dev/null 2>&1
+check "root page taken over"     "DOCS_SOURCE=custom"      "$(cat "$SB/etc/getbible/endpoints/$R/versions/root.conf")"
+check "root page not domain key" ""                        "$(grep -c '^DOCS_SOURCE=custom' "$SB/etc/getbible/endpoints/$R/endpoint.conf" | sed 's/^0$//')"
+"$GB" apply "$R" >/dev/null 2>&1
+check "root custom page kept"    "<html>domain</html>"     "$(cat "$SB/var/www/getbible/$R/index.html")"
 "$GB" pages "$R" docs root generated >/dev/null 2>&1
 "$GB" remove "$R" --purge >/dev/null 2>&1
 check "root domain removed"      ""                        "$(ls "$SB/etc/nginx/sites-available/$R.conf" 2>/dev/null)"

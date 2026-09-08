@@ -286,10 +286,19 @@ pages_publish() {
 }
 
 # --- changing sources ----------------------------------------------------------
+# The page at / of a root-endpoint domain is the endpoint's own page: "domain"
+# means that endpoint there, so a take-over lands in the record that publishing
+# reads.
+pages_resolve_label() {
+    local domain="$1" label="$2"
+    if [[ "$label" == domain ]] && pages_has_root_endpoint "$domain"; then printf '%s\n' "$GB_ROOT_LABEL"; else printf '%s\n' "$label"; fi
+}
+
 # pages_set_docs DOMAIN LABEL|domain SOURCE [REPO_PATH]
 pages_set_docs() {
     local domain="$1" label="$2" source="$3" path="${4:-}"
     pages_valid_source "$source" || gb_die "Page sources: generated, custom, repository, none"
+    label="$(pages_resolve_label "$domain" "$label")"
     if [[ "$label" == domain ]]; then
         [[ "$source" == generated || "$source" == custom ]] || gb_die "The domain page is generated or custom; repository and none apply to endpoint pages."
         ep_set "$domain" DOCS_SOURCE "$source"
@@ -328,6 +337,7 @@ pages_take_over() {
     local domain="$1" label="$2" what="$3" from="${4:-}" target out type
     type="$(ep_get "$domain" TYPE)"
     endpoint_source_type "$type"
+    label="$(pages_resolve_label "$domain" "$label")"
     if [[ "$label" == domain ]]; then
         [[ "$what" == docs ]] || gb_die "The domain level has no OpenAPI document of its own; choose an endpoint."
         target="$(ep_www_dir "$domain")/index.html"

@@ -118,6 +118,11 @@ rt_ensure_versions() {
     done
     chmod 0640 "$conf" 2>/dev/null || true
     [[ -n "$(ep_get "$domain" DEFAULT_ENDPOINT)" ]] || ep_set "$domain" DEFAULT_ENDPOINT "$version"
+    # The record is the only home of these keys from now on; an endpoint
+    # removed later must not come back from endpoint.conf.
+    for key in VERSION "${RT_VERSION_SETTINGS[@]}"; do
+        cfg_delete "$(ep_conf "$domain")" "$key"
+    done
     gb_log "Recorded endpoint $version of $domain with its settings; it keeps its current paths and units."
 }
 
@@ -367,7 +372,7 @@ rt_prepare_endpoint() {
     active="$(rt_active_generation "$domain" "$label")"
     RT_OLD_GENERATIONS[$label]="$active"; RT_OLD_RELEASES[$label]="$current"
     RT_OLD_UNITS[$label]="$(rt_live_unit "$domain" "$label")"; RT_OLD_SOCKETS[$label]="$(rt_socket "$domain" "$label")"
-    if [[ -z "$active" && -n "$current" && "$GB_DRY_RUN" != true ]]; then
+    if [[ -z "$active" && -n "$current" && "$GB_DRY_RUN" != true ]] && rt_is_legacy "$domain" "$label"; then
         RT_OLD_GENERATIONS[$label]="$(rt_capture_legacy_generation "$domain" "$label" "$current")" || return 1
     fi
     for target in "$root/active" "$root/previous" "$(py_current_link "$root")" "$(rt_env_file "$domain" "$label")"; do
@@ -496,14 +501,17 @@ rt_activate() {
 
 rt_token_required() { if [[ "$EP_ACCESS_MODE" == token ]]; then printf 'true\n'; else printf 'false\n'; fi; }
 
-# rt_render_proxy_body DOMAIN LABEL OUTPUT: the directives that hand a request
-# to the endpoint's service (used by every location that proxies to it).
+# rt_render_proxy_body DOMAIN LABEL OUTPUT [PROXY_PATH]: the directives that
+# hand a request to the endpoint's service (used by every location that
+# proxies to it). PROXY_PATH is the URI proxy_pass sends instead of the
+# request's own: for a root endpoint, the version plus the raw request URI.
 rt_render_proxy_body() {
-    local domain="$1" label="$2" output="$3"
+    local domain="$1" label="$2" output="$3" proxy_path="${4:-}"
     rt_manifest_load "$EP_KIND" "$(rt_app_version "$domain" "$label")"
     gb_render "$GB_TYPES/runtime/templates/proxy-body.conf.tmpl" "$output" \
         "DOMAIN=$domain" "SLUG=$EP_SLUG" "SOCKET=$(rt_proxy_socket "$domain" "$label")" "NGINX_GB_DIR=$GB_NGINX_GB" \
-        "CACHE_TTL=$(ep_version_get "$domain" "$label" CACHE_TTL "$RM_CACHE_SECONDS")" "TOKEN_ACCESS=$(rt_token_required)"
+        "CACHE_TTL=$(ep_version_get "$domain" "$label" CACHE_TTL "$RM_CACHE_SECONDS")" "TOKEN_ACCESS=$(rt_token_required)" \
+        "PROXY_PATH=$proxy_path"
 }
 
 # nginx locations for a runtime domain: for every endpoint its page, OpenAPI
@@ -511,7 +519,7 @@ rt_render_proxy_body() {
 # (the short forms, or the whole tree for a root endpoint) to the default
 # endpoint's service.
 type_runtime_render_locations() {
-    local output="$1" label piece proxy default root_endpoint=false is_root
+    local output="$1" label piece proxy default root_endpoint=false is_root proxy_path
     local -a page openapi
     rt_manifest_load "$EP_KIND"
     TYPE_METHODS_REGEX="$RM_METHODS"
@@ -537,10 +545,15 @@ type_runtime_render_locations() {
             "OPENAPI_ROOT=${openapi[0]:-}" "OPENAPI_FILE=${openapi[1]:-}" "PROXY_BODY=$(cat "$proxy")" || return 1
         cat "$piece" >> "$output"
     done < <(type_runtime_endpoints "$EP_DOMAIN")
-    if pages_is_root "$default"; then root_endpoint=true; fi
+    proxy_path=""
+    if pages_is_root "$default"; then
+        root_endpoint=true
+        # shellcheck disable=SC2016 # an nginx variable, expanded by nginx
+        proxy_path="/$(rt_app_version "$EP_DOMAIN" "$default")"'$request_uri'
+    fi
     mapfile -t page < <(pages_docs_location "$EP_DOMAIN" "$default")
     proxy="$(gb_tmpdir)/rt-proxy-$EP_SLUG-default"
-    rt_render_proxy_body "$EP_DOMAIN" "$default" "$proxy" || return 1
+    rt_render_proxy_body "$EP_DOMAIN" "$default" "$proxy" "$proxy_path" || return 1
     piece="$(gb_tmpdir)/rt-loc-$EP_SLUG"
     gb_render "$GB_TYPES/runtime/templates/locations.conf.tmpl" "$piece" \
         "DOMAIN=$EP_DOMAIN" "SOCKET=$(rt_proxy_socket "$EP_DOMAIN" "$default")" "ROOT_ENDPOINT=$root_endpoint" \
@@ -579,6 +592,9 @@ type_runtime_finish() {
         return 0
     fi
     RT_COMMITTED=true
+    # First every endpoint's pointers and environment: a failure here aborts
+    # with every old service still enabled and running, so the caller can
+    # restore the old routing and state of all of them.
     for label in "${RT_LABELS[@]}"; do
         generation="${RT_CANDIDATES[$label]:-}"
         [[ -n "$generation" ]] || continue
@@ -591,6 +607,12 @@ type_runtime_finish() {
         gb_install_file "$generation/runtime.env" "$(rt_env_file "$domain" "$label")" 0600 || return 1
         rt_switch_link "$generation" "$root/active" || return 1
         gb_ledger_record "$(rt_env_file "$domain" "$label")" || return 1
+    done
+    # Then, with everything selected, retire the old services and prune.
+    for label in "${RT_LABELS[@]}"; do
+        generation="${RT_CANDIDATES[$label]:-}"
+        [[ -n "$generation" ]] || continue
+        release="$(cat "$generation/.release")" || return 1
         if [[ -n "${RT_OLD_RELEASES[$label]:-}" ]]; then
             # Old nginx workers may still issue upstream requests after reload.
             # Keep their backend alive until those exact processes have exited.
@@ -928,6 +950,7 @@ rt_remove_endpoint() {
     rm -rf -- "$(rt_cache_root "$domain" "$label")"
     rm -rf -- "$(pages_endpoint_dir "$domain" "$label")"
     ep_version_remove_config "$domain" "$label"
+    [[ "$(ep_get "$domain" VERSION)" != "$label" ]] || cfg_delete "$(ep_conf "$domain")" VERSION
     pages_publish "$domain" || gb_warn "The domain's pages could not be refreshed; re-apply $domain."
     tg_notify warn "Endpoint removed: $domain $label" "Its service, releases and cache were deleted; $(ep_get "$domain" DEFAULT_ENDPOINT) is the default endpoint."
 }

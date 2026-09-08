@@ -256,6 +256,8 @@ check test "$(rt_root "$legacy_domain" v2)" = "$GB_OPT/search"
 check test "$(rt_env_file "$legacy_domain" v2)" = "$(ep_dir "$legacy_domain")/runtime.env"
 check test "$(ep_version_get "$legacy_domain" v2 WORKERS)" = 2
 check test "$(ep_get "$legacy_domain" DEFAULT_ENDPOINT)" = v2
+check test -z "$(ep_get "$legacy_domain" VERSION)"
+check test -z "$(ep_get "$legacy_domain" WORKERS)"
 FAIL_PROBE=true
 if endpoint_apply "$legacy_domain"; then echo 'failed search probe accepted' >&2; exit 1; fi
 FAIL_PROBE=false
