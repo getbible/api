@@ -43,6 +43,8 @@ Endpoints
                                          take a staged endpoint live: certificate,
                                          Cloudflare DNS and rules, HTTPS, verification
   verify DOMAIN                          check this server end to end for a domain
+  stage DOMAIN                           stage a live endpoint again (stop taking over its
+                                         name; DNS is not changed), for rolling back
   cert DOMAIN status|issue [--method M]|renew
                                          certificate details; issue one now (a staged
                                          endpoint stays staged); force a renewal
@@ -68,7 +70,8 @@ Observability
   analytics [--window today|24h|7d|30d|all] [--domain D] [--json]
 
 Platform
-  settings [deploy-mode live|staged | cert-method auto|http|dns-cloudflare | certbot-email ADDRESS]
+  settings [deploy-mode live|staged | cert-method auto|http|dns-cloudflare | certbot-email ADDRESS
+           | public-ipv4 [ADDRESS] | public-ipv6 [ADDRESS]]
                                          show or change the defaults used by deploy and go-live
   telegram enable|disable|test
   cloudflare ...                         see: getbible.sh cloudflare help
@@ -274,8 +277,19 @@ cmd_settings() {
     local key="${1:-}" value="${2:-}"
     case "$key" in
         "")
-            printf 'deploy-mode    %s\ncert-method    %s\ncertbot-email  %s\n' \
-                "$(gb_global DEFAULT_DEPLOY_MODE live)" "$(gb_global CERT_METHOD auto)" "$(gb_global CERTBOT_EMAIL)" ;;
+            printf 'deploy-mode    %s\ncert-method    %s\ncertbot-email  %s\npublic-ipv4    %s\npublic-ipv6    %s\n' \
+                "$(gb_global DEFAULT_DEPLOY_MODE live)" "$(gb_global CERT_METHOD auto)" "$(gb_global CERTBOT_EMAIL)" \
+                "$(gb_global SERVER_PUBLIC_IPV4)" "$(gb_global SERVER_PUBLIC_IPV6)" ;;
+        public-ipv4)
+            [[ $# -ge 2 ]] || { gb_global SERVER_PUBLIC_IPV4; return 0; }
+            [[ -z "$value" || "$value" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || gb_die "Invalid IPv4 address: $value"
+            gb_global_set SERVER_PUBLIC_IPV4 "$value"
+            gb_log "Public IPv4 for DNS records: ${value:-detected automatically}." ;;
+        public-ipv6)
+            [[ $# -ge 2 ]] || { gb_global SERVER_PUBLIC_IPV6; return 0; }
+            [[ -z "$value" || "$value" =~ ^[0-9A-Fa-f:]+$ && "$value" == *:* ]] || gb_die "Invalid IPv6 address: $value"
+            gb_global_set SERVER_PUBLIC_IPV6 "$value"
+            gb_log "Public IPv6 for DNS records: ${value:-detected automatically}." ;;
         deploy-mode)
             [[ -n "$value" ]] || { gb_global DEFAULT_DEPLOY_MODE live; return 0; }
             [[ "$value" == live || "$value" == staged ]] || gb_die "deploy-mode is live or staged"
@@ -291,7 +305,7 @@ cmd_settings() {
             certs_valid_email "$value" || gb_die "Invalid email address: $value"
             gb_global_set CERTBOT_EMAIL "$value"
             gb_log "Let's Encrypt contact email set." ;;
-        *) gb_die "settings [deploy-mode live|staged | cert-method auto|http|dns-cloudflare | certbot-email ADDRESS]" ;;
+        *) gb_die "settings [deploy-mode live|staged | cert-method auto|http|dns-cloudflare | certbot-email ADDRESS | public-ipv4 [ADDRESS] | public-ipv6 [ADDRESS]]" ;;
     esac
 }
 
@@ -318,6 +332,7 @@ main() {
         deploy) cmd_deploy "$@" ;;
         go-live|golive) cmd_golive "$@" ;;
         verify) gb_require_root; golive_verify "${1:?domain}" ;;
+        stage) gb_system_init; golive_stage_again "${1:?domain}" ;;
         cert) gb_system_init; certs_cli "$@" ;;
         settings) gb_system_init; cmd_settings "$@" ;;
         apply) gb_system_init; endpoint_apply "${1:?domain}" ;;

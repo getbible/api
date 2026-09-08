@@ -25,21 +25,50 @@ cat > "$SB/bin/certbot" <<'CERTBOT'
 printf '%s\n' "$*" >> "$CERTBOT_LOG"
 if [[ "${1:-}" == plugins ]]; then printf '* webroot\n* dns-cloudflare\n'; exit 0; fi
 [[ ! -f "$CERTBOT_FAIL_FILE" ]] || exit 1
+args=" $* "
 domain=""
 while (($#)); do
     if [[ "$1" == -d ]]; then domain="$2"; fi
     shift
 done
-mkdir -p "$CERTBOT_LIVE/$domain"
+mkdir -p "$CERTBOT_LIVE/$domain" "$CERTBOT_LIVE/../renewal"
 printf 'certificate\n' > "$CERTBOT_LIVE/$domain/fullchain.pem"
 printf 'key\n' > "$CERTBOT_LIVE/$domain/privkey.pem"
+# Simulate a file changing under the tool between its checks and the switch.
+[[ -z "${CERTBOT_TAMPER:-}" ]] || echo "# hand edit" >> "$CERTBOT_TAMPER"
+if [[ "$args" == *" --dns-cloudflare "* ]]; then
+    printf '[renewalparams]\nauthenticator = dns-cloudflare\ndns_cloudflare_credentials = %s\n' "$CERTBOT_INI" > "$CERTBOT_LIVE/../renewal/$domain.conf"
+else
+    printf '[renewalparams]\nauthenticator = webroot\nwebroot_path = %s,\n' "$CERTBOT_WEBROOT" > "$CERTBOT_LIVE/../renewal/$domain.conf"
+fi
 CERTBOT
 chmod +x "$SB/bin/certbot"
 # The same stand-in without the DNS plugin.
 sed 's/\* dns-cloudflare\\n//' "$SB/bin/certbot" > "$SB/bin/certbot-noplugin"
 chmod +x "$SB/bin/certbot-noplugin"
 export GB_CERTBOT="$SB/bin/certbot" CERTBOT_LOG="$SB/certbot.log" CERTBOT_FAIL_FILE="$SB/certbot.fail" CERTBOT_LIVE="$SB/etc/letsencrypt/live"
+export CERTBOT_INI="$SB/etc/getbible/certbot-cloudflare.ini" CERTBOT_WEBROOT="$SB/var/www/letsencrypt"
 : > "$CERTBOT_LOG"
+# A Cloudflare helper stand-in: GB_PYTHON runs every tool, so the wrapper
+# answers for getbible-cloudflare and hands everything else to python3.
+cat > "$SB/bin/python-cf" <<'PYCF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == */getbible-cloudflare ]]; then
+    shift
+    printf '%s\n' "$*" >> "$CF_LOG"
+    [[ -z "${CF_FAIL:-}" || "$1" != "$CF_FAIL" ]] || exit 1
+    case "$1" in
+        ips) printf '{"ipv4":["203.0.113.0/24"],"ipv6":["2001:db8::/32"]}\n' ;;
+        origin-ca) printf -- '-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n' ;;
+        *) printf '{}\n' ;;
+    esac
+    exit 0
+fi
+exec /usr/bin/env python3 "$@"
+PYCF
+chmod +x "$SB/bin/python-cf"
+export CF_LOG="$SB/cloudflare.log"
+: > "$CF_LOG"
 conf() { cat "$SB/etc/getbible/endpoints/$1/endpoint.conf"; }
 placeholder() { if [[ -d "$PLACEHOLDERS/$1" ]]; then printf 'present'; fi; }
 certonly_runs() { grep -c '^certonly' "$CERTBOT_LOG" || true; }
@@ -50,7 +79,7 @@ D=staged.example.test
 echo "-- staged deployment --"
 "$GB" deploy static --domain "$D" --version v2 --repo git@github.com:getbible/v2_scripture.git --extensions json,sha,txt --staged >/dev/null 2>&1 || { echo "staged deploy failed"; exit 1; }
 check "recorded as staged"        "LIVE=false"                  "$(conf "$D")"
-check "overview shows staged"     "staged"                      "$("$GB" status 2>/dev/null)"
+check "overview shows staged"     "versions: v2  · staged"      "$("$GB" status 2>/dev/null)"
 check "status shows publication"  "Publication : staged"        "$("$GB" status "$D" 2>/dev/null)"
 check "placeholder certificate"   "BEGIN CERTIFICATE"           "$(cat "$PLACEHOLDERS/$D/fullchain.pem")"
 check "placeholder key private"   "600"                         "$(stat -c %a "$PLACEHOLDERS/$D/privkey.pem")"
@@ -62,18 +91,35 @@ check "acme snippet kept"         "snippets/getbible/acme.conf" "$(site "$D")"
 check "certbot not called"        ""                            "$(cat "$CERTBOT_LOG")"
 check "certificate line"          "self-signed placeholder"     "$("$GB" status "$D" 2>/dev/null)"
 check "cert status"               "placeholder"                 "$("$GB" cert "$D" status 2>/dev/null)"
-check "verify reports staged"     "Publication"                 "$("$GB" verify "$D" 2>&1 || true)"
-check "verify passes in sandbox"  "passed"                      "$("$GB" verify "$D" 2>&1 || true)"
+VERIFY="$("$GB" verify "$D" 2>&1 || true)"
+check "verify reports staged"     "Publication                    info  staged" "$VERIFY"
+check "verify shows placeholder"  "Certificate                    WARN  self-signed placeholder" "$VERIFY"
+check "verify skips probes here"  "HTTPS probe                    skip" "$VERIFY"
+check "verify skips nginx -t"     "nginx -t                       skip" "$VERIFY"
+check "verify passes in sandbox"  "everything that can be checked here passed" "$VERIFY"
 check "re-apply stays staged"     "is staged: no certificate"   "$("$GB" apply "$D" 2>&1 || true)"
 check "re-apply keeps LIVE=false" "LIVE=false"                  "$(conf "$D")"
 
 echo "-- staged endpoints never touch Cloudflare --"
 # Keep the go-live plan hermetic: the public address comes from settings.
-sed -i 's/^SERVER_PUBLIC_IPV4=.*/SERVER_PUBLIC_IPV4=203.0.113.10/' "$SB/etc/getbible/getbible.conf"
+"$GB" settings public-ipv4 203.0.113.10 >/dev/null 2>&1
+grep -q '^SERVER_PUBLIC_IPV4=203.0.113.10$' "$SB/etc/getbible/getbible.conf" || { echo "public address not pinned"; exit 1; }
+check "invalid ipv4 rejected"     "Invalid IPv4"                "$("$GB" settings public-ipv4 nope 2>&1 || true)"
+check "settings show address"     "public-ipv4    203.0.113.10" "$("$GB" settings 2>/dev/null)"
 "$GB" cloudflare mode "$D" proxied >/dev/null 2>&1 || true
 check "mode recorded"             "CLOUDFLARE_MODE=proxied"     "$(conf "$D")"
+check "status shows cache, pulls" "proxied (edge cache bypass, origin pulls false)" "$("$GB" status "$D" 2>/dev/null)"
 check "no real-ip include staged" ""                            "$(grep -c cloudflare-real-ip "$SB/etc/nginx/sites-available/$D.conf" | sed 's/^0$//')"
 check "cloudflare apply deferred" "applied when it goes live"   "$("$GB" cloudflare apply "$D" 2>&1 || true)"
+# Positive control: once the ranges file exists the include is rendered,
+# staged or not, so "Stage again" never strips it from a serving vhost.
+mkdir -p "$SB/render-before" "$SB/render-after"
+"$GB" render "$D" --out "$SB/render-before" >/dev/null 2>&1
+check "render without ranges: no include" ""                    "$(grep -c cloudflare-real-ip "$SB/render-before/sites-available/$D.conf" | sed 's/^0$//')"
+printf 'set_real_ip_from 203.0.113.0/24;\n' > "$SB/etc/nginx/getbible/cloudflare-real-ip.conf"
+"$GB" render "$D" --out "$SB/render-after" >/dev/null 2>&1
+check "render with ranges: include" "cloudflare-real-ip.conf"   "$(cat "$SB/render-after/sites-available/$D.conf")"
+rm -f "$SB/etc/nginx/getbible/cloudflare-real-ip.conf"
 
 echo "-- go-live refusals leave the endpoint staged --"
 check "unpublished data refused"  "never published"             "$("$GB" go-live "$D" 2>&1 || true)"
@@ -100,7 +146,7 @@ check "renew failure is not fatal" ""                           "$("$GB" cert "$
 check "settings http wins for auto" "certificate: HTTP-01"      "$("$GB" go-live "$D" --dry-run 2>&1 || true)"
 "$GB" settings cert-method auto >/dev/null 2>&1
 touch "$CERTBOT_FAIL_FILE"
-check "certbot failure reported"  "stays staged"                "$("$GB" go-live "$D" --cert http 2>&1 || true)"
+check "certbot failure reported"  "No certificate was issued"   "$("$GB" go-live "$D" --cert http 2>&1 || true)"
 check "webroot arguments"         "certonly --webroot -w $SB/var/www/letsencrypt -d $D --non-interactive --agree-tos --email ops@example.test" "$(cat "$CERTBOT_LOG")"
 check "LIVE still false"          "LIVE=false"                  "$(conf "$D")"
 check "placeholder kept"          "fullchain.pem"               "$(ls "$PLACEHOLDERS/$D/")"
@@ -127,6 +173,23 @@ check "live in status"            "Publication : live since"    "$("$GB" status 
 check "live_at recorded"          "LIVE_AT="                    "$(cat "$SB/var/lib/getbible/state/$D/state.conf")"
 check "go-live idempotent"        "already live"                "$("$GB" go-live "$D" 2>&1 || true)"
 check "verification ran"          "Verification of $D"          "$OUT"
+check "renewal method recorded"   "renewal method dns-cloudflare" "$("$GB" cert "$D" status 2>/dev/null)"
+check "doctor accepts renewals"   ""                            "$("$GB" doctor 2>/dev/null | grep -c 'DNS-01 renewals' | sed 's/^0$//')"
+mv "$SB/etc/getbible/certbot-cloudflare.ini" "$SB/certbot-cloudflare.ini.away"
+check "doctor warns missing ini"  "WARN   missing credentials file or plugin for: $D" "$("$GB" doctor 2>/dev/null)"
+mv "$SB/certbot-cloudflare.ini.away" "$SB/etc/getbible/certbot-cloudflare.ini"
+printf '[renewalparams]\nauthenticator = nginx\n' > "$SB/etc/letsencrypt/renewal/$D.conf"
+check "doctor warns foreign lineage" "WARN   not issued by this tool: $D" "$("$GB" doctor 2>/dev/null)"
+printf '[renewalparams]\nauthenticator = dns-cloudflare\ndns_cloudflare_credentials = %s\n' "$CERTBOT_INI" > "$SB/etc/letsencrypt/renewal/$D.conf"
+
+echo "-- stage again, for rolling back --"
+"$GB" stage "$D" >/dev/null 2>&1
+check "staged again"              "LIVE=false"                  "$(conf "$D")"
+check "live_at cleared"           ""                            "$(grep '^LIVE_AT=.' "$SB/var/lib/getbible/state/$D/state.conf" || true)"
+check "still serves letsencrypt"  "letsencrypt/live/$D"         "$(site "$D")"
+check "stage again idempotent"    "already staged"              "$("$GB" stage "$D" 2>&1 || true)"
+check "go-live keeps certificate" "Keep the existing"           "$("$GB" go-live "$D" 2>&1 || true)"
+check "live once more"            "LIVE=true"                   "$(conf "$D")"
 
 echo "-- default deploy mode from settings --"
 "$GB" settings deploy-mode staged >/dev/null 2>&1
@@ -159,6 +222,7 @@ check "issue used http"           "certonly --webroot"          "$(cat "$CERTBOT
 check "issue keeps staged"        "LIVE=false"                  "$(conf "$D4")"
 check "staged vhost real cert"    "letsencrypt/live/$D4"        "$(site "$D4")"
 check "cert status letsencrypt"   "Let's Encrypt"               "$("$GB" cert "$D4" status 2>/dev/null)"
+check "renewal method http"       "renewal method http"         "$("$GB" cert "$D4" status 2>/dev/null)"
 check "issue idempotent"          "already has"                 "$("$GB" cert "$D4" issue 2>&1 || true)"
 mkdir -p "$SB/srv/getbible/$D4/releases/v1/stamp" && ln -sfn "releases/v1/stamp" "$SB/srv/getbible/$D4/v1"
 : > "$CERTBOT_LOG"
@@ -166,6 +230,73 @@ check "go-live keeps certificate" "Keep the existing Let's Encrypt certificate" 
 check "no new certbot run"        "0"                           "$(certonly_runs)"
 check "fourth is live"            "LIVE=true"                   "$(conf "$D4")"
 check "placeholder cleaned"       ""                            "$(placeholder "$D4")"
+
+echo "-- activation failure after the certificate returns to staged --"
+D7=seventh.example.test
+"$GB" deploy static --domain "$D7" --version v1 --repo git@github.com:getbible/v1_scripture.git --staged >/dev/null 2>&1
+mkdir -p "$SB/srv/getbible/$D7/releases/v1/stamp" && ln -sfn "releases/v1/stamp" "$SB/srv/getbible/$D7/v1"
+: > "$CERTBOT_LOG"
+echo "# hand edit" >> "$SB/etc/nginx/sites-available/$D7.conf"
+check "hand edits stop go-live early" "were kept; nothing was applied" "$("$GB" go-live "$D7" --cert http 2>&1 || true)"
+check "no certificate for kept edits" "0"                       "$(certonly_runs)"
+sed -i '/^# hand edit$/d' "$SB/etc/nginx/sites-available/$D7.conf"
+check "activation failure reported" "staged again"              "$(CERTBOT_TAMPER="$SB/etc/nginx/sites-available/$D7.conf" "$GB" go-live "$D7" --cert http 2>&1 || true)"
+check "certificate was issued"    "1"                           "$(certonly_runs)"
+check "certificate kept"          "certificate"                 "$(cat "$SB/etc/letsencrypt/live/$D7/fullchain.pem")"
+check "back to staged"            "LIVE=false"                  "$(conf "$D7")"
+check "placeholder kept on failure" "present"                   "$(placeholder "$D7")"
+check "no live_at"                ""                            "$(grep '^LIVE_AT=.' "$SB/var/lib/getbible/state/$D7/state.conf" || true)"
+check "hand edit kept"            "# hand edit"                 "$(site "$D7")"
+
+echo "-- an unreachable name is refused before certbot --"
+D11=eleventh.example.test
+"$GB" deploy static --domain "$D11" --version v1 --repo git@github.com:getbible/v1_scripture.git --staged >/dev/null 2>&1
+mkdir -p "$SB/srv/getbible/$D11/releases/v1/stamp" && ln -sfn "releases/v1/stamp" "$SB/srv/getbible/$D11/v1"
+: > "$CERTBOT_LOG"
+check "unreachable name refused"  "does not seem to reach this server" "$(GB_FAKE_HTTP_PROBE=1 "$GB" go-live "$D11" 2>&1 || true)"
+check "no certbot for unreachable" "0"                          "$(certonly_runs)"
+check "eleventh still staged"     "LIVE=false"                  "$(conf "$D11")"
+check "explicit http tries anyway" "trying HTTP-01 anyway"       "$(GB_FAKE_HTTP_PROBE=1 "$GB" go-live "$D11" --cert http 2>&1 || true)"
+check "explicit http went live"   "LIVE=true"                   "$(conf "$D11")"
+
+echo "-- go-live of a Cloudflare-managed endpoint --"
+export GB_PYTHON="$SB/bin/python-cf"
+D8=eighth.example.test
+"$GB" deploy static --domain "$D8" --version v1 --repo git@github.com:getbible/v1_scripture.git --staged >/dev/null 2>&1
+mkdir -p "$SB/srv/getbible/$D8/releases/v1/stamp" && ln -sfn "releases/v1/stamp" "$SB/srv/getbible/$D8/v1"
+"$GB" cloudflare mode "$D8" proxied >/dev/null 2>&1 || true
+check "staged mode change is local" ""                          "$(cat "$CF_LOG")"
+: > "$CERTBOT_LOG"
+check "origin files fetch failure aborts" "address ranges or origin CA could not be fetched" "$(CF_FAIL=ips "$GB" go-live "$D8" --cert dns-cloudflare 2>&1 || true)"
+check "eighth back to staged"     "LIVE=false"                  "$(conf "$D8")"
+check "no dns change on abort"    ""                            "$(grep -c '^dns ' "$CF_LOG" | sed 's/^0$//')"
+: > "$CF_LOG"
+OUT="$(CF_FAIL=host-rules "$GB" go-live "$D8" 2>&1 || true)"
+check "eighth is live"            "LIVE=true"                   "$(conf "$D8")"
+check "ranges fetched first"      "ips"                         "$(head -1 "$CF_LOG")"
+check "dns switched to address"   "dns $D8 --proxied true --ipv4 203.0.113.10" "$(cat "$CF_LOG")"
+check "dns switch recorded"       "CLOUDFLARE_DNS_AT="          "$(cat "$SB/var/lib/getbible/state/$D8/state.conf")"
+check "rules failure reported"    "DNS now points here, but the rules" "$OUT"
+check "live vhost has real-ip"    "cloudflare-real-ip.conf"     "$(site "$D8")"
+check "real-ip file rendered"     "set_real_ip_from 203.0.113.0/24;" "$(cat "$SB/etc/nginx/getbible/cloudflare-real-ip.conf")"
+D9=ninth.example.test
+"$GB" deploy static --domain "$D9" --version v1 --repo git@github.com:getbible/v1_scripture.git --staged >/dev/null 2>&1
+mkdir -p "$SB/srv/getbible/$D9/releases/v1/stamp" && ln -sfn "releases/v1/stamp" "$SB/srv/getbible/$D9/v1"
+"$GB" cloudflare mode "$D9" dns >/dev/null 2>&1 || true
+: > "$CF_LOG"
+OUT="$("$GB" go-live "$D9" 2>&1 || true)"
+check "ninth is live"             "LIVE=true"                   "$(conf "$D9")"
+check "grey-cloud dns switched"   "dns $D9 --proxied false --ipv4 203.0.113.10" "$(cat "$CF_LOG")"
+check "dns success reported"      "Cloudflare DNS now points here." "$OUT"
+check "telegram carries verify"   "Verification passed"         "$OUT"
+unset GB_PYTHON
+
+echo "-- verify counts every failure --"
+D10=tenth.example.test
+"$GB" deploy static --domain "$D10" --version v1 --repo git@github.com:getbible/v1_scripture.git --staged >/dev/null 2>&1
+rm -f "$SB/etc/nginx/sites-available/$D10.conf" "$SB/etc/nginx/sites-enabled/$D10.conf"
+check "two failures counted"      "2 check(s) failed"           "$("$GB" verify "$D10" 2>&1 || true)"
+check "verify exit status"        "1"                           "$("$GB" verify "$D10" >/dev/null 2>&1; echo $?)"
 
 echo "-- removal cleans up --"
 D5=fifth.example.test
@@ -189,6 +320,16 @@ check "dns argv"                  "--dns-cloudflare-credentials $GB_CERTBOT_CLOU
 check "argv keeps email"          "--email a@b.c --keep-until-expiring" "$(certs_certbot_args a.example.test http a@b.c | tr '\n' ' ')"
 check "unknown method rejected"   ""                            "$(certs_certbot_args a.example.test carrier-pigeon a@b.c 2>/dev/null || true)"
 check "method validation"         "no"                          "$(certs_valid_method magic && echo yes || echo no)"
+# shellcheck source=../../src/lib/ui.sh
+source "$ROOT/src/lib/ui.sh"
+# shellcheck source=../../src/lib/nginx.sh
+source "$ROOT/src/lib/nginx.sh"
+check "captured: no overwrite dialog" "refusing to overwrite it without a dialog" "$(GB_YES=false GB_UI=whiptail GB_UI_CAPTURED=true nginx_confirm_overwrite /x/target /x/candidate 2>&1 || true)"
+check "captured: refuses"         "1"                           "$(GB_YES=false GB_UI=whiptail GB_UI_CAPTURED=true nginx_confirm_overwrite /x/target /x/candidate >/dev/null 2>&1; echo $?)"
+check "confirmed edits pass"      "0"                           "$(GB_OVERWRITE_HAND_EDITS=true nginx_confirm_overwrite /x/target /x/candidate >/dev/null 2>&1; echo $?)"
+check "captured: no email prompt" "No Let's Encrypt contact email is set" "$(GB_UI_CAPTURED=true GB_GLOBAL_CONF=/nonexistent certs_email 2>&1 || true)"
+check "stand-in outside sandbox ignored" "no"                   "$(GB_CERTBOT=/usr/bin/true certs_can_run && echo yes || echo no)"
+check "stand-in inside sandbox runs" "yes"                      "$(GB_CERTBOT="$SB/bin/certbot" certs_can_run && echo yes || echo no)"
 
 echo "-- nginx -t on a staged vhost --"
 if command -v nginx >/dev/null; then
@@ -198,7 +339,7 @@ if command -v nginx >/dev/null; then
     "$GB" deploy static --domain "$D6" --version v2 --repo git@github.com:getbible/v2_scripture.git --staged >/dev/null 2>&1
     mkdir -p "$SB/etc/nginx/logs" "$SB/var/cache/nginx/getbible"
     sed -i -e 's/listen 80;/listen 127.0.0.1:18280;/' -e 's/listen 443 ssl\(.*\);/listen 127.0.0.1:18643 ssl\1;/' "$SB/etc/nginx/sites-available/$D6.conf"
-    for other in "$D" "$D2" "$D3" "$D4"; do rm -f "$SB/etc/nginx/sites-enabled/$other.conf"; done
+    find "$SB/etc/nginx/sites-enabled" -name '*.conf' ! -name "$D6.conf" -delete
     cat > "$SB/etc/nginx/nginx-test.conf" <<EOF
 pid $SB/nginx.pid;
 error_log stderr warn;

@@ -99,9 +99,12 @@ golive_plan() {
         printf "  %d. Request a Let's Encrypt certificate: %s.\n" "$step" "$(certs_method_description "$method")"
     fi
     step=$((step + 1))
+    printf '  %d. Render HTTPS with that certificate, validate and reload nginx.\n' "$step"
+    step=$((step + 1))
     if golive_cloudflare_managed "$domain"; then
         ipv4="$(cf_public_ipv4)"; ipv6="$(cf_public_ipv6)"
-        printf '  %d. Point the Cloudflare DNS records (%s) at this server: %s%s.\n' "$step" "$mode" "${ipv4:-no IPv4 found}" "${ipv6:+, $ipv6}"
+        printf '  %d. Point the Cloudflare DNS records (%s) at this server: %s%s\n' "$step" "$mode" "${ipv4:-no IPv4 found}" "${ipv6:+, $ipv6}"
+        printf '     (Settings > Public addresses overrides the detected address).\n'
         if [[ "$mode" == proxied ]]; then
             [[ "$(ep_get "$domain" CLOUDFLARE_ORIGIN_PULLS false)" == true ]] && pulls=" and require authenticated origin pulls"
             printf '     Apply the API-safe rules and real-IP ranges%s.\n' "$pulls"
@@ -110,14 +113,14 @@ golive_plan() {
         printf '  %d. Leave DNS alone: it is not managed by Cloudflare here and must already point at this server.\n' "$step"
     fi
     step=$((step + 1))
-    printf '  %d. Render HTTPS with that certificate, validate and reload nginx, verify, notify Telegram.\n\n' "$step"
+    printf '  %d. Verify through the local nginx and report on Telegram.\n\n' "$step"
     printf 'Nothing changes until step 1 has succeeded; a failed attempt leaves %s staged.\n' "$domain"
 }
 
 # golive_run DOMAIN [METHOD]: the switch itself. Prompts nothing: run it
 # through golive_interactive, which gathers every answer first.
 golive_run() {
-    local domain="$1" requested="${2:-}" method cf_note="" cert_note dns_before
+    local domain="$1" requested="${2:-}" method cf_note="" cert_note dns_before verify_note=""
     ep_exists "$domain" || gb_die "Unknown endpoint: $domain"
     if ep_is_live "$domain"; then
         gb_log "$domain is already live."
@@ -162,10 +165,43 @@ golive_run() {
             gb_warn "Cloudflare DNS for $domain was not updated; apply it from Endpoint > Cloudflare once the cause is fixed."
         fi
     fi
-    tg_notify ok "Live: $domain" "$domain is live on $(hostname -f 2>/dev/null || hostname) with $cert_note.$cf_note"
-    gb_log "$domain is live.$cf_note"
-    golive_verify "$domain" || gb_warn "Verification reported problems for $domain; review the report above."
+    if golive_verify "$domain"; then
+        verify_note=" Verification passed."
+    else
+        verify_note=" Verification reported problems; see the report on the server."
+        gb_warn "Verification reported problems for $domain; review the report above."
+    fi
+    tg_notify ok "Live: $domain" "$domain is live on $(hostname -f 2>/dev/null || hostname) with $cert_note.$cf_note$verify_note"
+    gb_log "$domain is live.$cf_note$verify_note"
     return 0
+}
+
+# golive_stage_again DOMAIN: stop taking over the name, for rolling back.
+# The endpoint keeps serving (with its Let's Encrypt certificate when it has
+# one), but no apply requests a certificate or touches Cloudflare DNS or
+# rules again until it goes live once more. DNS itself is not changed here:
+# point it at the server that should serve.
+golive_stage_again() {
+    local domain="$1"
+    ep_exists "$domain" || gb_die "Unknown endpoint: $domain"
+    if ! ep_is_live "$domain"; then
+        gb_log "$domain is already staged."
+        return 0
+    fi
+    ep_set "$domain" LIVE false || return 1
+    ep_state_set "$domain" LIVE_AT "" || return 1
+    if ! endpoint_apply "$domain"; then
+        gb_warn "$domain is staged again, but re-rendering failed; re-apply it."
+        return 1
+    fi
+    tg_notify warn "Staged again: $domain" "$domain no longer takes over its name from $(hostname -f 2>/dev/null || hostname): no certificate request or Cloudflare change until it goes live again. DNS was not changed."
+    gb_log "$domain is staged again. DNS was not changed; point it at the server that should serve."
+}
+
+golive_stage_again_interactive() {
+    local domain="$1"
+    ui_yesno "Stage again" "Stage $domain again on this server?\n\nIt keeps serving as it is, but from now on no apply requests a certificate or changes Cloudflare DNS or rules for it, so another server can take the name back. DNS itself is not changed here." no || return 0
+    ui_run "Stage again: $domain" golive_stage_again "$domain" || true
 }
 
 # The menu and the command line share this: gather every answer first, then
@@ -173,7 +209,7 @@ golive_run() {
 # when the endpoint went live, was live already, or the operator cancelled;
 # 1 when go-live was refused or failed.
 golive_interactive() {
-    local domain="$1" requested="${2:-}" method missing out reason status=0
+    local domain="$1" requested="${2:-}" method missing out reason status=0 explicit_http=false
     ep_exists "$domain" || gb_die "Unknown endpoint: $domain"
     if ep_is_live "$domain"; then
         ui_msg "Go live" "$domain is already live."
@@ -196,6 +232,9 @@ golive_interactive() {
     else
         method="$(certs_prompt_method "$domain")" || { gb_log "Cancelled; $domain stays staged."; return 0; }
     fi
+    # Choosing http by name (rather than automatic) means the operator knows
+    # the name reaches this server, even when this host cannot see that.
+    [[ "$method" == http ]] && explicit_http=true
     method="$(certs_method "$domain" "$method")" || return 1
     nginx_cert_exists "$domain" || certs_email_interactive || return 1
     # Readiness problems are shown as a dialog here, once; the switch itself
@@ -203,6 +242,17 @@ golive_interactive() {
     if ! reason="$(golive_preflight "$domain" "$method" 2>&1)"; then
         ui_msg "Not ready: $domain" "$domain stays staged.\n\n$reason"
         return 1
+    fi
+    # A name not managed here must already reach this server for HTTP-01.
+    # Every failed validation counts against Let's Encrypt's hourly limit, so
+    # ask before trying (non-interactive runs refuse).
+    if [[ "$method" == http ]] && ! nginx_cert_exists "$domain" && ! golive_cloudflare_managed "$domain" && ! certs_http_probe "$domain"; then
+        if [[ "$explicit_http" == true ]]; then
+            gb_warn "http://$domain/ does not seem to reach this server; trying HTTP-01 anyway because it was chosen explicitly."
+        else
+            ui_yesno "Name not reachable" "http://$domain/ does not seem to reach this server: DNS may still point elsewhere or may not have propagated, or this host cannot reach its own public address.\n\nLet's Encrypt validation will fail unless the name reaches here, and failed validations are limited to five per hour. Try anyway?" no \
+                || { gb_warn "$domain does not seem to reach this server yet; $domain stays staged. Change DNS and try again, choose http explicitly if this host simply cannot reach its own address, or use the dns-cloudflare method."; return 1; }
+        fi
     fi
     out="$(gb_tmpdir)/golive-plan.$$"
     golive_plan "$domain" "$method" > "$out"
@@ -259,8 +309,8 @@ golive_verify() {
         paths+=(/readyz)
         golive_row "Release" info "$(py_current_release "$kind")"
         if sd_available; then
-            if sd_is_active "$unit.service"; then golive_row "Service" ok "$unit.service active"; else golive_row "Service" FAIL "$unit.service is not active"; failed=1; fi
-            if sd_wait_ready "$socket" /readyz 15; then golive_row "Readiness" ok "$socket answers /readyz"; else golive_row "Readiness" FAIL "$socket does not answer /readyz"; failed=1; fi
+            if sd_is_active "$unit.service"; then golive_row "Service" ok "$unit.service active"; else golive_row "Service" FAIL "$unit.service is not active"; failed=$((failed + 1)); fi
+            if sd_wait_ready "$socket" /readyz 15; then golive_row "Readiness" ok "$socket answers /readyz"; else golive_row "Readiness" FAIL "$socket does not answer /readyz"; failed=$((failed + 1)); fi
         else
             golive_row "Service" skip "no systemd in this environment"
         fi
@@ -275,11 +325,11 @@ golive_verify() {
             fi
         done < <(ep_versions "$domain")
     fi
-    if [[ -f "$(nginx_site_file "$domain")" ]]; then golive_row "nginx site" ok "$(nginx_site_file "$domain")"; else golive_row "nginx site" FAIL "not rendered; re-apply the endpoint"; failed=1; fi
-    if [[ -e "$(nginx_enabled_file "$domain")" ]]; then golive_row "nginx enabled" ok "$(nginx_enabled_file "$domain")"; else golive_row "nginx enabled" FAIL "not enabled"; failed=1; fi
+    if [[ -f "$(nginx_site_file "$domain")" ]]; then golive_row "nginx site" ok "$(nginx_site_file "$domain")"; else golive_row "nginx site" FAIL "not rendered; re-apply the endpoint"; failed=$((failed + 1)); fi
+    if [[ -e "$(nginx_enabled_file "$domain")" ]]; then golive_row "nginx enabled" ok "$(nginx_enabled_file "$domain")"; else golive_row "nginx enabled" FAIL "not enabled"; failed=$((failed + 1)); fi
     nginx_detect
     if [[ "$NG_AVAILABLE" == true && -z "$GB_PREFIX" ]]; then
-        if "$GB_NGINX_BIN" -t >/dev/null 2>&1; then golive_row "nginx -t" ok "configuration valid"; else golive_row "nginx -t" FAIL "configuration invalid; run nginx -t"; failed=1; fi
+        if "$GB_NGINX_BIN" -t >/dev/null 2>&1; then golive_row "nginx -t" ok "configuration valid"; else golive_row "nginx -t" FAIL "configuration invalid; run nginx -t"; failed=$((failed + 1)); fi
     else
         golive_row "nginx -t" skip "nginx is not available here"
     fi
@@ -287,13 +337,13 @@ golive_verify() {
     case "$source" in
         letsencrypt) golive_row "Certificate" ok "$(certs_status_line "$domain")" ;;
         placeholder) golive_row "Certificate" WARN "$(certs_status_line "$domain")"; insecure=true ;;
-        *) golive_row "Certificate" FAIL "none; HTTPS is not served"; failed=1 ;;
+        *) golive_row "Certificate" FAIL "none; HTTPS is not served"; failed=$((failed + 1)) ;;
     esac
     if [[ "$source" == none ]]; then
         golive_row "HTTPS probe" skip "no certificate"
     elif [[ -n "$GB_PREFIX" || "$NG_AVAILABLE" != true ]] || ! gb_have curl; then
         golive_row "HTTPS probe" skip "nginx is not running here"
-    elif ep_is_live "$domain" && [[ "$EP_CLOUDFLARE_MODE" == proxied && "$EP_CLOUDFLARE_ORIGIN_PULLS" == true ]]; then
+    elif grep -q '^[[:space:]]*ssl_verify_client on;' "$(nginx_site_file "$domain")" 2>/dev/null; then
         golive_row "HTTPS probe" skip "origin pulls require Cloudflare's client certificate"
     else
         for path in "${paths[@]}"; do
@@ -305,10 +355,12 @@ golive_verify() {
                 code="$(golive_probe "$domain" "$path" true)"
                 note=" (certificate not trusted by this host)"
             fi
-            if [[ "$code" == 200 ]]; then golive_row "GET $path" ok "200$note"; else golive_row "GET $path" FAIL "HTTP $code$note"; failed=1; fi
+            if [[ "$code" == 200 ]]; then golive_row "GET $path" ok "200$note"; else golive_row "GET $path" FAIL "HTTP $code$note"; failed=$((failed + 1)); fi
         done
     fi
-    if ep_is_live "$domain" && [[ -z "$GB_PREFIX" ]] && gb_have curl; then
+    # Informational only: this reaches whichever server the public name
+    # resolves to right now. GB_VERIFY_PUBLIC=false skips it (tests).
+    if ep_is_live "$domain" && [[ -z "$GB_PREFIX" && "${GB_VERIFY_PUBLIC:-true}" == true ]] && gb_have curl; then
         code="$(curl --silent --output /dev/null --max-time 10 --write-out '%{http_code}' "https://$domain/healthz" 2>/dev/null || true)"
         golive_row "Public https://$domain/healthz" info "HTTP $code (whichever server DNS resolves to right now)"
     fi
@@ -318,5 +370,5 @@ golive_verify() {
     else
         printf 'Result: %d check(s) failed.\n' "$failed"
     fi
-    return "$failed"
+    (( failed == 0 ))
 }

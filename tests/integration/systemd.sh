@@ -13,7 +13,7 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
     exit 1
 }
 unset GB_PREFIX GB_SYSTEMCTL GB_NGINX_BIN GB_NGINX_FAKE_VERSION GB_NGINX_FAKE_IPV6
-export GB_YES=true GB_UI=none NO_PROXY='*' no_proxy='*'
+export GB_YES=true GB_UI=none NO_PROXY='*' no_proxy='*' GB_VERIFY_PUBLIC=false
 unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
 GB="$ROOT/getbible.sh"
 Q=query.ci.example.test
@@ -48,7 +48,7 @@ cleanup() {
     fi
     "$GB" remove "$Q" --purge >/dev/null 2>&1 || true
     "$GB" remove "$S" --purge >/dev/null 2>&1 || true
-    rm -rf /srv/getbible-ci
+    rm -rf /srv/getbible-ci "/etc/getbible/placeholder-certs/$S"
     exit "$result"
 }
 trap cleanup EXIT
@@ -95,15 +95,42 @@ install -d -m 0755 /srv/getbible-ci
 cp -a "$ROOT/tests/python/fixtures/repository" /srv/getbible-ci/repository
 chmod -R a+rX /srv/getbible-ci/repository
 
-# Preseed certificates, so deployment never invokes ACME for a test domain.
+preseed_certificate() {
+    install -d -m 0700 "/etc/letsencrypt/live/$1"
+    openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+        -keyout "/etc/letsencrypt/live/$1/privkey.pem" \
+        -out "/etc/letsencrypt/live/$1/fullchain.pem" -subj "/CN=$1" 2>/dev/null
+}
+contains() { [[ "$2" == *"$1"* ]] && echo yes || echo no; }
+
+# query goes live at once with a preseeded certificate, so deployment never
+# invokes ACME for a test domain. search is staged first: it serves through
+# its placeholder certificate, is verified, and goes live once a certificate
+# exists, all against real systemd and nginx.
 for kind in query search; do
     domain="$kind.ci.example.test"
-    install -d -m 0700 "/etc/letsencrypt/live/$domain"
-    openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
-        -keyout "/etc/letsencrypt/live/$domain/privkey.pem" \
-        -out "/etc/letsencrypt/live/$domain/fullchain.pem" -subj "/CN=$domain" 2>/dev/null
-    "$GB" deploy runtime --domain "$domain" --kind "$kind" --repository /srv/getbible-ci/repository \
-        --require-checksums false --default-translation test --default-reference Ge1:1 --warm test --access open
+    if [[ "$kind" == query ]]; then
+        preseed_certificate "$domain"
+        "$GB" deploy runtime --domain "$domain" --kind "$kind" --repository /srv/getbible-ci/repository \
+            --require-checksums false --default-translation test --default-reference Ge1:1 --warm test --access open
+    else
+        "$GB" deploy runtime --domain "$domain" --kind "$kind" --repository /srv/getbible-ci/repository \
+            --require-checksums false --default-translation test --default-reference Ge1:1 --warm test --access open --staged
+        check "$kind recorded staged" LIVE=false "$(grep '^LIVE=' "/etc/getbible/endpoints/$domain/endpoint.conf")"
+        check "$kind serves its placeholder certificate" yes "$(contains "$domain" "$(openssl s_client -connect 127.0.0.1:443 -servername "$domain" </dev/null 2>/dev/null | openssl x509 -noout -subject)")"
+        check "$kind staged ready through nginx" '{"status":"ready"}' "$(request "$domain" /readyz | tr -d '\n')"
+        VERIFY="$("$GB" verify "$domain")"
+        check "$kind verify sees the placeholder" yes "$(contains 'Certificate                    WARN  self-signed placeholder' "$VERIFY")"
+        check "$kind verify probes readiness" yes "$(contains 'GET /readyz                    ok' "$VERIFY")"
+        check "$kind verify passes" yes "$(contains 'everything that can be checked here passed' "$VERIFY")"
+        preseed_certificate "$domain"
+        "$GB" go-live "$domain"
+        check "$kind live after go-live" LIVE=true "$(grep '^LIVE=' "/etc/getbible/endpoints/$domain/endpoint.conf")"
+        check "$kind placeholder removed" no "$(contains yes "$([[ -d "/etc/getbible/placeholder-certs/$domain" ]] && echo yes || echo no)")"
+        check "$kind serves the certificate" yes "$(contains "/etc/letsencrypt/live/$domain/fullchain.pem" "$(cat "/etc/nginx/sites-available/$domain.conf")")"
+        VERIFY="$("$GB" verify "$domain")"
+        check "$kind verify after go-live" yes "$(contains 'GET /readyz                    ok' "$VERIFY")"
+    fi
     check "$kind ready through nginx" '{"status":"ready"}' "$(request "$domain" /readyz | tr -d '\n')"
     check "$kind runs as the production account" "$(id -u "getbible-$kind")" "$(ps -o uid= -p "$(main_pid "$kind")" | tr -d ' ')"
     check "$kind systemd isolation enabled" strict "$(systemctl show --property=ProtectSystem --value "$(unit "$kind")")"

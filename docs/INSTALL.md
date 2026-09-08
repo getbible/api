@@ -66,9 +66,10 @@ Deploy a new endpoint > Static or Runtime. Both walk-throughs ask for the
 domain and then **Go live now?**
 
 - **Go live now**: the endpoint takes over its name at once. A certificate
-  is requested from Let's Encrypt as soon as the HTTP vhost is up, and when
-  Cloudflare manages the domain here its DNS records are pointed at this
-  server.
+  is requested from Let's Encrypt as soon as the HTTP vhost is up, and once
+  its Cloudflare mode is set to `dns` or `proxied` (Endpoint > Cloudflare
+  settings; new endpoints start with `off`) its DNS records are pointed at
+  this server on every apply.
 - **Stage it**: everything is installed and verified (data, services,
   nginx with a self-signed placeholder certificate) but no certificate is
   requested and DNS is not changed, so whatever serves the name today keeps
@@ -105,7 +106,7 @@ and reloads nginx. Deploy the new endpoints first, then migrate.
 
 | Path | Holds |
 | --- | --- |
-| `/etc/getbible/getbible.conf` | global defaults (access mode, limits, caching, schedule, log retention) |
+| `/etc/getbible/getbible.conf` | global defaults (access mode, limits, caching, schedule, log retention, deploy mode, certificate method and contact email, HSTS, the public addresses used for DNS records) |
 | `/etc/getbible/telegram.conf`, `cloudflare.conf` | notification and Cloudflare credentials (root only) |
 | `/etc/getbible/certbot-cloudflare.ini` | the Cloudflare token as certbot's DNS-01 plugin reads it (root only, written from `cloudflare.conf`) |
 | `/etc/getbible/placeholder-certs/<domain>/` | the self-signed certificate of a staged endpoint (removed at go-live) |

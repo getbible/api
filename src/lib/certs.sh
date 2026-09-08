@@ -24,11 +24,12 @@ certs_available() { gb_have "$GB_CERTBOT"; }
 certs_valid_method() { [[ "$1" == auto || "$1" == http || "$1" == dns-cloudflare ]]; }
 certs_valid_email() { [[ "$1" =~ ^[^@[:space:]]+@[^@[:space:]]+$ ]]; }
 
-# Under the test prefix the real certbot never runs: it would write to the
-# host's /etc/letsencrypt. A test may supply its own GB_CERTBOT stand-in.
+# Under the test prefix certbot never runs: it would write to the host's
+# /etc/letsencrypt. A test may supply a stand-in, which must live inside
+# the sandbox so an operator's exported GB_CERTBOT cannot leak through.
 certs_can_run() {
     certs_available || return 1
-    [[ -z "$GB_PREFIX" || "$GB_CERTBOT" != certbot ]]
+    [[ -z "$GB_PREFIX" || "$GB_CERTBOT" == "$GB_PREFIX"/* ]]
 }
 
 # `certbot plugins` starts a Python interpreter; ask once per run and keep

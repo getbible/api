@@ -22,9 +22,10 @@ a server, securely and at high volume.
   updates after `git pull`, and a guided migration from a legacy setup.
 - **Staged deployments**: an endpoint can be installed and verified on a
   server its DNS does not point to yet, with a placeholder certificate and
-  no public change; **Go live** later takes it over one domain at a time
-  (certificate, Cloudflare DNS, HTTPS). Certificates come from Let's Encrypt
-  over HTTP-01 or, with the stored Cloudflare token, DNS-01 before any DNS
+  no automatic public change; **Go live** later takes it over one domain at
+  a time (certificate, Cloudflare DNS, HTTPS), and **Stage again** hands the
+  name back for a rollback. Certificates come from Let's Encrypt over
+  HTTP-01 or, with the stored Cloudflare token, DNS-01 before any DNS
   change. This is how a replacement server is built without downtime.
 
 ```sh

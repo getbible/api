@@ -143,7 +143,7 @@ endpoint_status_text() {
     fi
     printf 'Tokens      : %s active\n' "$(tokens_count "$domain")"
     printf 'Certificate : %s\n' "$(certs_status_line "$domain")"
-    printf 'Cloudflare  : %s\n' "$EP_CLOUDFLARE_MODE"
+    printf 'Cloudflare  : %s (edge cache %s, origin pulls %s)\n' "$EP_CLOUDFLARE_MODE" "${EP_CLOUDFLARE_CACHE:-bypass}" "${EP_CLOUDFLARE_ORIGIN_PULLS:-false}"
     printf 'nginx site  : %s\n' "$([[ -f "$(nginx_site_file "$domain")" ]] && printf installed || printf missing)"
     printf 'Last apply  : %s (%s)\n' "$(ep_state_get "$domain" LAST_APPLY never)" "$(ep_state_get "$domain" LAST_APPLY_COMMIT -)"
     printf 'Logs        : %s\n' "$(ep_log_dir "$domain")"

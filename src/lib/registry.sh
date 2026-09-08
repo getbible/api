@@ -161,5 +161,5 @@ ep_summary_line() {
     else
         extra="kind: $EP_KIND $EP_VERSION"
     fi
-    printf '%-32s %-8s %-8s %-7s %s\n' "$domain" "$EP_TYPE" "$EP_ACCESS_MODE" "$(ep_publication "$domain")" "$extra"
+    printf '%-32s %-8s %-8s %s · %s\n' "$domain" "$EP_TYPE" "$EP_ACCESS_MODE" "$extra" "$(ep_publication "$domain")"
 }
