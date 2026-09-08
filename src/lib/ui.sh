@@ -221,11 +221,16 @@ ui_radiolist() {
             while [[ $# -gt 0 ]]; do tags+=("$1"); descs+=("$2"); [[ "$3" == on ]] && default="$1"; shift 3; done
             if [[ "$GB_UI" == none ]]; then printf '%s\n' "$default"; return 0; fi
             printf '\n== %s ==\n%s\n' "$title" "$text" >&2
-            local i
+            local i answer
             for i in "${!tags[@]}"; do printf '  %-14s %s\n' "${tags[$i]}" "${descs[$i]}" >&2; done
-            local answer
-            read -r -p "Choice [$default]: " answer
-            printf '%s\n' "${answer:-$default}"
+            while true; do
+                read -r -p "Choice [$default]: " answer || return 1
+                answer="${answer:-$default}"
+                for i in "${!tags[@]}"; do
+                    [[ "${tags[$i]}" == "$answer" ]] && { printf '%s\n' "$answer"; return 0; }
+                done
+                printf 'Choose one of:%s\n' "$(printf ' %s' "${tags[@]}")" >&2
+            done
             ;;
     esac
 }

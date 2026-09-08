@@ -14,6 +14,7 @@
 GB_GOLIVE_LOADED=1
 
 GOLIVE_ALLOW_UNPUBLISHED="${GOLIVE_ALLOW_UNPUBLISHED:-false}"
+GOLIVE_PREFLIGHT_DONE="${GOLIVE_PREFLIGHT_DONE:-false}"
 
 golive_cloudflare_managed() { [[ -n "${GB_CLOUDFLARE_LOADED:-}" && "$(ep_get "$1" CLOUDFLARE_MODE off)" != off ]]; }
 
@@ -116,14 +117,17 @@ golive_plan() {
 # golive_run DOMAIN [METHOD]: the switch itself. Prompts nothing: run it
 # through golive_interactive, which gathers every answer first.
 golive_run() {
-    local domain="$1" requested="${2:-}" method cf_note="" dns_before
+    local domain="$1" requested="${2:-}" method cf_note="" cert_note dns_before
     ep_exists "$domain" || gb_die "Unknown endpoint: $domain"
     if ep_is_live "$domain"; then
         gb_log "$domain is already live."
         return 0
     fi
     method="$(certs_method "$domain" "$requested")" || return 1
-    golive_preflight "$domain" "$method" || { gb_warn "$domain stays staged."; return 1; }
+    if [[ "$GOLIVE_PREFLIGHT_DONE" != true ]]; then
+        golive_preflight "$domain" "$method" || { gb_warn "$domain stays staged."; return 1; }
+    fi
+    if nginx_cert_exists "$domain"; then cert_note="its existing certificate"; else cert_note="a $method certificate"; fi
     if [[ "$GB_DRY_RUN" == true ]]; then
         gb_log "(dry-run) would issue the certificate ($method), mark $domain live, apply the live configuration and verify it."
         return 0
@@ -158,16 +162,18 @@ golive_run() {
             gb_warn "Cloudflare DNS for $domain was not updated; apply it from Endpoint > Cloudflare once the cause is fixed."
         fi
     fi
-    tg_notify ok "Live: $domain" "$domain is live on $(hostname -f 2>/dev/null || hostname) with a $method certificate.$cf_note"
+    tg_notify ok "Live: $domain" "$domain is live on $(hostname -f 2>/dev/null || hostname) with $cert_note.$cf_note"
     gb_log "$domain is live.$cf_note"
     golive_verify "$domain" || gb_warn "Verification reported problems for $domain; review the report above."
     return 0
 }
 
 # The menu and the command line share this: gather every answer first, then
-# run the switch without prompts (whiptail captures its output).
+# run the switch without prompts (whiptail captures its output). Returns 0
+# when the endpoint went live, was live already, or the operator cancelled;
+# 1 when go-live was refused or failed.
 golive_interactive() {
-    local domain="$1" requested="${2:-}" method missing out reason
+    local domain="$1" requested="${2:-}" method missing out reason status=0
     ep_exists "$domain" || gb_die "Unknown endpoint: $domain"
     if ep_is_live "$domain"; then
         ui_msg "Go live" "$domain is already live."
@@ -182,11 +188,18 @@ golive_interactive() {
             GOLIVE_ALLOW_UNPUBLISHED=true
         fi
     fi
-    if [[ -n "$requested" ]]; then method="$requested"; else method="$(certs_prompt_method "$domain")" || return 1; fi
+    if nginx_cert_exists "$domain"; then
+        # Nothing to validate: the certificate is reused.
+        method=auto
+    elif [[ -n "$requested" ]]; then
+        method="$requested"
+    else
+        method="$(certs_prompt_method "$domain")" || { gb_log "Cancelled; $domain stays staged."; return 0; }
+    fi
     method="$(certs_method "$domain" "$method")" || return 1
     nginx_cert_exists "$domain" || certs_email_interactive || return 1
-    # Readiness problems are shown as a dialog here; the switch itself runs
-    # with its output captured and repeats the check.
+    # Readiness problems are shown as a dialog here, once; the switch itself
+    # runs with its output captured.
     if ! reason="$(golive_preflight "$domain" "$method" 2>&1)"; then
         ui_msg "Not ready: $domain" "$domain stays staged.\n\n$reason"
         return 1
@@ -194,8 +207,13 @@ golive_interactive() {
     out="$(gb_tmpdir)/golive-plan.$$"
     golive_plan "$domain" "$method" > "$out"
     ui_textbox "Go live: $domain" "$out"
-    ui_yesno "Go live" "Go live with $domain now?" yes || { gb_log "Cancelled; $domain stays staged."; return 1; }
-    ui_run "Go live: $domain" golive_run "$domain" "$method"
+    ui_yesno "Go live" "Go live with $domain now?" yes || { gb_log "Cancelled; $domain stays staged."; return 0; }
+    endpoint_confirm_hand_edits "$domain" || return 0
+    GOLIVE_PREFLIGHT_DONE=true
+    ui_run "Go live: $domain" golive_run "$domain" "$method" || status=$?
+    GOLIVE_PREFLIGHT_DONE=false
+    GB_OVERWRITE_HAND_EDITS=false
+    return "$status"
 }
 
 # Main menu: choose a staged endpoint and take it live.
@@ -208,7 +226,7 @@ golive_menu() {
     done < <(golive_staged_domains)
     [[ ${#items[@]} -gt 0 ]] || { ui_msg "Go live" "No staged endpoints.\n\nDeploy a new endpoint and answer 'Stage it' to prepare one without taking over its name; it then appears here and under its own endpoint menu."; return 0; }
     domain="$(ui_menu "Go live" "Staged endpoints: choose the one that should take over its name now." "${items[@]}")" || return 0
-    golive_interactive "$domain"
+    golive_interactive "$domain" || true
 }
 
 # --- verification ------------------------------------------------------------

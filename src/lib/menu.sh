@@ -89,7 +89,7 @@ menu_endpoint() {
                 out="$(gb_tmpdir)/verify.$$"
                 golive_verify "$domain" > "$out" 2>&1 || true
                 ui_textbox "Verify: $domain" "$out" ;;
-            golive) golive_interactive "$domain" ;;
+            golive) golive_interactive "$domain" || true ;;
             certificate) certs_menu "$domain" ;;
             logs) menu_endpoint_logs "$domain" ;;
             access)
@@ -99,7 +99,10 @@ menu_endpoint() {
             limits) endpoint_prompt_limits "$domain" ;;
             tokens) endpoint_tokens_menu "$domain" ;;
             cloudflare) cloudflare_endpoint_menu "$domain" ;;
-            apply) ui_run "Apply $domain" endpoint_apply "$domain" ;;
+            apply)
+                endpoint_confirm_hand_edits "$domain" || continue
+                ui_run "Apply $domain" endpoint_apply "$domain" || true
+                GB_OVERWRITE_HAND_EDITS=false ;;
             remove)
                 if ui_yesno "Remove" "Stop serving $domain and remove its configuration?" no; then
                     local purge=false
@@ -220,6 +223,7 @@ menu_settings() {
             certbot)
                 local email
                 email="$(ui_input "Let's Encrypt" "Contact email" "$(gb_global CERTBOT_EMAIL)")" || continue
+                certs_valid_email "$email" || { ui_msg "Let's Encrypt" "'$email' is not a valid email address."; continue; }
                 gb_global_set CERTBOT_EMAIL "$email" ;;
             hsts)
                 if ui_yesno "HSTS" "Send includeSubDomains with Strict-Transport-Security? Only when every subdomain of every endpoint is HTTPS." "$([[ "$(gb_global HSTS_INCLUDE_SUBDOMAINS false)" == true ]] && echo yes || echo no)"; then

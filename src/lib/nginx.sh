@@ -266,8 +266,11 @@ nginx_apply_stage() {
 
 nginx_confirm_overwrite() {
     local target="$1" candidate="$2" diff_file
-    if [[ "$GB_YES" == true ]]; then
-        gb_warn "$target was edited by hand; refusing to overwrite it non-interactively (run interactively to decide)."
+    # The menu asks about hand edits before it captures output
+    # (endpoint_confirm_hand_edits) and records the answer here.
+    [[ "${GB_OVERWRITE_HAND_EDITS:-false}" == true ]] && return 0
+    if [[ "$GB_YES" == true || "${GB_UI_CAPTURED:-false}" == true ]]; then
+        gb_warn "$target was edited by hand; refusing to overwrite it without a dialog (choose the action from the endpoint menu, or run interactively, to decide)."
         return 1
     fi
     if [[ "$target" == "$GB_NGINX_GB/tokens/"* ]]; then
