@@ -10,13 +10,6 @@
         proxy_pass http://unix:{{SOCKET}}:;
     }
 
-    location = /openapi.json {
-        root {{WWW_DIR}};
-        try_files /openapi.json =404;
-        include snippets/getbible/headers.conf;
-        add_header Cache-Control "public, max-age=300" always;
-    }
-
     location / {
         include {{NGINX_GB_DIR}}/{{DOMAIN}}/auth.conf;
         include snippets/getbible/proxy.conf;

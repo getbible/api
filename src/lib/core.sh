@@ -47,6 +47,7 @@ GB_NGINX_GB="$GB_NGINX/getbible"
 GB_SYSTEMD="$GB_PREFIX/etc/systemd/system"
 GB_LETSENCRYPT="$GB_PREFIX/etc/letsencrypt"
 GB_PLACEHOLDER_CERTS="$GB_ETC/placeholder-certs"
+GB_FAVICON_FILE="$GB_ETC/favicon.ico"
 GB_CERTBOT_CLOUDFLARE_INI="$GB_ETC/certbot-cloudflare.ini"
 GB_ACME_ROOT="$GB_PREFIX/var/www/letsencrypt"
 GB_BIN="$GB_PREFIX/usr/local/bin"
@@ -117,6 +118,8 @@ trap 'gb_cleanup' EXIT
 GB_RE_DOMAIN='^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?)+$'
 gb_valid_domain() { [[ "$1" =~ $GB_RE_DOMAIN ]]; }
 gb_valid_version() { [[ "$1" =~ ^v[1-9][0-9]{0,2}$ ]]; }
+# An endpoint is a version folder (v2) or the domain root itself ("root").
+gb_valid_endpoint_label() { [[ "$1" == root ]] || gb_valid_version "$1"; }
 gb_valid_integer() { [[ "$1" =~ ^[0-9]+$ ]]; }
 gb_valid_extension() { [[ "$1" =~ ^[a-z0-9]{1,10}$ ]]; }
 gb_valid_translation() { [[ "$1" =~ ^[a-z0-9][a-z0-9_-]{0,29}$ ]]; }

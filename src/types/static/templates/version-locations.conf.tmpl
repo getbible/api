@@ -1,6 +1,31 @@
-    # {{DOMAIN}} version {{LABEL}}: {{DATA_DIR}}/{{LABEL}} -> current release
-    location ^~ /{{LABEL}}/ {
-        root {{DATA_DIR}};
+{{#UNLESS IS_ROOT}}    # {{DOMAIN}} endpoint {{LABEL}}: its page and OpenAPI document, served by
+    # exact locations whatever file types the tree allows.
+    location = /{{LABEL}} {
+        return 301 {{PREFIX}};
+    }
+{{#IF DOCS_FILE}}
+    location = {{PREFIX}} {
+        root {{DOCS_ROOT}};
+        open_file_cache off;
+        types { }
+        default_type text/html;
+        try_files {{DOCS_FILE}} =404;
+        include snippets/getbible/headers-html.conf;
+    }
+{{/IF}}{{#IF OPENAPI_FILE}}
+    location = {{PREFIX}}openapi.json {
+        root {{OPENAPI_ROOT}};
+        open_file_cache off;
+        types { }
+        default_type application/json;
+        try_files {{OPENAPI_FILE}} =404;
+        include snippets/getbible/headers.conf;
+        add_header Cache-Control "public, max-age=300" always;
+    }
+{{/IF}}
+{{/UNLESS}}    # {{DOMAIN}} endpoint {{LABEL}}: {{TREE_ROOT}}{{PREFIX}} -> current release
+    location ^~ {{PREFIX}} {
+        root {{TREE_ROOT}};
         # Resolve the current-release symlink for each new request. Cached
         # descriptors would keep independently serving files from the old tree
         # after an atomic publication; the kernel still caches file contents.
@@ -12,7 +37,7 @@
             return 404;
         }
 {{#IF DATA_EXT_REGEX}}
-        location ~* ^/{{LABEL}}/.+\.({{DATA_EXT_REGEX}})$ {
+        location ~* ^{{PREFIX}}.+\.({{DATA_EXT_REGEX}})$ {
             include {{NGINX_GB_DIR}}/{{DOMAIN}}/auth.conf;
             try_files $uri =404;
             include snippets/getbible/headers.conf;
@@ -22,7 +47,7 @@
 {{/UNLESS}}
         }
 {{/IF}}{{#IF HAS_SHA}}
-        location ~* ^/{{LABEL}}/.+\.sha$ {
+        location ~* ^{{PREFIX}}.+\.sha$ {
             include {{NGINX_GB_DIR}}/{{DOMAIN}}/auth.conf;
             try_files $uri =404;
             include snippets/getbible/headers.conf;
@@ -32,7 +57,7 @@
 {{/UNLESS}}
         }
 {{/IF}}{{#IF HAS_HTML}}
-        location ~* ^/{{LABEL}}/.+\.html$ {
+        location ~* ^{{PREFIX}}.+\.html$ {
             include {{NGINX_GB_DIR}}/{{DOMAIN}}/auth.conf;
             try_files $uri =404;
 {{#IF TOKEN_ACCESS}}            include snippets/getbible/headers-html-private.conf;

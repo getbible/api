@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# The endpoint pipeline shared by every type: render, install, certificate,
-# documentation, and removal. Type modules supply the pieces.
+# The domain pipeline shared by every type: services, pages, nginx,
+# certificate, and removal. Type modules supply the pieces. (Functions and
+# files keep the "endpoint" name they had before domains and endpoints were
+# told apart; the registry directory is still /etc/getbible/endpoints.)
 
 [[ -n "${GB_ENDPOINT_LOADED:-}" ]] && return 0
 GB_ENDPOINT_LOADED=1
@@ -29,14 +31,14 @@ endpoint_apply_abort() {
         fi
     fi
     ep_state_set "$domain" LAST_ERROR "$reason" || true
-    tg_notify fail "Endpoint update failed: $domain" "$reason. Routing recovery: $recovery."
+    tg_notify fail "Domain update failed: $domain" "$reason. Routing recovery: $recovery."
     return 1
 }
 
 # All stages check their own errors because callers may invoke this function
 # from an if/! condition, where Bash does not apply errexit inside functions.
 #
-# A staged endpoint runs the same pipeline minus everything that needs its
+# A staged domain runs the same pipeline minus everything that needs its
 # public name: no shared-cache protection at the edge, no certificate request
 # and no Cloudflare DNS or rules. It renders TLS with a placeholder
 # certificate so the complete vhost can be tested before go-live.
@@ -53,8 +55,8 @@ endpoint_apply() {
     if [[ "$live" == true ]] && declare -F cloudflare_protect_access >/dev/null; then
         cloudflare_protect_access "$domain" || { endpoint_apply_abort "$domain" "Could not protect shared-cache access"; return 1; }
     fi
-    "type_${EP_TYPE}_prepare" "$domain" || { endpoint_apply_abort "$domain" "Endpoint candidate preparation failed"; return 1; }
-    docs_render "$domain" || { endpoint_apply_abort "$domain" "Endpoint documentation rendering failed"; return 1; }
+    "type_${EP_TYPE}_prepare" "$domain" || { endpoint_apply_abort "$domain" "Preparing the domain's services failed"; return 1; }
+    pages_publish "$domain" || { endpoint_apply_abort "$domain" "Publishing the domain's pages failed"; return 1; }
     if [[ "$live" == false ]] && ! nginx_cert_exists "$domain"; then
         certs_placeholder_ensure "$domain" || gb_warn "$domain is staged without a placeholder certificate and renders HTTP-only until one exists."
     fi
@@ -80,7 +82,7 @@ endpoint_apply() {
             gb_warn "$domain is reachable over HTTP only until a certificate is issued."
         fi
     fi
-    "type_${EP_TYPE}_finish" "$domain" || { endpoint_apply_abort "$domain" "Endpoint activation failed"; return 1; }
+    "type_${EP_TYPE}_finish" "$domain" || { endpoint_apply_abort "$domain" "Activating the domain failed"; return 1; }
     nginx_transaction_commit "$domain" || return 1
     EP_ENABLE_BACKUP=""
     if [[ "$live" == true && -n "${GB_CLOUDFLARE_LOADED:-}" && "$(ep_get "$domain" CLOUDFLARE_MODE off)" != off ]]; then
@@ -128,14 +130,15 @@ endpoint_remove() {
         rm -rf -- "$(ep_www_dir "$domain")" "$(ep_log_dir "$domain")"
     fi
     ep_remove_config "$domain"
-    tg_notify warn "Endpoint removed" "$domain was removed from this server$([[ "$purge" == true ]] && printf ' with its data and logs' || printf '; data and logs kept')."
+    tg_notify warn "Domain removed" "$domain was removed from this server$([[ "$purge" == true ]] && printf ' with its data and logs' || printf '; data and logs kept')."
 }
 
 endpoint_status_text() {
     local domain="$1"
     ep_load "$domain"
     endpoint_source_type "$EP_TYPE"
-    printf 'Endpoint    : %s (%s%s)\n' "$domain" "$EP_TYPE" "$([[ -n "$EP_KIND" && "$EP_KIND" != static ]] && printf ' %s' "$EP_KIND")"
+    printf 'Domain      : %s (%s%s)\n' "$domain" "$EP_TYPE" "$([[ -n "$EP_KIND" && "$EP_KIND" != static ]] && printf ' %s' "$EP_KIND")"
+    printf 'Endpoints   : %s\n' "$(pages_endpoints "$domain" | sed 's/^root$/(domain root)/' | tr '\n' ' ')"
     printf 'Publication : %s\n' "$(endpoint_publication_text "$domain")"
     printf 'Access mode : %s\n' "$EP_ACCESS_MODE"
     if [[ "$EP_ACCESS_MODE" == metered ]]; then
@@ -149,6 +152,8 @@ endpoint_status_text() {
     printf 'Logs        : %s\n' "$(ep_log_dir "$domain")"
     printf '\n'
     "type_${EP_TYPE}_status" "$domain"
+    printf '\n'
+    pages_status_text "$domain"
 }
 
 # endpoint_hand_edited DOMAIN: the managed nginx files whose installed copy
@@ -207,7 +212,7 @@ endpoint_prompt_deploy_mode() {
     default="$(ep_deploy_mode_default)"
     mode="$(ui_radiolist "Go live now?" "Live: request the Let's Encrypt certificate now and, when Cloudflare manages $domain here, point its DNS at this server.\n\nStaged: install everything (code, data, services, nginx with a placeholder certificate) but leave the certificate and DNS alone, so whatever serves $domain today keeps serving until you choose 'Go live' for it." \
         live "Go live now" "$([[ "$default" == live ]] && echo on || echo off)" \
-        staged "Stage it; go live later from the endpoint menu" "$([[ "$default" == staged ]] && echo on || echo off)")" || return 1
+        staged "Stage it; go live later from the domain menu" "$([[ "$default" == staged ]] && echo on || echo off)")" || return 1
     if [[ "$mode" == live ]] && ! certs_email_interactive; then
         ui_msg "Let's Encrypt" "No contact email was given: the certificate request is skipped and $domain serves HTTP only. Set the email under Settings and use Endpoint > Certificate > Issue."
     fi
@@ -215,7 +220,7 @@ endpoint_prompt_deploy_mode() {
 }
 
 # Asked at deploy when a Cloudflare token is stored: should this tool manage
-# the domain's DNS records? Recorded only; DNS is applied once the endpoint is
+# the domain's DNS records? Recorded only; DNS is applied once the domain is
 # live (at go-live for a staged one).
 endpoint_prompt_cloudflare_mode() {
     local domain="$1"
@@ -223,7 +228,7 @@ endpoint_prompt_cloudflare_mode() {
         printf 'off\n'
         return 0
     fi
-    ui_radiolist "Cloudflare" "Is $domain in a Cloudflare zone this tool should manage? With dns or proxied, its A and AAAA records are pointed at this server when the endpoint is live (at go-live for a staged one) and certificates can be validated over DNS-01 before any DNS change." \
+    ui_radiolist "Cloudflare" "Is $domain in a Cloudflare zone this tool should manage? With dns or proxied, its A and AAAA records are pointed at this server when the domain is live (at go-live for a staged one) and certificates can be validated over DNS-01 before any DNS change." \
         off "Not managed here: DNS stays as it is; you change it yourself" on \
         dns "DNS only (grey cloud): records managed, traffic reaches this server directly" off \
         proxied "Proxied (orange cloud): records managed plus the API-safe rules and real client addresses" off
@@ -232,7 +237,7 @@ endpoint_prompt_cloudflare_mode() {
 endpoint_prompt_access_mode() {
     local default
     default="$(gb_global DEFAULT_ACCESS_MODE metered)"
-    ui_radiolist "Access mode" "How may this endpoint be called? Token holders are never limited." \
+    ui_radiolist "Access mode" "How may this domain be called? It applies to every endpoint of the domain; token holders are never limited." \
         open "Open: no token, no limits" "$([[ "$default" == open ]] && echo on || echo off)" \
         metered "Metered: public budget per address, tokens unlimited" "$([[ "$default" == metered ]] && echo on || echo off)" \
         token "Token only: a bearer token is required" "$([[ "$default" == token ]] && echo on || echo off)"

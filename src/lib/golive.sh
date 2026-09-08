@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Going live: the moment a staged endpoint takes over its public name.
+# Going live: the moment a staged domain takes over its public name.
 #
-# A staged endpoint has everything installed (code, data, services, nginx with
+# A staged domain has everything installed (code, data, services, nginx with
 # a placeholder certificate) but no Let's Encrypt certificate and no DNS
 # change, so the server currently serving the name is untouched. Go-live is
 # transactional: the certificate comes first; only then is the endpoint marked
@@ -69,7 +69,7 @@ golive_preflight() {
     fi
     [[ -f "$(nginx_site_file "$domain")" ]] || { gb_warn "$domain has no rendered nginx site; re-apply it first."; return 1; }
     if golive_cloudflare_managed "$domain" && ! cf_enabled; then
-        gb_warn "$domain is managed through Cloudflare here (mode $(ep_get "$domain" CLOUDFLARE_MODE off)) but no Cloudflare API token is stored, so its DNS could not be switched: store it under Settings > Cloudflare API token, or set the endpoint's Cloudflare mode to off and change DNS yourself."
+        gb_warn "$domain is managed through Cloudflare here (mode $(ep_get "$domain" CLOUDFLARE_MODE off)) but no Cloudflare API token is stored, so its DNS could not be switched: store it under Settings > Cloudflare API token, or set the domain's Cloudflare mode to off and change DNS yourself."
         return 1
     fi
     nginx_cert_exists "$domain" && return 0
@@ -121,7 +121,7 @@ golive_plan() {
 # through golive_interactive, which gathers every answer first.
 golive_run() {
     local domain="$1" requested="${2:-}" method cf_note="" cert_note dns_before verify_note=""
-    ep_exists "$domain" || gb_die "Unknown endpoint: $domain"
+    ep_exists "$domain" || gb_die "Unknown domain: $domain"
     if ep_is_live "$domain"; then
         gb_log "$domain is already live."
         return 0
@@ -138,7 +138,7 @@ golive_run() {
     gb_step "Go live: $domain"
     if ! certs_obtain "$domain" "$method"; then
         gb_warn "No certificate was issued; $domain stays staged. Fix the cause and choose 'Go live' again."
-        tg_notify fail "Go-live failed: $domain" "The certificate could not be issued ($method); the endpoint stays staged."
+        tg_notify fail "Go-live failed: $domain" "The certificate could not be issued ($method); the domain stays staged."
         return 1
     fi
     dns_before="$(ep_state_get "$domain" CLOUDFLARE_DNS_AT)"
@@ -146,7 +146,7 @@ golive_run() {
     if ! endpoint_apply "$domain"; then
         ep_set "$domain" LIVE false || true
         gb_warn "Activation failed; $domain is staged again. The certificate is kept for the next attempt."
-        tg_notify fail "Go-live failed: $domain" "The live configuration could not be applied; the endpoint is staged again."
+        tg_notify fail "Go-live failed: $domain" "The live configuration could not be applied; the domain is staged again."
         return 1
     fi
     ep_state_set "$domain" LIVE_AT "$(gb_timestamp)"
@@ -156,13 +156,13 @@ golive_run() {
         if [[ "$(ep_state_get "$domain" CLOUDFLARE_DNS_AT)" != "$dns_before" ]]; then
             if [[ -n "$(ep_state_get "$domain" CLOUDFLARE_ERROR)" ]]; then
                 cf_note=" Cloudflare DNS now points here, but the rules, address ranges or origin CA were not applied: fix the cause, then Endpoint > Cloudflare > Apply."
-                gb_warn "Cloudflare DNS for $domain now points here, but the rules were not applied; apply them from Endpoint > Cloudflare once the cause is fixed."
+                gb_warn "Cloudflare DNS for $domain now points here, but the rules were not applied; apply them from Domain > Cloudflare once the cause is fixed."
             else
                 cf_note=" Cloudflare DNS now points here."
             fi
         else
             cf_note=" Cloudflare DNS was NOT updated (the name still points where it did): fix the cause, then Endpoint > Cloudflare > Apply."
-            gb_warn "Cloudflare DNS for $domain was not updated; apply it from Endpoint > Cloudflare once the cause is fixed."
+            gb_warn "Cloudflare DNS for $domain was not updated; apply it from Domain > Cloudflare once the cause is fixed."
         fi
     fi
     if golive_verify "$domain"; then
@@ -183,7 +183,7 @@ golive_run() {
 # point it at the server that should serve.
 golive_stage_again() {
     local domain="$1"
-    ep_exists "$domain" || gb_die "Unknown endpoint: $domain"
+    ep_exists "$domain" || gb_die "Unknown domain: $domain"
     if ! ep_is_live "$domain"; then
         gb_log "$domain is already staged."
         return 0
@@ -210,7 +210,7 @@ golive_stage_again_interactive() {
 # 1 when go-live was refused or failed.
 golive_interactive() {
     local domain="$1" requested="${2:-}" method missing out reason status=0 explicit_http=false
-    ep_exists "$domain" || gb_die "Unknown endpoint: $domain"
+    ep_exists "$domain" || gb_die "Unknown domain: $domain"
     if ep_is_live "$domain"; then
         ui_msg "Go live" "$domain is already live."
         return 0
@@ -274,8 +274,8 @@ golive_menu() {
         [[ -n "$domain" ]] || continue
         items+=("$domain" "$(ep_get "$domain" TYPE) $(ep_get "$domain" KIND) · certificate: $(certs_source "$domain")")
     done < <(golive_staged_domains)
-    [[ ${#items[@]} -gt 0 ]] || { ui_msg "Go live" "No staged endpoints.\n\nDeploy a new endpoint and answer 'Stage it' to prepare one without taking over its name; it then appears here and under its own endpoint menu."; return 0; }
-    domain="$(ui_menu "Go live" "Staged endpoints: choose the one that should take over its name now." "${items[@]}")" || return 0
+    [[ ${#items[@]} -gt 0 ]] || { ui_msg "Go live" "No staged domains.\n\nDeploy a new domain and answer 'Stage it' to prepare one without taking over its name; it then appears here and under its own domain menu."; return 0; }
+    domain="$(ui_menu "Go live" "Staged domains: choose the one that should take over its name now." "${items[@]}")" || return 0
     golive_interactive "$domain" || true
 }
 
@@ -319,13 +319,13 @@ golive_verify() {
             [[ -n "$label" ]] || continue
             [[ "$(ep_version_get "$domain" "$label" ENABLED true)" == true ]] || continue
             if [[ -d "$(ep_version_path "$domain" "$label")" ]]; then
-                golive_row "Version $label" ok "published: $(readlink -f -- "$(ep_version_path "$domain" "$label")")"
+                golive_row "Endpoint $label" ok "published: $(readlink -f -- "$(ep_version_path "$domain" "$label")")"
             else
-                golive_row "Version $label" WARN "never published; run 'Sync now'"
+                golive_row "Endpoint $label" WARN "never published; run 'Sync now'"
             fi
         done < <(ep_versions "$domain")
     fi
-    if [[ -f "$(nginx_site_file "$domain")" ]]; then golive_row "nginx site" ok "$(nginx_site_file "$domain")"; else golive_row "nginx site" FAIL "not rendered; re-apply the endpoint"; failed=$((failed + 1)); fi
+    if [[ -f "$(nginx_site_file "$domain")" ]]; then golive_row "nginx site" ok "$(nginx_site_file "$domain")"; else golive_row "nginx site" FAIL "not rendered; re-apply the domain"; failed=$((failed + 1)); fi
     if [[ -e "$(nginx_enabled_file "$domain")" ]]; then golive_row "nginx enabled" ok "$(nginx_enabled_file "$domain")"; else golive_row "nginx enabled" FAIL "not enabled"; failed=$((failed + 1)); fi
     nginx_detect
     if [[ "$NG_AVAILABLE" == true && -z "$GB_PREFIX" ]]; then

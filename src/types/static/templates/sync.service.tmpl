@@ -13,6 +13,7 @@ Environment=GB_SYNC_REPO={{REPO_URL}}
 Environment=GB_SYNC_REF={{REPO_REF}}
 Environment=GB_SYNC_SUBPATH={{SOURCE_PATH}}
 Environment=GB_SYNC_EXTENSIONS={{EXTENSIONS}}
+Environment=GB_SYNC_EXTRA_FILES={{EXTRA_FILES}}
 Environment=GB_SYNC_HOME={{HOME}}
 Environment=GB_SYNC_DATA={{DATA_DIR}}
 Environment=GB_SYNC_KEEP=2
@@ -20,6 +21,10 @@ Environment=GB_NOTIFY={{LIBEXEC}}/getbible-notify
 Environment=GB_VERIFY={{LIBEXEC}}/getbible-verify-tree
 Environment=GB_TELEGRAM_CONF={{TELEGRAM_CONF}}
 ExecStart={{LIBEXEC}}/getbible-sync
+# After a successful run, refresh the domain's generated pages and versions.json
+# as root outside the sandbox, so a page or OpenAPI document that arrived with
+# this sync is linked at once. Its failure never marks the sync failed.
+ExecStartPost=-+{{GETBIBLE}} pages {{DOMAIN}} publish --yes
 TimeoutStartSec=6h
 Nice=10
 IOSchedulingClass=idle

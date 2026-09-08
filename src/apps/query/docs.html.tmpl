@@ -3,12 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{DOMAIN}} · getBible query API</title>
-<style>{{CSS}}</style>
+<title>{{DOMAIN}}/{{VERSION}}/ · getBible query API</title>
+{{#IF FAVICON}}<link rel="icon" href="/favicon.ico">
+{{/IF}}<style>{{CSS}}</style>
 </head>
 <body>
 <main>
-<h1>{{DOMAIN}}</h1>
+<h1>{{DOMAIN}} <code>/{{VERSION}}/</code></h1>
 <p class="lead">The getBible query endpoint: give it a scripture reference, get the verses. <span class="badge">{{ACCESS_MODE_LABEL}}</span> <span class="badge">API {{VERSION}}</span></p>
 
 <h2>The one route</h2>
@@ -20,7 +21,7 @@
 <tr><td><code>reference</code></td><td>A scripture reference, or several separated by <code>;</code>. Book names, abbreviations, chapters, verses and ranges are all understood.</td><td><code>John3:16</code>, <code>Genesis 1:1-3</code>, <code>Ps23;Mat7:7</code></td></tr>
 </table>
 <pre><code>curl https://{{DOMAIN}}/{{VERSION}}/{{DEFAULT_TRANSLATION}}/John%203:16</code></pre>
-<p>The response is a JSON object with one entry per chapter, keyed <code>{translation}_{book}_{chapter}</code>, each holding the translation metadata, the references that selected it, and its verses. Responses carry <code>Cache-Control: public, max-age={{CACHE_SECONDS}}</code> and an <code>ETag</code>; the full description is in <a href="/openapi.json">openapi.json</a>.</p>
+<p>The response is a JSON object with one entry per chapter, keyed <code>{translation}_{book}_{chapter}</code>, each holding the translation metadata, the references that selected it, and its verses. Responses carry <code>Cache-Control: public, max-age={{CACHE_SECONDS}}</code> and an <code>ETag</code>{{#IF OPENAPI_URL}}; the full description is in <a href="{{OPENAPI_URL}}">openapi.json</a>{{/IF}}.</p>
 
 <h2>Short forms</h2>
 <p>Anything shorter than the full route is a permanent redirect (<code>301</code>) to it. A missing translation becomes <code>{{DEFAULT_TRANSLATION}}</code>; a reference that cannot be resolved becomes <code>{{DEFAULT_REFERENCE}}</code>.</p>
@@ -53,6 +54,8 @@
 
 <h2>Health</h2>
 <p><code>GET /healthz</code> answers when the service is up; <code>GET /readyz</code> answers <code>200</code> only after reading scripture for the configured default reference, or <code>503</code> when unavailable. Token-protected responses use <code>Cache-Control: private, no-store</code>.</p>
+
+<p><a href="/">All endpoints of {{DOMAIN}}</a></p>
 
 <footer>Served by getBible · <a href="https://getbible.net">getbible.net</a> · Requests carry an <code>X-Request-ID</code> header; quote it when reporting a problem.</footer>
 </main>

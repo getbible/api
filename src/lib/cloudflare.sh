@@ -220,7 +220,7 @@ cloudflare_endpoint_menu() {
                 ep_set "$domain" CLOUDFLARE_MODE "$mode" ;;
             cache)
                 if [[ "$(ep_get "$domain" ACCESS_MODE metered)" == token ]]; then
-                    ui_msg "Edge cache" "Token-only endpoints always bypass shared caches."
+                    ui_msg "Edge cache" "Token-only domains always bypass shared caches."
                     continue
                 fi
                 cache="$(ui_radiolist "Edge cache" "Cache responses at Cloudflare's edge?" \
@@ -277,7 +277,7 @@ cloudflare_cli() {
         cache)
             local domain="${1:?domain}" cache="${2:?bypass|respect}"
             [[ "$cache" =~ ^(bypass|respect)$ ]] || gb_die "cache is bypass or respect"
-            [[ "$cache" != respect || "$(ep_get "$domain" ACCESS_MODE metered)" != token ]] || gb_die "Token-only endpoints must bypass shared caches."
+            [[ "$cache" != respect || "$(ep_get "$domain" ACCESS_MODE metered)" != token ]] || gb_die "Token-only domains must bypass shared caches."
             ep_set "$domain" CLOUDFLARE_CACHE "$cache"
             cloudflare_apply "$domain" ;;
         refresh-ips) cloudflare_refresh_and_reload ;;

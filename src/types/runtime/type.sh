@@ -15,7 +15,7 @@ rt_kinds() {
 rt_manifest_load() {
     local kind="$1" key
     [[ -f "$GB_APPS/$kind/manifest.conf" ]] || gb_die "Unknown runtime kind: $kind"
-    for key in KIND DESCRIPTION PACKAGE WSGI CHECK ENV_PREFIX DEFAULT_VERSION SUPPORTED_VERSIONS METHODS MAX_BODY \
+    for key in KIND DESCRIPTION PACKAGE WSGI CHECK ENV_PREFIX DEFAULT_VERSION SUPPORTED_VERSIONS ROUTE METHODS MAX_BODY \
                CACHE_SECONDS WORKERS THREADS TIMEOUT_START TIMEOUT_STOP MEMORY_HIGH MEMORY_MAX CPU_QUOTA TASKS_MAX NOFILE WARM_TRANSLATIONS; do
         printf -v "RM_$key" '%s' ""
     done
@@ -46,9 +46,9 @@ type_runtime_create() {
     rt_manifest_load "$kind"
     access_valid_mode "$mode" || gb_die "Invalid access mode: $mode"
     gb_valid_version "$version" || gb_die "Invalid version: $version"
-    [[ " ${RM_SUPPORTED_VERSIONS//,/ } " == *" $version "* ]] || gb_die "The $kind endpoint supports versions: $RM_SUPPORTED_VERSIONS (asked for $version)"
+    [[ " ${RM_SUPPORTED_VERSIONS//,/ } " == *" $version "* ]] || gb_die "The $kind service supports versions: $RM_SUPPORTED_VERSIONS (asked for $version)"
     existing="$(rt_kind_deployed_on "$kind")"
-    [[ -z "$existing" ]] || gb_die "The $kind endpoint is already deployed on $existing (one per server)."
+    [[ -z "$existing" ]] || gb_die "The $kind service is already deployed on $existing (one per server)."
     [[ "$repository" == /* || "$repository" == http://* || "$repository" == https://* ]] || gb_die "Repository must be an absolute path or a URL: $repository"
     if [[ -n "$warm" ]]; then
         [[ "$warm" =~ ^[a-z0-9_-]+(,[a-z0-9_-]+)*$ ]] || gb_die "Invalid warm-up translation list: $warm"
@@ -56,6 +56,7 @@ type_runtime_create() {
     ep_create "$domain" runtime "$kind"
     ep_set "$domain" ACCESS_MODE "$mode"
     ep_set "$domain" VERSION "$version"
+    rt_record_version "$domain" "$version"
     ep_set "$domain" REPOSITORY "$repository"
     ep_set "$domain" WORKERS "$RM_WORKERS"
     ep_set "$domain" THREADS "$RM_THREADS"
@@ -65,6 +66,91 @@ type_runtime_create() {
     ep_set "$domain" ALLOWED_TRANSLATIONS ""
     ep_set "$domain" CACHE_TTL "$RM_CACHE_SECONDS"
     ep_set "$domain" PYTHON_VERSION "$(py_resolve_version)"
+}
+
+# --- endpoints (pages.sh hooks) ----------------------------------------------
+# A runtime domain's endpoints are its versions, recorded like a static
+# domain's under versions/<label>.conf so pages and OpenAPI settings attach to
+# them. Domains from before that record carry only VERSION in endpoint.conf;
+# the record is created for them on first use.
+rt_record_version() {
+    local domain="$1" version="$2" conf
+    conf="$(ep_version_conf "$domain" "$version")"
+    [[ ! -f "$conf" ]] || return 0
+    gb_ensure_dir "$(ep_versions_dir "$domain")" 0750 || return 1
+    cfg_set "$conf" LABEL "$version"
+    cfg_set "$conf" ENABLED true
+    cfg_set "$conf" CREATED "$(gb_timestamp)"
+    chmod 0640 "$conf" 2>/dev/null || true
+}
+
+type_runtime_endpoints() {
+    local domain="$1" version
+    version="$(ep_get "$domain" VERSION)"
+    if [[ -n "$version" ]] && ! ep_version_exists "$domain" "$version"; then
+        rt_record_version "$domain" "$version" || return 1
+    fi
+    ep_versions "$domain"
+}
+
+# Runtime endpoints generate their OpenAPI document from the kind's template.
+type_runtime_openapi_default() { printf 'generated\n'; }
+
+# The endpoint /openapi.json keeps describing: the version clients learnt the
+# address from before version folders had their own documents.
+type_runtime_default_endpoint() { ep_get "$1" VERSION; }
+
+rt_token_required() { if [[ "$EP_ACCESS_MODE" == token ]]; then printf 'true\n'; else printf 'false\n'; fi; }
+
+rt_example_path() {
+    # rt_example_path LABEL: the example request of the kind's documentation.
+    if [[ "$EP_KIND" == search ]]; then printf '%s/%s/faith%%20hope\n' "$1" "${EP_DEFAULT_TRANSLATION:-kjv}"; else printf '%s/%s/John3:16\n' "$1" "${EP_DEFAULT_TRANSLATION:-kjv}"; fi
+}
+
+# type_runtime_render_endpoint_docs DOMAIN LABEL OUTPUT: the kind's page for
+# one endpoint (EP_* loaded by the caller).
+type_runtime_render_endpoint_docs() {
+    local domain="$1" label="$2" output="$3" access example favicon=false openapi_url=""
+    rt_manifest_load "$EP_KIND"
+    access="$(gb_tmpdir)/access-$EP_SLUG-$label.html"
+    example="$(rt_example_path "$label")"
+    docs_render_access "$access" "/$label/" "${example#*/}"
+    if pages_favicon_active "$domain"; then favicon=true; fi
+    [[ "$(pages_openapi_source "$domain" "$label")" == none ]] || openapi_url="/$label/openapi.json"
+    gb_render "$GB_APPS/$EP_KIND/docs.html.tmpl" "$output" "DOMAIN=$domain" \
+        "CSS=$(cat "$GB_DOCS_SRC/base.css")" "ACCESS_MODE_LABEL=$(docs_access_label "$EP_ACCESS_MODE")" \
+        "VERSION=$label" "DEFAULT_TRANSLATION=${EP_DEFAULT_TRANSLATION:-kjv}" \
+        "DEFAULT_REFERENCE=${EP_DEFAULT_REFERENCE:-Mat7:7}" "ACCESS_HTML=$(cat "$access")" \
+        "CACHE_SECONDS=${EP_CACHE_TTL:-$RM_CACHE_SECONDS}" "TOKEN_REQUIRED=$(rt_token_required)" \
+        "FAVICON=$favicon" "OPENAPI_URL=$openapi_url"
+}
+
+# type_runtime_render_openapi DOMAIN LABEL OUTPUT: the kind's OpenAPI document
+# for one endpoint, checked to be valid JSON before it is published.
+type_runtime_render_openapi() {
+    local domain="$1" label="$2" output="$3"
+    gb_render "$GB_APPS/$EP_KIND/openapi.json.tmpl" "$output" "DOMAIN=$domain" "VERSION=$label" \
+        "DEFAULT_TRANSLATION=${EP_DEFAULT_TRANSLATION:-kjv}" "DEFAULT_REFERENCE=${EP_DEFAULT_REFERENCE:-Mat7:7}" \
+        "TOKEN_REQUIRED=$(rt_token_required)" || return 1
+    "$GB_PYTHON" -c 'import json,sys; json.load(open(sys.argv[1]))' "$output" || { gb_warn "The rendered OpenAPI document for $domain/$label is not valid JSON."; return 1; }
+}
+
+# One table row per endpoint for the domain page.
+rt_endpoint_rows() {
+    local domain="$1" label route page openapi
+    rt_manifest_load "$EP_KIND"
+    while read -r label; do
+        [[ -n "$label" ]] || continue
+        route="${RM_ROUTE//\{version\}/$label}"
+        page="no page"
+        [[ "$(pages_docs_source "$domain" "$label")" == none ]] || page="<a href=\"/$label/\">/$label/</a>"
+        openapi="no OpenAPI document"
+        if [[ "$(pages_openapi_source "$domain" "$label")" != none ]] && pages_file_present "$domain" "$label" openapi; then
+            openapi="<a href=\"/$label/openapi.json\">openapi.json</a>"
+        fi
+        printf '<tr><td><code>%s</code></td><td><code>%s</code></td><td>%s</td><td>%s</td></tr>\n' "$label" "$route" "$page" "$openapi"
+    done < <(type_runtime_endpoints "$domain")
+    return 0
 }
 
 # --- deployment generations --------------------------------------------------
@@ -330,18 +416,33 @@ rt_activate() {
     gb_log "Candidate $unit.service is ready; awaiting nginx activation."
 }
 
-# nginx locations for a runtime endpoint.
+# nginx locations for a runtime domain: every endpoint's page and OpenAPI
+# document as exact locations, then the proxy to the service.
 type_runtime_render_locations() {
-    local output="$1"
+    local output="$1" label piece
+    local -a page openapi
     rt_manifest_load "$EP_KIND"
     TYPE_METHODS_REGEX="$RM_METHODS"
     TYPE_REJECT_ARGS=false
     TYPE_MAX_BODY="$RM_MAX_BODY"
     TYPE_PROXY_CACHE=true
-    gb_render "$GB_TYPES/runtime/templates/locations.conf.tmpl" "$output" \
+    : > "$output"
+    while read -r label; do
+        [[ -n "$label" ]] || continue
+        mapfile -t page < <(pages_docs_location "$EP_DOMAIN" "$label")
+        mapfile -t openapi < <(pages_openapi_location "$EP_DOMAIN" "$label")
+        piece="$(gb_tmpdir)/rt-loc-$EP_SLUG-$label"
+        gb_render "$GB_TYPES/runtime/templates/endpoint-locations.conf.tmpl" "$piece" \
+            "DOMAIN=$EP_DOMAIN" "VERSION=$label" "DOCS_ROOT=${page[0]:-}" "DOCS_FILE=${page[1]:-}" \
+            "OPENAPI_ROOT=${openapi[0]:-}" "OPENAPI_FILE=${openapi[1]:-}" || return 1
+        cat "$piece" >> "$output"
+    done < <(type_runtime_endpoints "$EP_DOMAIN")
+    piece="$(gb_tmpdir)/rt-loc-$EP_SLUG"
+    gb_render "$GB_TYPES/runtime/templates/locations.conf.tmpl" "$piece" \
         "DOMAIN=$EP_DOMAIN" "SLUG=$EP_SLUG" "SOCKET=$(rt_proxy_socket)" \
         "WWW_DIR=$(ep_www_dir "$EP_DOMAIN")" "NGINX_GB_DIR=$GB_NGINX_GB" \
-        "CACHE_TTL=${EP_CACHE_TTL:-$RM_CACHE_SECONDS}" "TOKEN_ACCESS=$([[ "$EP_ACCESS_MODE" == token ]] && echo true || echo false)"
+        "CACHE_TTL=${EP_CACHE_TTL:-$RM_CACHE_SECONDS}" "TOKEN_ACCESS=$(rt_token_required)" || return 1
+    cat "$piece" >> "$output"
 }
 
 type_runtime_before_switch() {
@@ -491,25 +592,19 @@ type_runtime_status() {
     if sd_available; then "$GB_SYSTEMCTL" show "$unit.service" --no-pager --property=MainPID,ActiveEnterTimestamp,MemoryCurrent,TasksCurrent,NRestarts 2>/dev/null | sed 's/^/  /'; fi
 }
 
+# The domain page of a runtime domain: one row per endpoint (version).
 type_runtime_render_docs() {
-    local output="$1" www access first example openapi
+    local output="$1" access example favicon=false default
     rt_manifest_load "$EP_KIND"
-    www="$(ep_www_dir "$EP_DOMAIN")"
+    default="$(type_runtime_default_endpoint "$EP_DOMAIN")"
     access="$(gb_tmpdir)/access-$EP_SLUG.html"
-    example="$EP_VERSION/${EP_DEFAULT_TRANSLATION:-kjv}/$([[ "$EP_KIND" == search ]] && printf 'faith%%20hope' || printf 'John3:16')"
-    docs_render_access "$access" "$EP_VERSION" "${example#*/}"
-    gb_render "$GB_APPS/$EP_KIND/docs.html.tmpl" "$output" "DOMAIN=$EP_DOMAIN" \
-        "CSS=$(cat "$GB_DOCS_SRC/base.css")" "ACCESS_MODE_LABEL=$(docs_access_label "$EP_ACCESS_MODE")" \
-        "VERSION=$EP_VERSION" "DEFAULT_TRANSLATION=${EP_DEFAULT_TRANSLATION:-kjv}" \
-        "DEFAULT_REFERENCE=${EP_DEFAULT_REFERENCE:-Mat7:7}" "ACCESS_HTML=$(cat "$access")" \
-        "CACHE_SECONDS=${EP_CACHE_TTL:-$RM_CACHE_SECONDS}" "TOKEN_REQUIRED=$([[ "$EP_ACCESS_MODE" == token ]] && echo true || echo false)"
-    openapi="$(gb_tmpdir)/openapi-$EP_SLUG.json"
-    gb_render "$GB_APPS/$EP_KIND/openapi.json.tmpl" "$openapi" "DOMAIN=$EP_DOMAIN" "VERSION=$EP_VERSION" \
-        "DEFAULT_TRANSLATION=${EP_DEFAULT_TRANSLATION:-kjv}" "DEFAULT_REFERENCE=${EP_DEFAULT_REFERENCE:-Mat7:7}" \
-        "TOKEN_REQUIRED=$([[ "$EP_ACCESS_MODE" == token ]] && echo true || echo false)"
-    "$GB_PYTHON" -c 'import json,sys; json.load(open(sys.argv[1]))' "$openapi" || gb_die "Rendered OpenAPI document for $EP_DOMAIN is not valid JSON."
-    gb_ensure_dir "$www" 0755
-    gb_install_file "$openapi" "$www/openapi.json" 0644
+    example="$(rt_example_path "${default:-$RM_DEFAULT_VERSION}")"
+    docs_render_access "$access" "/${default:-$RM_DEFAULT_VERSION}/" "${example#*/}"
+    if pages_favicon_active "$EP_DOMAIN"; then favicon=true; fi
+    gb_render "$GB_DOCS_SRC/runtime.html.tmpl" "$output" "DOMAIN=$EP_DOMAIN" "KIND=$EP_KIND" \
+        "DESCRIPTION=$RM_DESCRIPTION" "CSS=$(cat "$GB_DOCS_SRC/base.css")" \
+        "ACCESS_MODE_LABEL=$(docs_access_label "$EP_ACCESS_MODE")" "ENDPOINT_ROWS=$(rt_endpoint_rows "$EP_DOMAIN")" \
+        "EXAMPLE_PATH=$example" "ACCESS_HTML=$(cat "$access")" "FAVICON=$favicon"
 }
 
 # --- deploy ------------------------------------------------------------------
@@ -567,7 +662,7 @@ rt_default_repository() {
 type_runtime_deploy_interactive() {
     local domain kind version repository mode warm choice cfmode
     local -a kinds=()
-    ui_msg "New runtime endpoint" "This walkthrough asks for: the service (query or search), the domain, whether to go live now or stage the endpoint, the API version, the folder holding the scripture files (a static endpoint's data root), the access mode$(cf_enabled 2>/dev/null && printf ', the Cloudflare mode' || true) and, for search, the translations to warm up.\n\nIt then installs managed Python, builds the release (a few minutes on first use), starts the service, which must pass readiness, and routes nginx to it. Cancel at any question to stop without changes."
+    ui_msg "New runtime domain" "This walkthrough asks for: the service (query or search), the domain, whether to go live now or stage the domain, the API version (its first endpoint), the folder holding the scripture files (a static endpoint's data root), the access mode$(cf_enabled 2>/dev/null && printf ', the Cloudflare mode' || true) and, for search, the translations to warm up.\n\nIt then installs managed Python, builds the release (a few minutes on first use), starts the service, which must pass readiness, and routes nginx to it. Cancel at any question to stop without changes."
     while read -r kind; do
         [[ -n "$kind" ]] || continue
         rt_manifest_load "$kind"
@@ -575,11 +670,11 @@ type_runtime_deploy_interactive() {
     done < <(rt_kinds)
     kind="$(ui_menu "Runtime endpoint" "Which service?" "${kinds[@]}")" || return 1
     rt_manifest_load "$kind"
-    domain="$(ui_input "New runtime endpoint" "Domain name for the $kind endpoint (DNS may still point at another server; you choose when it goes live)" "$kind.getbible.net")" || return 1
+    domain="$(ui_input "New runtime domain" "Domain name for the $kind service (DNS may still point at another server; you choose when it goes live)" "$kind.getbible.net")" || return 1
     gb_valid_domain "$domain" || { ui_msg "Invalid" "That is not a valid domain name."; return 1; }
-    ep_exists "$domain" && { ui_msg "Exists" "$domain is already an endpoint."; return 1; }
+    ep_exists "$domain" && { ui_msg "Exists" "$domain is already set up on this server."; return 1; }
     GB_DEPLOY_MODE="$(endpoint_prompt_deploy_mode "$domain")" || return 1
-    version="$(ui_input "Version" "API version to serve (supported: $RM_SUPPORTED_VERSIONS)" "$RM_DEFAULT_VERSION")" || return 1
+    version="$(ui_input "Version" "API version to serve under https://$domain/<version>/ (supported by $kind: $RM_SUPPORTED_VERSIONS)" "$RM_DEFAULT_VERSION")" || return 1
     repository="$(rt_default_repository "$version")"
     repository="$(ui_input "Scripture files" "Folder holding the Bible files (must contain $version/), usually a static endpoint's data root" "${repository:-$GB_SRV/api.getbible.net}")" || return 1
     if [[ "$repository" == /* && ! -d "$repository/$version" ]]; then
@@ -608,13 +703,13 @@ type_runtime_deploy_finish() {
     fi
     endpoint_apply "$domain" || return 1
     if ep_is_live "$domain"; then
-        tg_notify ok "Endpoint deployed: $domain" "Runtime $(ep_get "$domain" KIND) endpoint, version $(ep_get "$domain" VERSION)."
+        tg_notify ok "Domain deployed: $domain" "Runtime $(ep_get "$domain" KIND) domain, endpoint $(ep_get "$domain" VERSION)."
         if ! nginx_cert_exists "$domain"; then
-            ui_msg "No certificate yet" "$domain is live but has no Let's Encrypt certificate, so it answers HTTP only (challenges are served, everything else redirects to HTTPS). Once DNS reaches this server, choose Endpoint > Certificate > Issue."
+            ui_msg "No certificate yet" "$domain is live but has no Let's Encrypt certificate, so it answers HTTP only (challenges are served, everything else redirects to HTTPS). Once DNS reaches this server, choose Domain > Certificate > Issue."
         fi
     else
-        tg_notify ok "Endpoint staged: $domain" "Runtime $(ep_get "$domain" KIND) endpoint, version $(ep_get "$domain" VERSION), prepared on $(hostname -f 2>/dev/null || hostname). Not live: no certificate or DNS change until 'Go live'."
-        ui_msg "Staged" "$domain is staged on this server: the service runs and passed readiness, nginx routes to it with a placeholder certificate, but no certificate was requested and DNS was not changed.\n\nVerify it, and choose 'Go live' from the main menu or the endpoint menu when it should take over."
+        tg_notify ok "Domain staged: $domain" "Runtime $(ep_get "$domain" KIND) domain, endpoint $(ep_get "$domain" VERSION), prepared on $(hostname -f 2>/dev/null || hostname). Not live: no certificate or DNS change until 'Go live'."
+        ui_msg "Staged" "$domain is staged on this server: the service runs and passed readiness, nginx routes to it with a placeholder certificate, but no certificate was requested and DNS was not changed.\n\nVerify it, and choose 'Go live' from the main menu or the domain menu when it should take over."
     fi
 }
 

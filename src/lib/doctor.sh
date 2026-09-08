@@ -50,9 +50,9 @@ doctor_run() {
     tg_enabled && doctor_check "telegram" ok enabled || doctor_check "telegram" info disabled
     [[ -n "$(cfg_get "$GB_CLOUDFLARE_CONF" CLOUDFLARE_API_TOKEN)" ]] && doctor_check "cloudflare token" ok stored || doctor_check "cloudflare token" info "not stored"
     printf '\nDisk: %s\n' "$(df -h / 2>/dev/null | awk 'NR==2 {print $4" free of "$2" ("$5" used)"}')"
-    printf 'Endpoints: %s\n' "$(ep_list | tr '\n' ' ')"
+    printf 'Domains: %s\n' "$(ep_list | tr '\n' ' ')"
     printf 'Staged (not live): %s\n' "$(golive_staged_domains | tr '\n' ' ')"
-    printf 'Defaults: new endpoints %s, certificate validation %s\n' "$(gb_global DEFAULT_DEPLOY_MODE live)" "$(gb_global CERT_METHOD auto)"
+    printf 'Defaults: new domains %s, certificate validation %s\n' "$(gb_global DEFAULT_DEPLOY_MODE live)" "$(gb_global CERT_METHOD auto)"
     printf '\nListening: %s\n' "$(ss -ltn 2>/dev/null | awk 'NR>1 {print $4}' | grep -E ':(80|443)$' | sort -u | tr '\n' ' ')"
 }
 
@@ -91,7 +91,7 @@ doctor_check_dns_renewals() {
 doctor_install_deps() {
     platform_detect
     [[ "$PLATFORM_OS" == Linux ]] || gb_die "Deployment requires Linux; detected $PLATFORM_OS."
-    [[ "$PLATFORM_PACKAGE_MANAGER" == apt ]] || gb_die "Detected $PLATFORM_NAME. Install compatible nginx, certbot, systemd and these command-line tools with your package manager: ${GB_APT_PACKAGES[*]}. Then run doctor; managed endpoint Python is independent of the distro."
+    [[ "$PLATFORM_PACKAGE_MANAGER" == apt ]] || gb_die "Detected $PLATFORM_NAME. Install compatible nginx, certbot, systemd and these command-line tools with your package manager: ${GB_APT_PACKAGES[*]}. Then run doctor; managed runtime Python is independent of the distro."
     [[ "$GB_DRY_RUN" == true ]] && { gb_log "(dry-run) would apt-get install ${GB_APT_PACKAGES[*]}"; return 0; }
     gb_step "Installing packages: ${GB_APT_PACKAGES[*]}"
     DEBIAN_FRONTEND=noninteractive apt-get update || return 1
@@ -110,5 +110,5 @@ doctor_install_deps() {
     fi
     gb_ensure_dir "$GB_ACME_ROOT" 0755
     sd_enable --now nginx || true
-    gb_log "Installed host tools. Endpoint Python and packages are installed separately during explicit deployment/update."
+    gb_log "Installed host tools. Runtime Python and packages are installed separately during explicit deployment/update."
 }

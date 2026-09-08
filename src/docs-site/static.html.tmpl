@@ -4,21 +4,23 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{DOMAIN}} · getBible API</title>
-<style>{{CSS}}</style>
+{{#IF FAVICON}}<link rel="icon" href="/favicon.ico">
+{{/IF}}<style>{{CSS}}</style>
 </head>
 <body>
 <main>
 <h1>{{DOMAIN}}</h1>
 <p class="lead">A getBible static API: every resource is a file served exactly as published. <span class="badge">{{ACCESS_MODE_LABEL}}</span></p>
 
-<h2>Versions</h2>
-<p>Every path starts with a version segment. Versions are independent trees and can change on their own schedule.</p>
+<h2>Endpoints</h2>
+<p>Every path starts with a version segment. Each endpoint is an independent tree with its own documentation page, changing on its own schedule.</p>
 <table>
-<tr><th>Version</th><th>Base URL</th><th>Documents</th></tr>
+<tr><th>Version</th><th>Base URL</th><th>Documentation</th><th>OpenAPI</th></tr>
 {{VERSIONS_ROWS}}
 </table>
-{{#IF NO_VERSIONS}}<p>No version has been published yet.</p>{{/IF}}
-
+{{#IF NO_VERSIONS}}<p>No endpoint has been published yet.</p>{{/IF}}
+{{#IF VERSIONS_JSON}}<p>Machine-readable index of the endpoints and their OpenAPI documents: <a href="/versions.json">versions.json</a>.</p>
+{{/IF}}
 <h2>How to call it</h2>
 <p>Plain HTTPS <code>GET</code> requests, from any origin. Responses are JSON, plus <code>.sha</code> and <code>.txt</code> files as plain text. Nothing here accepts query strings or request bodies.</p>
 <pre><code>curl https://{{DOMAIN}}/{{FIRST_VERSION}}/{{EXAMPLE_PATH}}</code></pre>
