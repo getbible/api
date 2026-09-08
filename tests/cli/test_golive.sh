@@ -94,6 +94,11 @@ check "plan names the address"    "203.0.113.10"                "$(GB_FAKE_HTTP_
 check "dry run kept placeholder"  "present"                     "$(placeholder "$D")"
 "$GB" cloudflare mode "$D" off >/dev/null 2>&1 || true
 check "auto is http when unmanaged" "Next issue  : http"        "$("$GB" cert "$D" status 2>/dev/null)"
+check "renew needs a certificate" "issue one first"             "$("$GB" cert "$D" renew 2>&1 || true)"
+check "renew failure is not fatal" ""                           "$("$GB" cert "$D" renew 2>&1 | grep -c 'ERROR' | sed 's/^0$//')"
+"$GB" settings cert-method http >/dev/null 2>&1
+check "settings http wins for auto" "certificate: HTTP-01"      "$("$GB" go-live "$D" --dry-run 2>&1 || true)"
+"$GB" settings cert-method auto >/dev/null 2>&1
 touch "$CERTBOT_FAIL_FILE"
 check "certbot failure reported"  "stays staged"                "$("$GB" go-live "$D" --cert http 2>&1 || true)"
 check "webroot arguments"         "certonly --webroot -w $SB/var/www/letsencrypt -d $D --non-interactive --agree-tos --email ops@example.test" "$(cat "$CERTBOT_LOG")"

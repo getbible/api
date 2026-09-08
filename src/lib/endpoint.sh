@@ -151,6 +151,42 @@ endpoint_status_text() {
     "type_${EP_TYPE}_status" "$domain"
 }
 
+# endpoint_hand_edited DOMAIN: the managed nginx files whose installed copy
+# no longer matches what this tool last wrote, found by rendering into a
+# scratch stage. Nothing is installed.
+endpoint_hand_edited() {
+    local domain="$1" stage file rel target
+    ep_load "$domain"
+    endpoint_source_type "$EP_TYPE"
+    stage="$(gb_tmpdir)/drift-$EP_SLUG"
+    rm -rf -- "$stage"
+    { nginx_render_global "$stage" && nginx_render_endpoint "$stage"; } 2>/dev/null || { rm -rf -- "$stage"; return 0; }
+    while IFS= read -r file; do
+        rel="${file#"$stage"/}"
+        [[ "$rel" == .tls-* ]] && continue
+        target="$GB_NGINX/$rel"
+        [[ "$(gb_drift_status "$target" "$file")" == hand-edited ]] && printf '%s\n' "$target"
+    done < <(find "$stage" -type f | sort)
+    rm -rf -- "$stage"
+    return 0
+}
+
+# endpoint_confirm_hand_edits DOMAIN: ask about hand-edited files while a
+# dialog can still be shown; the answer is honoured by nginx_confirm_overwrite
+# once output is captured. Returns 1 when the operator keeps the edits.
+endpoint_confirm_hand_edits() {
+    local domain="$1" edited
+    GB_OVERWRITE_HAND_EDITS=false
+    edited="$(endpoint_hand_edited "$domain")"
+    [[ -n "$edited" ]] || return 0
+    if ui_yesno "Hand-edited files" "These managed nginx files of $domain were edited by hand:\n\n$edited\n\nOverwrite them with freshly rendered versions? Answering No keeps them and stops the action." no; then
+        GB_OVERWRITE_HAND_EDITS=true
+        return 0
+    fi
+    gb_warn "Hand-edited files of $domain were kept; nothing was applied."
+    return 1
+}
+
 # endpoint_publication_text DOMAIN: the publication state for status output.
 endpoint_publication_text() {
     local since
@@ -172,8 +208,8 @@ endpoint_prompt_deploy_mode() {
     mode="$(ui_radiolist "Go live now?" "Live: request the Let's Encrypt certificate now and, when Cloudflare manages $domain here, point its DNS at this server.\n\nStaged: install everything (code, data, services, nginx with a placeholder certificate) but leave the certificate and DNS alone, so whatever serves $domain today keeps serving until you choose 'Go live' for it." \
         live "Go live now" "$([[ "$default" == live ]] && echo on || echo off)" \
         staged "Stage it; go live later from the endpoint menu" "$([[ "$default" == staged ]] && echo on || echo off)")" || return 1
-    if [[ "$mode" == live ]]; then
-        certs_email_interactive || gb_warn "Without a Let's Encrypt contact email the certificate request is skipped; set it under Settings."
+    if [[ "$mode" == live ]] && ! certs_email_interactive; then
+        ui_msg "Let's Encrypt" "No contact email was given: the certificate request is skipped and $domain serves HTTP only. Set the email under Settings and use Endpoint > Certificate > Issue."
     fi
     printf '%s\n' "$mode"
 }

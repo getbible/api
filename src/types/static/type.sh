@@ -236,7 +236,7 @@ type_static_menu_items() {
         force "Force a full resync of a version" \
         key "Show the deploy key" \
         versions "Manage versions" \
-        access "Test repository access"
+        repoaccess "Test repository access (deploy key and branch)"
 }
 
 type_static_menu_action() {
@@ -251,9 +251,9 @@ type_static_menu_action() {
             ;;
         key) type_static_show_key "$domain" ;;
         versions) type_static_versions_menu "$domain" ;;
-        access)
+        repoaccess)
             label="$(type_static_pick_version "$domain")" || return 0
-            ui_run "Repository access" sync_test_access "$domain" "$(ep_version_get "$domain" "$label" REPO_URL)" "$(ep_version_get "$domain" "$label" REPO_REF)"
+            ui_run "Repository access" sync_test_access "$domain" "$(ep_version_get "$domain" "$label" REPO_URL)" "$(ep_version_get "$domain" "$label" REPO_REF)" || true
             ;;
     esac
 }

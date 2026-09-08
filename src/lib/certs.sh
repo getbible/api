@@ -83,16 +83,20 @@ certs_method_description() {
 certs_email() {
     local email
     email="$(gb_global CERTBOT_EMAIL)"
-    if [[ -z "$email" ]]; then
+    while [[ -z "$email" ]]; do
         if [[ "${GB_UI_CAPTURED:-false}" == true ]]; then
             gb_warn "No Let's Encrypt contact email is set (Settings > Let's Encrypt contact email)."
             return 1
         fi
-        email="$(ui_input "Let's Encrypt" "Contact email for certificate expiry notices" "")" \
-            || { gb_warn "A Let's Encrypt contact email is required (Settings > Let's Encrypt contact email)."; return 1; }
-        certs_valid_email "$email" || { gb_warn "Invalid email address: $email"; return 1; }
+        email="$(ui_input "Let's Encrypt" "Contact email for certificate expiry notices" "")" || email=""
+        [[ -n "$email" ]] || { gb_warn "A Let's Encrypt contact email is required (Settings > Let's Encrypt contact email)."; return 1; }
+        if ! certs_valid_email "$email"; then
+            ui_msg "Let's Encrypt" "'$email' is not a valid email address."
+            email=""
+            continue
+        fi
         gb_global_set CERTBOT_EMAIL "$email"
-    fi
+    done
     printf '%s\n' "$email"
 }
 
@@ -222,8 +226,8 @@ HOOK
 
 certs_renew_now() {
     local domain="$1"
-    certs_available || gb_die "certbot is not installed."
-    nginx_cert_exists "$domain" || gb_die "$domain has no Let's Encrypt certificate to renew; issue one first."
+    certs_available || { gb_warn "certbot is not installed (System > Install dependencies)."; return 1; }
+    nginx_cert_exists "$domain" || { gb_warn "$domain has no Let's Encrypt certificate to renew; issue one first."; return 1; }
     "$GB_CERTBOT" renew --cert-name "$domain" --force-renewal --non-interactive && nginx_test && nginx_reload
 }
 
@@ -315,14 +319,17 @@ certs_status_text() {
 }
 
 # --- prompts, menu and command line -----------------------------------------
-# Ask which validation method to use; the default is the resolved automatic choice.
+# Ask which validation method to use. The item from Settings is preselected,
+# and the automatic item says what it would do for this domain right now.
 certs_prompt_method() {
-    local domain="$1" default
-    default="$(certs_method "$domain")" || default=http
-    ui_radiolist "Certificate validation" "How should Let's Encrypt validate $domain?" \
-        auto "Automatic: dns-cloudflare for Cloudflare-managed domains when available, otherwise http (now: $default)" on \
-        http "HTTP-01: DNS must already route $domain to this server" off \
-        dns-cloudflare "DNS-01: uses the stored Cloudflare token; works before DNS changes" off
+    local domain="$1" setting resolved
+    setting="$(gb_global CERT_METHOD auto)"
+    certs_valid_method "$setting" || setting=auto
+    resolved="$(certs_method "$domain" auto)" || resolved=http
+    ui_radiolist "Certificate validation" "How should Let's Encrypt validate $domain? (Settings: $setting)" \
+        auto "Automatic: dns-cloudflare for Cloudflare-managed domains when available, otherwise http (now: $resolved)" "$([[ "$setting" == auto ]] && echo on || echo off)" \
+        http "HTTP-01: DNS must already route $domain to this server" "$([[ "$setting" == http ]] && echo on || echo off)" \
+        dns-cloudflare "DNS-01: uses the stored Cloudflare token; works before DNS changes" "$([[ "$setting" == dns-cloudflare ]] && echo on || echo off)"
 }
 
 # Make sure a contact email exists while dialogs are still possible.
@@ -337,7 +344,7 @@ certs_menu() {
         choice="$(ui_menu "Certificate: $domain" "$(certs_status_line "$domain")" \
             status "Show certificate details" \
             issue "Issue a Let's Encrypt certificate now (staged endpoints stay staged)" \
-            renew "Force a renewal now" \
+            renew "Force a renewal now (Let's Encrypt certificates only)" \
             back "Back")" || return 0
         case "$choice" in
             status)
@@ -351,8 +358,15 @@ certs_menu() {
                 fi
                 method="$(certs_prompt_method "$domain")" || continue
                 certs_email_interactive || continue
-                ui_run "Issue certificate for $domain" certs_issue "$domain" "$method" ;;
-            renew) ui_run "Renew $domain" certs_renew_now "$domain" ;;
+                endpoint_confirm_hand_edits "$domain" || continue
+                ui_run "Issue certificate for $domain" certs_issue "$domain" "$method" || true
+                GB_OVERWRITE_HAND_EDITS=false ;;
+            renew)
+                if ! nginx_cert_exists "$domain"; then
+                    ui_msg "Certificate" "$domain has no Let's Encrypt certificate to renew ($(certs_status_line "$domain")). Issue one first."
+                    continue
+                fi
+                ui_run "Renew $domain" certs_renew_now "$domain" || true ;;
             back) return 0 ;;
         esac
     done
