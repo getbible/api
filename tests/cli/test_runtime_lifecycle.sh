@@ -178,10 +178,12 @@ ep_version_set "$domain" v2 DEFAULT_REFERENCE Ge1:1
 mkdir -p "$GB_SRC/apps"
 printf '{"value": 1}\n' > "$ROOT/tests/python/fixtures/repository/.v3-marker" 2>/dev/null || true
 rm -f "$ROOT/tests/python/fixtures/repository/.v3-marker"
-# shellcheck disable=SC2317 # stubs, called by the type module
+# Stubs called by the type module (newer shellcheck reports SC2329, older SC2317).
+# shellcheck disable=SC2317,SC2329
 rt_kind_versions() { printf 'v2\nv3\n'; }
-# shellcheck disable=SC2317
+# shellcheck disable=SC2317,SC2329
 rt_implementation() { [[ "$2" == v2 || "$2" == v3 ]] && printf 'query\n'; }
+# shellcheck disable=SC2317,SC2329
 rt_manifest_load() {
     local kind="$1" key
     for key in KIND DESCRIPTION PACKAGE WSGI CHECK ENV_PREFIX DEFAULT_VERSION SUPPORTED_VERSIONS ROUTE METHODS MAX_BODY \
