@@ -47,8 +47,16 @@ process that faces the network; everything behind it is isolated.
   or a failed purge aborts the protected transition.
 - nginx is only ever reloaded after `nginx -t`; every replaced file is
   backed up first; hand edits are detected and never silently overwritten.
-- Certificates come from certbot in webroot mode; renewal is certbot's own
-  timer with a reload hook; the rendered vhosts are never edited by certbot.
+- Certificates come from certbot, validated over HTTP-01 in webroot mode or
+  over DNS-01 through the Cloudflare token; renewal is certbot's own timer
+  with a reload hook; the rendered vhosts are never edited by certbot. For
+  DNS-01 the token is handed to certbot in a root-only ini file (0600)
+  generated from `cloudflare.conf`.
+- A staged endpoint never requests a certificate or changes DNS; it serves a
+  self-signed placeholder certificate (root-only key under
+  `/etc/getbible/placeholder-certs`) so its vhost can be verified before the
+  switch, and the placeholder is deleted once the Let's Encrypt certificate
+  is served. Going live is refused until the certificate exists.
 - Rate limits (metered mode) protect the origin from abuse without
   throttling token holders; Cloudflare, when proxied, adds DDoS protection
   and can restrict origin access to its own certificate.

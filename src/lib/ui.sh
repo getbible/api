@@ -7,6 +7,7 @@
 GB_UI_LOADED=1
 
 GB_UI="${GB_UI:-}"
+GB_UI_CAPTURED=false
 GB_UI_BACKTITLE="getBible API $GB_VERSION"
 
 ui_init() {
@@ -238,7 +239,11 @@ ui_run() {
     out="$(gb_tmpdir)/ui-run.$$.$RANDOM.log"
     if [[ "$GB_UI" == whiptail ]]; then
         printf 'Running: %s\n\n' "$title" > "$out"
+        # Dialogs opened while output is captured would be drawn into the
+        # log; callers gather their answers first and check GB_UI_CAPTURED.
+        GB_UI_CAPTURED=true
         "$@" >> "$out" 2>&1 || status=$?
+        GB_UI_CAPTURED=false
         printf '\nExit status: %s\n' "$status" >> "$out"
         ui_textbox "$title" "$out"
     else

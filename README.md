@@ -20,6 +20,12 @@ a server, securely and at high volume.
   retention, analytics with total calls and unique callers, Telegram
   notifications for every change, Cloudflare integration, one-command
   updates after `git pull`, and a guided migration from a legacy setup.
+- **Staged deployments**: an endpoint can be installed and verified on a
+  server its DNS does not point to yet, with a placeholder certificate and
+  no public change; **Go live** later takes it over one domain at a time
+  (certificate, Cloudflare DNS, HTTPS). Certificates come from Let's Encrypt
+  over HTTP-01 or, with the stored Cloudflare token, DNS-01 before any DNS
+  change. This is how a replacement server is built without downtime.
 
 ```sh
 sudo git clone https://github.com/getbible/api.git /opt/getbible/api
@@ -58,6 +64,7 @@ Documentation:
 | Document | Contents |
 | --- | --- |
 | [docs/INSTALL.md](docs/INSTALL.md) | first setup, where things live |
+| [docs/NEW_SERVER.md](docs/NEW_SERVER.md) | rebuilding on a new server: staged endpoints, go-live per domain |
 | [docs/STATIC_ENDPOINTS.md](docs/STATIC_ENDPOINTS.md) | versions, synchronisation, serving |
 | [docs/RUNTIME_ENDPOINTS.md](docs/RUNTIME_ENDPOINTS.md) | the query and search services |
 | [docs/ACCESS_MODES.md](docs/ACCESS_MODES.md) | open, metered, token; budgets; tokens |

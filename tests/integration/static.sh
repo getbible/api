@@ -140,4 +140,18 @@ BEFORE="$(find "$IT_SB/etc/nginx" -type f -exec sha256sum {} + | sort)"
 AFTER="$(find "$IT_SB/etc/nginx" -type f -exec sha256sum {} + | sort)"
 it_check "second apply changes nothing" "same" "$([[ "$BEFORE" == "$AFTER" ]] && echo same || echo different)"
 
+echo "-- a staged endpoint serves its placeholder certificate --"
+# Deployed without going live: no certificate request, no DNS change, but the
+# complete TLS vhost is up so the server can be verified before the switch.
+STAGED="staged.example.test"
+"$IT_ROOT/getbible.sh" deploy static --domain "$STAGED" --version v2 \
+    --repo "file:///nonexistent/repo.git" --extensions json,sha,txt --access open --staged >/dev/null 2>&1
+it_nginx_reload
+it_check "staged recorded"           "LIVE=false"       "$(cat "$IT_SB/etc/getbible/endpoints/$STAGED/endpoint.conf")"
+it_check "no letsencrypt directory"  ""                 "$(ls "$IT_SB/etc/letsencrypt/live/$STAGED" 2>/dev/null)"
+it_check "staged docs page"          "200"              "$(it_status "$STAGED" /)"
+it_check "staged health"             '{"status":"ok"}'  "$(it_body "$STAGED" /healthz)"
+it_check "placeholder certificate"   "$STAGED"          "$(openssl s_client -connect "127.0.0.1:$IT_HTTPS_PORT" -servername "$STAGED" </dev/null 2>/dev/null | openssl x509 -noout -subject)"
+it_check "live endpoint unaffected"  "200"              "$(it_status "$DOMAIN" /v2/kjv/1/1.json)"
+
 it_summary

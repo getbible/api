@@ -17,12 +17,13 @@ the menu. The libraries:
 | `core` | paths (all under `GB_PREFIX` for tests), logging, validators, atomic installs, backups, the ledger of installed hashes |
 | `ui` | whiptail with plain-prompt and non-interactive fallbacks |
 | `config`, `registry` | `KEY=value` files; the endpoint registry under `/etc/getbible/endpoints` |
-| `users`, `systemd`, `certs`, `nginx` | system users and groups; units and timers; certbot; render, stage, test, install, reload, drift |
+| `users`, `systemd`, `certs`, `nginx` | system users and groups; units and timers; certbot over HTTP-01 or DNS-01 through Cloudflare, placeholder certificates for staged endpoints; render, stage, test, install, reload, drift |
 | `access` | access modes, limits, tokens and their nginx snippets |
 | `sync` | sync users, deploy keys, sync units |
 | `platform`, `python` | host capability detection, reviewed standalone CPython distributions and immutable runtime releases |
 | `logs`, `analytics`, `telegram`, `cloudflare` | rotation, reports, notifications, Cloudflare |
 | `docs`, `endpoint`, `update`, `migrate`, `doctor`, `menu` | documentation pages, the endpoint pipeline, update, legacy migration, host checks, the menu tree |
+| `golive` | staged endpoints going live: preflight, certificate first, then the switch, Cloudflare DNS, verification |
 
 Endpoint types live in `src/types/<type>/type.sh` and implement
 `type_<type>_prepare`, `_render_locations`, `_finish`, `_remove`,
@@ -32,6 +33,15 @@ share: protect shared-cache access, prepare a ready candidate, render docs and
 nginx files, snapshot routing, install/test/reload, certificate (two-phase TLS),
 commit activation, retire old workers' backends, Cloudflare and state. Failed
 activation restores prior nginx files and runtime generation state.
+
+An endpoint carries `LIVE=true|false` in its `endpoint.conf` (absent means
+live). A staged endpoint runs the same pipeline without the steps that touch
+its public name: no edge-cache protection, no certificate request, no
+Cloudflare DNS or rules, and its vhost renders TLS with a self-signed
+placeholder under `/etc/getbible/placeholder-certs`. `golive_run` obtains the
+Let's Encrypt certificate first, then sets `LIVE=true`, applies (which now
+includes Cloudflare), records `LIVE_AT` and verifies through the local nginx
+with the real host name. A failed certificate leaves the endpoint staged.
 
 Helper programs in `src/bin/` are installed to `/usr/local/lib/getbible`
 for timers and hooks that run as other users: `getbible-sync`,
