@@ -62,8 +62,9 @@ certificate renewals, log rotations, token changes.
 
 ## 4. Deploy endpoints
 
-Deploy a new endpoint > Static or Runtime. Both walk-throughs ask for the
-domain and then **Go live now?**
+Deploy a new endpoint > Static or Runtime. Both walk-throughs first say
+what they will ask and what happens afterwards, then ask for the domain and
+**Go live now?**
 
 - **Go live now**: the endpoint takes over its name at once. A certificate
   is requested from Let's Encrypt as soon as the HTTP vhost is up, and once
@@ -80,8 +81,12 @@ domain and then **Go live now?**
 The static walk-through then asks for the first version, the git repository,
 branch, source folder, file types, access mode and check schedule, and prints
 the deploy key to add to the repository. The runtime walk-through asks for the
-kind (query or search), the version and the folder that holds the Bible files.
-Details: `STATIC_ENDPOINTS.md`, `RUNTIME_ENDPOINTS.md`.
+kind (query or search), the version and the folder that holds the Bible files,
+and warns when that folder does not hold the version yet. When a Cloudflare
+API token is stored, both ask whether the domain is a Cloudflare zone this
+tool should manage (off, dns or proxied). The menu checks on start that
+nginx, certbot, rsync, git, ssh-keygen and openssl are present and offers to
+install them. Details: `STATIC_ENDPOINTS.md`, `RUNTIME_ENDPOINTS.md`.
 
 Certificates are validated over HTTP-01 through the challenge directory, or
 over DNS-01 through the stored Cloudflare API token when the

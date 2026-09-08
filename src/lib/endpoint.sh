@@ -214,6 +214,21 @@ endpoint_prompt_deploy_mode() {
     printf '%s\n' "$mode"
 }
 
+# Asked at deploy when a Cloudflare token is stored: should this tool manage
+# the domain's DNS records? Recorded only; DNS is applied once the endpoint is
+# live (at go-live for a staged one).
+endpoint_prompt_cloudflare_mode() {
+    local domain="$1"
+    if ! declare -F cf_enabled >/dev/null || ! cf_enabled; then
+        printf 'off\n'
+        return 0
+    fi
+    ui_radiolist "Cloudflare" "Is $domain in a Cloudflare zone this tool should manage? With dns or proxied, its A and AAAA records are pointed at this server when the endpoint is live (at go-live for a staged one) and certificates can be validated over DNS-01 before any DNS change." \
+        off "Not managed here: DNS stays as it is; you change it yourself" on \
+        dns "DNS only (grey cloud): records managed, traffic reaches this server directly" off \
+        proxied "Proxied (orange cloud): records managed plus the API-safe rules and real client addresses" off
+}
+
 endpoint_prompt_access_mode() {
     local default
     default="$(gb_global DEFAULT_ACCESS_MODE metered)"

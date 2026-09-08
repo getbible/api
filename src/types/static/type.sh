@@ -120,7 +120,8 @@ type_static_create() {
 
 # Interactive deployment of a new static endpoint.
 type_static_deploy_interactive() {
-    local domain label repo ref subpath extensions mode schedule selection
+    local domain label repo ref subpath extensions mode schedule selection cfmode
+    ui_msg "New static endpoint" "This walkthrough asks for: the domain, the first version label, the git repository, branch and folder, the file types to serve, the access mode, the check schedule$(cf_enabled 2>/dev/null && printf ', the Cloudflare mode' || true), and whether to go live now or stage the endpoint.\n\nIt then creates the sync user and its deploy key, installs the timers and nginx, and shows the public key to add to the repository. Cancel at any question to stop without changes."
     domain="$(ui_input "New static endpoint" "Domain name (DNS may still point at another server; you choose when it goes live)" "")" || return 1
     gb_valid_domain "$domain" || { ui_msg "Invalid" "That is not a valid domain name."; return 1; }
     ep_exists "$domain" && { ui_msg "Exists" "$domain is already an endpoint."; return 1; }
@@ -139,7 +140,9 @@ type_static_deploy_interactive() {
     mode="$(endpoint_prompt_access_mode)" || return 1
     schedule="$(ui_radiolist "Update check" "How often should the repository be checked for new commits?" \
         weekly "Once a week (default)" on daily "Once a day" off monthly "Once a month" off)" || return 1
+    cfmode="$(endpoint_prompt_cloudflare_mode "$domain")" || return 1
     type_static_create "$domain" "$extensions" "$mode" "$schedule"
+    ep_set "$domain" CLOUDFLARE_MODE "$cfmode"
     ep_version_create "$domain" "$label" "$repo" "$ref" "$subpath"
     type_static_deploy_finish "$domain" "$label"
 }
@@ -188,6 +191,9 @@ type_static_deploy_finish() {
     endpoint_apply "$domain"
     if ep_is_live "$domain"; then
         tg_notify ok "Endpoint deployed: $domain" "Static endpoint with version $label. The first sync runs once the deploy key is authorised on the repository."
+        if ! nginx_cert_exists "$domain"; then
+            ui_msg "No certificate yet" "$domain is live but has no Let's Encrypt certificate, so it answers HTTP only (challenges are served, everything else redirects to HTTPS). Once DNS reaches this server, choose Endpoint > Certificate > Issue."
+        fi
     else
         tg_notify ok "Endpoint staged: $domain" "Static endpoint with version $label, prepared on $(hostname -f 2>/dev/null || hostname). Not live: no certificate or DNS change until 'Go live'."
         ui_msg "Staged" "$domain is staged on this server: synchronisation, nginx and a placeholder certificate are in place, but no certificate was requested and DNS was not changed.\n\nSync its data, verify it, and choose 'Go live' from the main menu or the endpoint menu when it should take over."
@@ -236,7 +242,22 @@ type_static_menu_items() {
         force "Force a full resync of a version" \
         key "Show the deploy key" \
         versions "Manage versions" \
+        filetypes "File types served (json, sha, txt, html)" \
         repoaccess "Test repository access (deploy key and branch)"
+}
+
+type_static_ext_state() { [[ ",$1," == *",$2,"* ]] && printf 'on\n' || printf 'off\n'; }
+
+# type_static_set_extensions DOMAIN LIST: change the served file types; the
+# next sync exports them and nginx serves them.
+type_static_set_extensions() {
+    local domain="$1" extensions="$2" ext
+    IFS=',' read -r -a exts <<< "$extensions"
+    [[ ${#exts[@]} -gt 0 ]] || gb_die "Choose at least one file type."
+    for ext in "${exts[@]}"; do gb_valid_extension "${ext// /}" || gb_die "Invalid file extension: $ext"; done
+    ep_set "$domain" EXTENSIONS "$extensions"
+    endpoint_apply "$domain" || return 1
+    tg_notify info "File types changed: $domain" "Now served: $extensions. The next sync exports them."
 }
 
 type_static_menu_action() {
@@ -251,6 +272,20 @@ type_static_menu_action() {
             ;;
         key) type_static_show_key "$domain" ;;
         versions) type_static_versions_menu "$domain" ;;
+        filetypes)
+            local selection extensions current
+            current="$(ep_get "$domain" EXTENSIONS)"
+            selection="$(ui_checklist "File types" "Which file types may be served? Others are never copied to the server. The change is applied to nginx now and to the files at the next sync." \
+                json "JSON documents" "$(type_static_ext_state "$current" json)" \
+                sha "SHA-1 checksum files" "$(type_static_ext_state "$current" sha)" \
+                txt "Plain text files" "$(type_static_ext_state "$current" txt)" \
+                html "HTML pages" "$(type_static_ext_state "$current" html)")" || return 0
+            extensions="$(printf '%s' "$selection" | tr ' ' ',' | sed 's/,,*/,/g; s/^,//; s/,$//')"
+            [[ -n "$extensions" ]] || { ui_msg "Invalid" "Choose at least one file type."; return 0; }
+            endpoint_confirm_hand_edits "$domain" || return 0
+            ui_run "File types for $domain" type_static_set_extensions "$domain" "$extensions" || true
+            GB_OVERWRITE_HAND_EDITS=false
+            ;;
         repoaccess)
             label="$(type_static_pick_version "$domain")" || return 0
             ui_run "Repository access" sync_test_access "$domain" "$(ep_version_get "$domain" "$label" REPO_URL)" "$(ep_version_get "$domain" "$label" REPO_REF)" || true

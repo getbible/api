@@ -298,6 +298,15 @@ rm -f "$SB/etc/nginx/sites-available/$D10.conf" "$SB/etc/nginx/sites-enabled/$D1
 check "two failures counted"      "2 check(s) failed"           "$("$GB" verify "$D10" 2>&1 || true)"
 check "verify exit status"        "1"                           "$("$GB" verify "$D10" >/dev/null 2>&1; echo $?)"
 
+echo "-- file types of a static endpoint --"
+"$GB" filetypes "$D" json,txt >/dev/null 2>&1
+check "file types recorded"       "EXTENSIONS=json,txt"         "$(conf "$D")"
+check "file types rendered"       '\.(json|txt)$'               "$(site "$D")"
+check "sha location dropped"      ""                            "$(grep -c '\.sha' "$SB/etc/nginx/sites-available/$D.conf" | sed 's/^0$//')"
+check "sync unit follows"         "GB_SYNC_EXTENSIONS=json,txt" "$(cat "$SB/etc/systemd/system/getbible-sync-staged_example_test-v2.service")"
+check "bad file type rejected"    "Invalid file extension"      "$("$GB" filetypes "$D" 'json,../x' 2>&1 || true)"
+"$GB" filetypes "$D" json,sha,txt >/dev/null 2>&1
+
 echo "-- removal cleans up --"
 D5=fifth.example.test
 "$GB" deploy static --domain "$D5" --version v1 --repo git@github.com:getbible/v1_scripture.git --staged >/dev/null 2>&1
