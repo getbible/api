@@ -158,12 +158,29 @@ nginx_render_endpoint() {
     local http2_native=false http2_legacy=false
     if [[ "$NG_HTTP2_NATIVE" == true ]]; then http2_native=true; else http2_legacy=true; fi
 
+    # The pages a domain publishes besides its data (pages.sh): where each
+    # lives decides which directory nginx serves it from.
+    local domain_page=false domain_page_root="" domain_page_file="" favicon=false favicon_mime=""
+    local versions_json=false domain_openapi=false domain_openapi_root="" domain_openapi_file=""
+    local -a page
+    if declare -F pages_domain_docs_location >/dev/null; then
+        mapfile -t page < <(pages_domain_docs_location "$domain")
+        [[ ${#page[@]} -ne 2 ]] || { domain_page=true; domain_page_root="${page[0]}"; domain_page_file="${page[1]}"; }
+        mapfile -t page < <(pages_domain_openapi_location "$domain")
+        [[ ${#page[@]} -ne 2 ]] || { domain_openapi=true; domain_openapi_root="${page[0]}"; domain_openapi_file="${page[1]}"; }
+        if pages_favicon_active "$domain"; then favicon=true; favicon_mime="$(pages_favicon_mime "$domain")"; fi
+        if pages_versions_active "$domain"; then versions_json=true; fi
+    fi
+
     gb_render "$GB_NGINX_SRC/site.conf.tmpl" "$stage/sites-available/$domain.conf" \
         "DOMAIN=$domain" "SLUG=$slug" "TYPE=$EP_TYPE" "KIND=$EP_KIND" "TLS=$tls" \
         "IPV6=$NG_IPV6" "HTTP2_NATIVE=$http2_native" "HTTP2_LEGACY=$http2_legacy" \
         "CERT_DIR=$cert_dir" "NGINX_GB_DIR=$GB_NGINX_GB" \
         "ORIGIN_PULLS=$origin_pulls" "REAL_IP=$real_ip" "LOG_DIR=$(ep_log_dir "$domain")" \
         "WWW_DIR=$(ep_www_dir "$domain")" "METHODS_REGEX=$methods_regex" "REJECT_ARGS=$reject_args" \
+        "DOMAIN_PAGE=$domain_page" "DOMAIN_PAGE_ROOT=$domain_page_root" "DOMAIN_PAGE_FILE=$domain_page_file" \
+        "FAVICON=$favicon" "FAVICON_MIME=$favicon_mime" "VERSIONS_JSON=$versions_json" \
+        "DOMAIN_OPENAPI=$domain_openapi" "DOMAIN_OPENAPI_ROOT=$domain_openapi_root" "DOMAIN_OPENAPI_FILE=$domain_openapi_file" \
         "LOCATIONS=$(cat "$locations")" || return 1
 
     gb_render "$GB_NGINX_SRC/endpoint-http.conf.tmpl" "$stage/conf.d/getbible-ep-$slug.conf" \

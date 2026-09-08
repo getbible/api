@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# getbible.sh - deploy and maintain getBible API endpoints on this server.
+# getbible.sh - deploy and maintain getBible API domains on this server.
 #
 #   sudo ./getbible.sh              interactive menu
 #   sudo ./getbible.sh <command>    non-interactive commands (see --help)
 #
 # Everything this script installs is rendered from src/ and recorded, so a
-# later `git pull` followed by `getbible.sh update` brings every endpoint to
+# later `git pull` followed by `getbible.sh update` brings every domain to
 # the current templates without touching hand-managed files silently.
 
 set -Eeuo pipefail
@@ -14,7 +14,7 @@ GB_ARGS=("$@")
 GB_REPO_DIR="$(cd -- "$(dirname -- "$GB_SELF")" && pwd -P)"
 export GB_REPO_DIR
 
-for lib in core platform ui config registry users telegram nginx certs systemd logs access sync python docs endpoint; do
+for lib in core platform ui config registry users telegram nginx certs systemd logs access sync python docs pages endpoint; do
     # shellcheck source=/dev/null
     source "$GB_REPO_DIR/src/lib/$lib.sh"
 done
@@ -25,47 +25,67 @@ done
 
 usage() {
     cat <<'USAGE'
-getbible.sh - getBible API endpoint manager
+getbible.sh - getBible API domain manager
 
 Usage: getbible.sh [command] [options]
 Without a command an interactive menu opens.
 
-Endpoints
-  list                                   list endpoints
-  status [DOMAIN]                        show status of one or all endpoints
-  deploy static --domain D --version vN --repo URL [--ref master] [--path .]
+A domain is a host name: one vhost, one certificate, one go-live. Its
+endpoints are its version folders (https://D/v2/), or the domain root itself
+when it was set up without version folders (the label "root").
+
+Domains
+  list                                   list domains
+  status [DOMAIN]                        show status of one or all domains
+  deploy static --domain D --version vN|root --repo URL [--ref master] [--path .]
                 [--extensions json,sha,txt] [--access open|metered|token]
                 [--schedule daily|weekly|monthly] [--staged|--live]
   deploy runtime --domain D --kind query|search [--version v2]
                 [--repository PATH] [--access MODE] [--warm kjv] [--python auto|VERSION]
                 [--staged|--live]
   go-live DOMAIN [--cert auto|http|dns-cloudflare]
-                                         take a staged endpoint live: certificate,
+                                         take a staged domain live: certificate,
                                          Cloudflare DNS and rules, HTTPS, verification
   verify DOMAIN                          check this server end to end for a domain
-  stage DOMAIN                           stage a live endpoint again (stop taking over its
+  stage DOMAIN                           stage a live domain again (stop taking over its
                                          name; DNS is not changed), for rolling back
   cert DOMAIN status|issue [--method M]|renew
                                          certificate details; issue one now (a staged
-                                         endpoint stays staged); force a renewal
-  apply DOMAIN                           re-render and re-install one endpoint
+                                         domain stays staged); force a renewal
+  apply DOMAIN                           re-render and re-install one domain
   update [DOMAIN]                        apply reviewed code and configuration
   runtime versions                       list reviewed managed Python versions
   runtime DOMAIN update [--python VERSION] update packages and managed Python
   runtime DOMAIN redeploy                 rebuild using the selected Python
   runtime DOMAIN rollback                 restore the previous healthy deployment
   runtime DOMAIN set KEY VALUE            validate and apply one runtime setting
-  remove DOMAIN [--purge]                stop serving an endpoint (purge deletes data)
-  filetypes DOMAIN json,sha,txt          change the file types a static endpoint serves
+  remove DOMAIN [--purge]                stop serving a domain (purge deletes data)
+  filetypes DOMAIN json,sha,txt          change the file types a static domain serves
   version add DOMAIN vN --repo URL [--ref master] [--path .]
-  version change DOMAIN vN [--repo URL] [--ref REF] [--path P]
-                                         point a version elsewhere, keeping its releases
-  version remove DOMAIN vN
-  sync DOMAIN [vN] [--force]             run the synchronisation now
+                                         add a version folder (an endpoint) to a static domain
+  version change DOMAIN vN|root [--repo URL] [--ref REF] [--path P]
+                                         point an endpoint elsewhere, keeping its releases
+  version remove DOMAIN vN|root
+  sync DOMAIN [vN|root] [--force]        run the synchronisation now
   access DOMAIN open|metered|token       change the access mode
   limits DOMAIN [--rate N] [--burst N] [--hour N] [--day N] [--conn N]
   token DOMAIN add LABEL [--expires YYYY-MM-DD] | list | revoke ID
-  docs DOMAIN                            re-render the documentation page
+
+Pages and OpenAPI (every domain page, endpoint page and document is public)
+  pages DOMAIN [show]                    where each page, OpenAPI document and the favicon
+                                         come from, and whether the file is present
+  pages DOMAIN docs [ENDPOINT] generated|custom|edit|from FILE|repository [PATH]|none
+                                         the domain page (no ENDPOINT) or an endpoint page:
+                                         let the tool write it, take it over (custom, edit,
+                                         from a file on this server), serve the repository's
+                                         file (static; PATH inside the version folder), or 404
+  pages DOMAIN openapi ENDPOINT generated|repository [PATH]|custom|edit|from FILE|none
+                                         the endpoint's OpenAPI document (generated: runtime
+                                         only; repository: static only)
+  pages DOMAIN favicon default|none|FILE this domain's favicon (default: the system favicon)
+  pages DOMAIN publish                   rewrite the generated pages and versions.json
+  favicon [FILE|none]                    show or set the favicon every domain serves by default
+  docs DOMAIN                            same as pages DOMAIN publish
 
 Observability
   logs DOMAIN [access|error|app] [--lines N]
@@ -125,10 +145,10 @@ cmd_deploy() {
 
 cmd_version() {
     local action="${1:-}" domain="${2:-}" label="${3:-}" repo="" ref="master" subpath="."
-    shift 3 || gb_die "version add|change|remove DOMAIN vN"
+    shift 3 || gb_die "version add|change|remove DOMAIN vN|root"
     gb_system_init
-    ep_exists "$domain" || gb_die "Unknown endpoint: $domain"
-    [[ "$(ep_get "$domain" TYPE)" == static ]] || gb_die "$domain is not a static endpoint"
+    ep_exists "$domain" || gb_die "Unknown domain: $domain"
+    [[ "$(ep_get "$domain" TYPE)" == static ]] || gb_die "$domain is not a static domain"
     endpoint_source_type static
     case "$action" in
         add)
@@ -157,25 +177,25 @@ cmd_version() {
             type_static_change_version "$domain" "$label" "$repo" "$ref" "$subpath"
             ;;
         remove) type_static_remove_version "$domain" "$label" ;;
-        *) gb_die "version add|change|remove DOMAIN vN" ;;
+        *) gb_die "version add|change|remove DOMAIN vN|root" ;;
     esac
 }
 
 cmd_sync() {
     local domain="${1:-}" label="" force=false
-    [[ -n "$domain" ]] || gb_die "sync DOMAIN [vN] [--force]"
+    [[ -n "$domain" ]] || gb_die "sync DOMAIN [vN|root] [--force]"
     shift || true
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --force) force=true ;;
-            v[0-9]*) [[ -z "$label" ]] || gb_die "Only one version may be synced at a time"; label="$1" ;;
+            v[0-9]*|root) [[ -z "$label" ]] || gb_die "Only one endpoint may be synced at a time"; label="$1" ;;
             *) gb_die "Unknown sync option: $1" ;;
         esac
         shift
     done
     gb_system_init
-    ep_exists "$domain" || gb_die "Unknown endpoint: $domain"
-    [[ "$(ep_get "$domain" TYPE)" == static ]] || gb_die "$domain is not a static endpoint"
+    ep_exists "$domain" || gb_die "Unknown domain: $domain"
+    [[ "$(ep_get "$domain" TYPE)" == static ]] || gb_die "$domain is not a static domain"
     if [[ -z "$label" ]]; then
         while read -r label; do
             [[ -n "$label" ]] || continue
@@ -192,8 +212,8 @@ cmd_runtime() {
     [[ -n "$domain" && -n "$action" ]] || gb_die "runtime DOMAIN update|redeploy|rollback|set KEY VALUE"
     shift 2
     gb_system_init || return 1
-    ep_exists "$domain" || gb_die "Unknown endpoint: $domain"
-    [[ "$(ep_get "$domain" TYPE)" == runtime ]] || gb_die "$domain is not a runtime endpoint"
+    ep_exists "$domain" || gb_die "Unknown domain: $domain"
+    [[ "$(ep_get "$domain" TYPE)" == runtime ]] || gb_die "$domain is not a runtime domain"
     endpoint_source_type runtime
     case "$action" in
         update) rt_update "$domain" "$@" ;;
@@ -219,7 +239,7 @@ cmd_limits() {
         esac
     done
     gb_system_init
-    ep_exists "$domain" || gb_die "Unknown endpoint: $domain"
+    ep_exists "$domain" || gb_die "Unknown domain: $domain"
     endpoint_set_limits "$domain" "$rate" "$burst" "$hour" "$day" "$conn"
 }
 
@@ -228,7 +248,7 @@ cmd_token() {
     [[ -n "$domain" && -n "$action" ]] || gb_die "token DOMAIN add LABEL [--expires DATE] | list | revoke ID"
     shift 2
     gb_system_init
-    ep_exists "$domain" || gb_die "Unknown endpoint: $domain"
+    ep_exists "$domain" || gb_die "Unknown domain: $domain"
     case "$action" in
         add)
             local label="${1:-}" expires=""
@@ -258,7 +278,7 @@ cmd_logs() {
     esac
     [[ "${3:-}" == --lines ]] && lines="${4:-200}"
     [[ "$which" == --lines ]] && { lines="${3:-200}"; which=access; }
-    ep_exists "$domain" || gb_die "Unknown endpoint: $domain"
+    ep_exists "$domain" || gb_die "Unknown domain: $domain"
     case "$which" in
         access|error) logs_tail "$(ep_log_dir "$domain")/$which.log" "$lines" ;;
         app) logs_tail "$(ep_log_dir "$domain")/app/app.log" "$lines" ;;
@@ -362,14 +382,22 @@ main() {
         filetypes)
             gb_system_init
             ep_exists "${1:-}" || gb_die "filetypes DOMAIN json,sha,txt"
-            [[ "$(ep_get "$1" TYPE)" == static ]] || gb_die "$1 is not a static endpoint"
+            [[ "$(ep_get "$1" TYPE)" == static ]] || gb_die "$1 is not a static domain"
             endpoint_source_type static
             type_static_set_extensions "$1" "${2:?file types}" ;;
         sync) cmd_sync "$@" ;;
         access) gb_system_init; endpoint_set_access "${1:?domain}" "${2:?mode}" ;;
         limits) cmd_limits "$@" ;;
         token) cmd_token "$@" ;;
-        docs) gb_system_init; ep_load "${1:?domain}"; endpoint_source_type "$EP_TYPE"; docs_render "$1" ;;
+        pages)
+            # "publish" is what the sync units run after every successful sync:
+            # it only rewrites generated files, so it takes no management lock.
+            if [[ "${2:-}" == publish ]]; then gb_require_root; else gb_system_init; fi
+            pages_cli "$@" ;;
+        favicon)
+            gb_system_init
+            if [[ -z "${1:-}" ]]; then favicon_status_text; else favicon_set_system "$1" && endpoint_apply_all; fi ;;
+        docs) gb_require_root; pages_cli "${1:?domain}" publish ;;
         logs) cmd_logs "$@" ;;
         analytics) analytics_cli "$@" ;;
         telegram)

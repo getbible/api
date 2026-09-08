@@ -183,9 +183,9 @@ certs_obtain() {
         return 0
     fi
     if [[ "$method" == http ]]; then
-        gb_warn "certbot failed for $domain. Check that DNS points here and port 80 is reachable, then retry from Endpoint > Certificate (or go live again)."
+        gb_warn "certbot failed for $domain. Check that DNS points here and port 80 is reachable, then retry from Domain > Certificate (or go live again)."
     else
-        gb_warn "certbot failed for $domain. Check that the Cloudflare token may edit DNS for this zone, then retry from Endpoint > Certificate (or go live again)."
+        gb_warn "certbot failed for $domain. Check that the Cloudflare token may edit DNS for this zone, then retry from Domain > Certificate (or go live again)."
     fi
     tg_notify fail "Certificate failed" "certbot ($method) could not issue a certificate for $domain."
     return 1

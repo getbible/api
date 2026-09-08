@@ -41,6 +41,14 @@ check "sync timer weekly"        "OnCalendar=weekly"       "$(cat "$SB/etc/syste
 check "logrotate rendered"       "size 1G"                 "$(cat "$SB/etc/getbible/logrotate.conf")"
 check "docs page rendered"       "<h1>$D</h1>"             "$(cat "$SB/var/www/getbible/$D/index.html")"
 check "docs list version"        "https://$D/v2/"          "$(cat "$SB/var/www/getbible/$D/index.html")"
+check "endpoint page rendered"   "<h1>$D <code>/v2/</code></h1>" "$(cat "$SB/var/www/getbible/$D/v2/index.html")"
+check "endpoint page base url"   "https://$D/v2/path/to/document.json" "$(cat "$SB/var/www/getbible/$D/v2/index.html")"
+check "versions.json empty"      '"endpoints": []'         "$(cat "$SB/var/www/getbible/$D/versions.json")"
+check "no favicon without one"   ""                        "$(grep -c 'favicon' "$SB/var/www/getbible/$D/index.html" | sed 's/^0$//')"
+check "openapi from repository"  "GB_SYNC_EXTRA_FILES=openapi.json" "$(cat "$SB/etc/systemd/system/getbible-sync-static_example_test-v2.service")"
+check "sync refreshes pages"     "ExecStartPost=-+$ROOT/getbible.sh pages $D publish --yes" "$(cat "$SB/etc/systemd/system/getbible-sync-static_example_test-v2.service")"
+check "status names endpoints"   "Endpoints   : v2"        "$("$GB" status "$D" 2>/dev/null)"
+check "status lists pages"       "OpenAPI /v2/openapi.json     repository" "$("$GB" status "$D" 2>/dev/null)"
 check "tools installed"          "getbible-sync"           "$(ls "$SB/usr/local/lib/getbible/")"
 check "aio threads on 1.26"      "aio                threads;" "$(cat "$SB/etc/nginx/getbible/$D/server.conf")"
 # Implicit parents must stay traversable whichever coreutils created them.
@@ -53,6 +61,67 @@ check "tls rendered"             "listen [::]:443 ssl;"    "$(cat "$SITE")"
 check "http2 native on 1.26"     "http2 on;"               "$(cat "$SITE")"
 check "version location"         "location ^~ /v2/"        "$(cat "$SITE")"
 check "json extension regex"     '\.(json|txt)$'           "$(cat "$SITE")"
+check "endpoint page location"   "location = /v2/ {"       "$(cat "$SITE")"
+check "endpoint page file"       "try_files /v2/index.html =404;" "$(cat "$SITE")"
+check "version redirect"         "return 301 /v2/;"        "$(cat "$SITE")"
+check "openapi from the tree"    "try_files /v2/openapi.json =404;" "$(cat "$SITE")"
+check "versions.json location"   "location = /versions.json" "$(cat "$SITE")"
+check "no favicon location yet"  ""                        "$(grep -c 'location = /favicon.ico' "$SITE" | sed 's/^0$//')"
+
+echo "-- pages, OpenAPI and favicon --"
+printf '\x00\x00\x01\x00' > "$SB/icon.ico"
+"$GB" favicon "$SB/icon.ico" >/dev/null 2>&1
+check "system favicon recorded"  "FAVICON_MIME=image/vnd.microsoft.icon" "$(cat "$SB/etc/getbible/getbible.conf")"
+check "system favicon shown"     "System favicon: $SB/etc/getbible/favicon.ico" "$("$GB" favicon 2>/dev/null)"
+check "favicon published"        "same"                    "$(cmp -s "$SB/icon.ico" "$SB/var/www/getbible/$D/favicon.ico" && echo same || echo different)"
+check "favicon location"         "default_type image/vnd.microsoft.icon;" "$(cat "$SITE")"
+check "pages link the favicon"   '<link rel="icon" href="/favicon.ico">' "$(cat "$SB/var/www/getbible/$D/v2/index.html")"
+"$GB" pages "$D" favicon none >/dev/null 2>&1
+check "domain favicon none"      "FAVICON_SOURCE=none"     "$(cat "$SB/etc/getbible/endpoints/$D/endpoint.conf")"
+check "favicon file removed"     ""                        "$(ls "$SB/var/www/getbible/$D/favicon.ico" 2>/dev/null)"
+check "favicon location gone"    ""                        "$(grep -c 'location = /favicon.ico' "$SITE" | sed 's/^0$//')"
+"$GB" pages "$D" favicon default >/dev/null 2>&1
+check "domain favicon default"   "default_type image/vnd.microsoft.icon;" "$(cat "$SITE")"
+"$GB" pages "$D" docs v2 custom >/dev/null 2>&1
+check "page taken over"          "DOCS_SOURCE=custom"      "$(cat "$SB/etc/getbible/endpoints/$D/versions/v2.conf")"
+printf '<!-- maintained by hand -->\n' >> "$SB/var/www/getbible/$D/v2/index.html"
+"$GB" apply "$D" >/dev/null 2>&1
+check "custom page kept"         "maintained by hand"      "$(cat "$SB/var/www/getbible/$D/v2/index.html")"
+check "status says custom"       "Page /v2/                    custom (maintained by you, present)" "$("$GB" pages "$D" show 2>/dev/null)"
+"$GB" pages "$D" docs v2 generated >/dev/null 2>&1
+check "page handed back"         ""                        "$(grep -c 'maintained by hand' "$SB/var/www/getbible/$D/v2/index.html" | sed 's/^0$//')"
+printf '<html>domain</html>\n' > "$SB/domain.html"
+"$GB" pages "$D" docs from "$SB/domain.html" >/dev/null 2>&1
+check "domain page copied"       "<html>domain</html>"     "$(cat "$SB/var/www/getbible/$D/index.html")"
+check "domain page custom"       "DOCS_SOURCE=custom"      "$(cat "$SB/etc/getbible/endpoints/$D/endpoint.conf")"
+"$GB" pages "$D" docs generated >/dev/null 2>&1
+check "domain page generated"    "<h1>$D</h1>"             "$(cat "$SB/var/www/getbible/$D/index.html")"
+"$GB" pages "$D" docs v2 repository docs/index.html >/dev/null 2>&1
+check "repository page recorded" "DOCS_REPO_PATH=docs/index.html" "$(cat "$SB/etc/getbible/endpoints/$D/versions/v2.conf")"
+check "repository page served"   "try_files /v2/docs/index.html =404;" "$(cat "$SITE")"
+check "repository page exported" "GB_SYNC_EXTRA_FILES=docs/index.html,openapi.json" "$(cat "$SB/etc/systemd/system/getbible-sync-static_example_test-v2.service")"
+"$GB" pages "$D" openapi v2 repository api/openapi.json >/dev/null 2>&1
+check "openapi path recorded"    "OPENAPI_REPO_PATH=api/openapi.json" "$(cat "$SB/etc/getbible/endpoints/$D/versions/v2.conf")"
+check "openapi path served"      "try_files /v2/api/openapi.json =404;" "$(cat "$SITE")"
+mkdir -p "$SB/srv/getbible/$D/releases/v2/r1/api" && printf '{"openapi":"3.1.0"}\n' > "$SB/srv/getbible/$D/releases/v2/r1/api/openapi.json"
+ln -sfn "releases/v2/r1" "$SB/srv/getbible/$D/v2"
+"$GB" pages "$D" publish >/dev/null 2>&1
+check "versions.json lists v2"   '"openapi": "https://'"$D"'/v2/openapi.json"' "$(cat "$SB/var/www/getbible/$D/versions.json")"
+check "domain page links openapi" '<a href="/v2/openapi.json">openapi.json</a>' "$(cat "$SB/var/www/getbible/$D/index.html")"
+"$GB" pages "$D" openapi v2 from "$SB/domain.html" >/dev/null 2>&1 && echo "FAIL: invalid JSON accepted as OpenAPI"
+printf '{"openapi":"3.1.0","info":{"title":"mine","version":"v2"},"paths":{}}\n' > "$SB/mine.json"
+"$GB" pages "$D" openapi v2 from "$SB/mine.json" >/dev/null 2>&1
+check "openapi copied"           '"title":"mine"'          "$(cat "$SB/var/www/getbible/$D/v2/openapi.json")"
+check "openapi custom served"    "try_files /v2/openapi.json =404;" "$(cat "$SITE")"
+"$GB" pages "$D" docs v2 none >/dev/null 2>&1
+check "page none: no location"   ""                        "$(grep -c 'location = /v2/ {' "$SITE" | sed 's/^0$//')"
+check "page none in status"      "Page /v2/                    none (answers 404)" "$("$GB" pages "$D" show 2>/dev/null)"
+"$GB" pages "$D" docs v2 generated >/dev/null 2>&1
+check "static cannot generate openapi" "Only runtime endpoints" "$("$GB" pages "$D" openapi v2 generated 2>&1 || true)"
+check "repository path checked"  "Invalid repository path" "$("$GB" pages "$D" docs v2 repository '../secret' 2>&1 || true)"
+check "unknown page action"      "Actions:"                "$("$GB" pages "$D" docs v2 bogus 2>&1 || true)"
+check "domain page not none"     "generated or custom"     "$("$GB" pages "$D" docs none 2>&1 || true)"
+check "favicon type checked"     "Favicons are"            "$("$GB" pages "$D" favicon "$SB/domain.html" 2>&1 || true)"
 
 echo "-- tokens and access --"
 TOKEN_JSON="$("$GB" token "$D" add "cli test" 2>/dev/null)"
@@ -91,6 +160,35 @@ check "change rejects bad url"   "Invalid repository"      "$("$GB" version chan
 "$GB" version remove "$D" v1 >/dev/null 2>&1
 check "v1 removed"               ""                        "$(grep -c 'location ^~ /v1/' "$SITE" | sed 's/^0$//')"
 
+echo "-- a domain whose only endpoint is its root --"
+R=root.example.test
+"$GB" deploy static --domain "$R" --version root --repo git@github.com:getbible/scripture.git --extensions json,sha,txt,html >/dev/null 2>&1 || echo "root deploy failed"
+mkdir -p "$SB/etc/letsencrypt/live/$R" && touch "$SB/etc/letsencrypt/live/$R/fullchain.pem" "$SB/etc/letsencrypt/live/$R/privkey.pem"
+"$GB" apply "$R" >/dev/null 2>&1
+RSITE="$SB/etc/nginx/sites-available/$R.conf"
+check "root endpoint recorded"   "LABEL=root"              "$(cat "$SB/etc/getbible/endpoints/$R/versions/root.conf")"
+check "root tree served at /"    "location ^~ / {"         "$(cat "$RSITE")"
+check "root tree directory"      "root $SB/srv/getbible/$R/root;" "$(cat "$RSITE")"
+check "root regex"               '^/.+\.(json|txt)$'       "$(cat "$RSITE")"
+check "root html regex"          '^/.+\.html$'             "$(cat "$RSITE")"
+check "no catch-all 404"         ""                        "$(sed -n '/listen 443/,$p' "$RSITE" | grep -c '^    location / {' | sed 's/^0$//')"
+check "root page at /"           "try_files /index.html =404;" "$(cat "$RSITE")"
+check "root openapi at /"        "try_files /root/openapi.json =404;" "$(cat "$RSITE")"
+check "no versions.json"         ""                        "$(grep -c 'versions.json' "$RSITE" | sed 's/^0$//')"
+check "root page rendered"       "<h1>$R</h1>"             "$(cat "$SB/var/www/getbible/$R/index.html")"
+check "root page base url"       "https://$R/path/to/document.json" "$(cat "$SB/var/www/getbible/$R/index.html")"
+check "no versions.json file"    ""                        "$(ls "$SB/var/www/getbible/$R/versions.json" 2>/dev/null)"
+check "root sync unit"           "GB_SYNC_VERSION=root"    "$(cat "$SB/etc/systemd/system/getbible-sync-root_example_test-root.service")"
+check "status shows domain root" "Endpoints   : (domain root)" "$("$GB" status "$R" 2>/dev/null)"
+check "overview shows root"      "endpoints: domain root"  "$("$GB" status 2>/dev/null)"
+check "no folders next to root"  "remove that endpoint before adding version folders" "$("$GB" version add "$R" v1 --repo git@github.com:getbible/v1.git 2>&1 || true)"
+check "no root next to folders"  "its root cannot become an endpoint" "$("$GB" version add "$D" root --repo git@github.com:getbible/v1.git 2>&1 || true)"
+"$GB" pages "$R" docs root repository docs/index.html >/dev/null 2>&1
+check "root repository page"     "try_files /root/docs/index.html =404;" "$(cat "$RSITE")"
+"$GB" pages "$R" docs root generated >/dev/null 2>&1
+"$GB" remove "$R" --purge >/dev/null 2>&1
+check "root domain removed"      ""                        "$(ls "$SB/etc/nginx/sites-available/$R.conf" 2>/dev/null)"
+
 echo "-- validation --"
 check "bad domain rejected"      "Invalid domain"          "$("$GB" deploy static --domain 'bad domain' --version v2 --repo git@x:y.git 2>&1 || true)"
 check "bad version rejected"     "Invalid version"         "$("$GB" deploy static --domain ok.example.test --version two --repo git@x:y.git 2>&1 || true)"
@@ -122,13 +220,19 @@ if command -v nginx >/dev/null; then
     unset GB_NGINX_FAKE_VERSION GB_NGINX_FAKE_BROTLI
     export GB_NGINX_FAKE_IPV6=false
     "$GB" deploy static --domain "$D" --version v2 --repo git@github.com:getbible/v2_scripture.git >/dev/null 2>&1
-    mkdir -p "$SB/etc/letsencrypt/live/$D"
-    openssl req -x509 -newkey rsa:2048 -nodes -days 1 -keyout "$SB/etc/letsencrypt/live/$D/privkey.pem" -out "$SB/etc/letsencrypt/live/$D/fullchain.pem" -subj "/CN=$D" 2>/dev/null
+    "$GB" deploy static --domain "$R" --version root --repo git@github.com:getbible/scripture.git --extensions json,sha,txt,html >/dev/null 2>&1
+    for domain in "$D" "$R"; do
+        mkdir -p "$SB/etc/letsencrypt/live/$domain"
+        openssl req -x509 -newkey rsa:2048 -nodes -days 1 -keyout "$SB/etc/letsencrypt/live/$domain/privkey.pem" -out "$SB/etc/letsencrypt/live/$domain/fullchain.pem" -subj "/CN=$domain" 2>/dev/null
+    done
+    "$GB" pages "$D" docs v2 repository docs/index.html >/dev/null 2>&1
     "$GB" apply "$D" >/dev/null 2>&1
+    "$GB" apply "$R" >/dev/null 2>&1
     mkdir -p "$SB/etc/nginx/logs" "$SB/var/cache/nginx/getbible"
     # nginx -t binds every listener; move them to high ports so the test
     # needs no privileges.
     sed -i -e 's/listen 80;/listen 127.0.0.1:18180;/' -e 's/listen 443 ssl\(.*\);/listen 127.0.0.1:18543 ssl\1;/' "$SB/etc/nginx/sites-available/$D.conf"
+    sed -i -e 's/listen 80;/listen 127.0.0.1:18181;/' -e 's/listen 443 ssl\(.*\);/listen 127.0.0.1:18544 ssl\1;/' "$SB/etc/nginx/sites-available/$R.conf"
     cat > "$SB/etc/nginx/nginx-test.conf" <<EOF
 pid $SB/nginx.pid;
 error_log stderr warn;

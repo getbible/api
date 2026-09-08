@@ -148,6 +148,38 @@ class StaticSyncTest(unittest.TestCase):
         self.assertEqual((self.live / ".revision").read_text().strip(), revision)
         self.assertEqual(json.loads((self.live / "doc.json").read_text())["value"], "new origin")
 
+    def test_extra_files_are_exported_by_path_whatever_their_type(self) -> None:
+        # The endpoint page and OpenAPI document may come from the repository
+        # even when .html is not a served type; nothing else of that type,
+        # no dotfile and no path with dot segments gets through.
+        (self.repo / "docs").mkdir()
+        (self.repo / "docs" / "index.html").write_text("<h1>docs</h1>")
+        (self.repo / "docs" / "other.html").write_text("<h1>other</h1>")
+        (self.repo / "openapi.json").write_text('{"openapi":"3.1.0"}')
+        (self.repo / ".hidden.html").write_text("secret")
+        self.commit()
+        self.sync(GB_SYNC_EXTRA_FILES="docs/index.html,openapi.json")
+        self.assertEqual((self.live / "docs" / "index.html").read_text(), "<h1>docs</h1>")
+        self.assertTrue((self.live / "openapi.json").exists())
+        self.assertFalse((self.live / "docs" / "other.html").exists())
+        self.assertFalse((self.live / ".hidden.html").exists())
+        # Changing the extra files republishes the same commit.
+        self.sync(GB_SYNC_EXTRA_FILES="openapi.json")
+        self.assertFalse((self.live / "docs").exists())
+        self.assertTrue((self.live / "openapi.json").exists())
+        result = self.sync(success=False, GB_SYNC_EXTRA_FILES="../escape.html")
+        self.assertIn("invalid extra file path", result.stdout)
+        result = self.sync(success=False, GB_SYNC_EXTRA_FILES=".git/config")
+        self.assertIn("invalid extra file path", result.stdout)
+
+    def test_root_label_publishes_the_tree_at_the_domain_root(self) -> None:
+        self.sync(GB_SYNC_VERSION="root")
+        live = self.data / "root"
+        self.assertEqual(json.loads((live / "doc.json").read_text()), {"value": "first"})
+        self.assertTrue((self.data / "releases" / "root").is_dir())
+        result = self.sync(success=False, GB_SYNC_VERSION="latest")
+        self.assertIn("Invalid version label", result.stderr)
+
     def test_missing_verifier_and_symlink_escape_leave_live_untouched(self) -> None:
         self.sync()
         before = self.live.resolve()

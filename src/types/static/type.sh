@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Static endpoint type: a domain serving one or more versioned trees of files
-# that are synchronised from git repositories by isolated sync users.
+# Static domain type: a domain serving one or more trees of files that are
+# synchronised from git repositories by isolated sync users. Each tree is an
+# endpoint: a version folder (/v2/), or the domain root itself when the domain
+# was set up without version folders (the label "root").
 
 [[ -n "${GB_TYPE_STATIC_LOADED:-}" ]] && return 0
 GB_TYPE_STATIC_LOADED=1
@@ -20,9 +22,13 @@ type_static_prepare() {
     done < <(ep_versions "$domain")
 }
 
-# nginx locations: one ^~ block per enabled version plus the fallbacks.
+# nginx locations: for every enabled endpoint the exact locations of its page
+# and OpenAPI document, then one ^~ block for its tree, then the fallbacks. A
+# root endpoint's tree is served at / and its page and document come from the
+# domain-level blocks of the vhost.
 type_static_render_locations() {
-    local output="$1" label piece data_ext has_sha=false has_html=false ext
+    local output="$1" label piece data_ext has_sha=false has_html=false ext prefix tree_root is_root root_endpoint=false
+    local -a exts page openapi
     TYPE_METHODS_REGEX="GET|HEAD|OPTIONS"
     TYPE_REJECT_ARGS=true
     TYPE_MAX_BODY=1k
@@ -42,15 +48,24 @@ type_static_render_locations() {
     while read -r label; do
         [[ -n "$label" ]] || continue
         [[ "$(ep_version_get "$EP_DOMAIN" "$label" ENABLED true)" == true ]] || continue
+        prefix="$(pages_prefix "$label")"
+        tree_root="$(ep_data_dir "$EP_DOMAIN")"
+        is_root=false
+        if pages_is_root "$label"; then is_root=true; root_endpoint=true; tree_root="$tree_root/$label"; fi
+        mapfile -t page < <(pages_docs_location "$EP_DOMAIN" "$label")
+        mapfile -t openapi < <(pages_openapi_location "$EP_DOMAIN" "$label")
         piece="$(gb_tmpdir)/loc-$EP_SLUG-$label"
         gb_render "$GB_TYPES/static/templates/version-locations.conf.tmpl" "$piece" \
-            "DOMAIN=$EP_DOMAIN" "LABEL=$label" "DATA_DIR=$(ep_data_dir "$EP_DOMAIN")" \
+            "DOMAIN=$EP_DOMAIN" "LABEL=$label" "PREFIX=$prefix" "TREE_ROOT=$tree_root" "IS_ROOT=$is_root" \
+            "DOCS_ROOT=${page[0]:-}" "DOCS_FILE=${page[1]:-}" "OPENAPI_ROOT=${openapi[0]:-}" "OPENAPI_FILE=${openapi[1]:-}" \
             "NGINX_GB_DIR=$GB_NGINX_GB" "DATA_EXT_REGEX=$data_ext" "HAS_SHA=$has_sha" \
             "HAS_HTML=$has_html" "TOKEN_ACCESS=$([[ "$EP_ACCESS_MODE" == token ]] && printf true || printf false)" "CACHE_TTL=$EP_CACHE_TTL" "SHA_CACHE_TTL=$EP_SHA_CACHE_TTL"
         cat "$piece" >> "$output"
         printf '\n' >> "$output"
     done < <(ep_versions "$EP_DOMAIN")
-    cat "$GB_TYPES/static/templates/tail-locations.conf.tmpl" >> "$output"
+    piece="$(gb_tmpdir)/loc-$EP_SLUG-tail"
+    gb_render "$GB_TYPES/static/templates/tail-locations.conf.tmpl" "$piece" "ROOT_ENDPOINT=$root_endpoint"
+    cat "$piece" >> "$output"
 }
 
 type_static_finish() { :; }
@@ -85,20 +100,74 @@ type_static_status() {
     done < <(ep_versions "$domain")
 }
 
+# --- pages hooks (pages.sh) --------------------------------------------------
+# The endpoints of a static domain are its version folders, or "root".
+type_static_endpoints() { ep_versions "$1"; }
+
+# A static endpoint's OpenAPI document comes from its repository unless told otherwise.
+type_static_openapi_default() { printf 'repository\n'; }
+
+type_static_render_openapi() {
+    gb_warn "Static endpoints do not generate OpenAPI documents; $1$(pages_prefix "$2") takes its document from the repository or from you."
+    return 1
+}
+
+type_static_extensions_html() { printf '%s' "$EP_EXTENSIONS" | sed 's/,/, /g; s/\([a-z0-9]\+\)/<code>.\1<\/code>/g'; }
+
+# type_static_render_endpoint_docs DOMAIN LABEL OUTPUT: the generated page of
+# one endpoint (EP_* loaded by the caller).
+type_static_render_endpoint_docs() {
+    local domain="$1" label="$2" output="$3" prefix example access openapi_url="" favicon=false is_root=false
+    prefix="$(pages_prefix "$label")"
+    if pages_is_root "$label"; then is_root=true; fi
+    example="path/to/document.json"
+    access="$(gb_tmpdir)/access-$EP_SLUG-$label.html"
+    docs_render_access "$access" "$prefix" "$example"
+    if [[ "$(pages_openapi_source "$domain" "$label")" != none ]] && pages_file_present "$domain" "$label" openapi; then
+        openapi_url="${prefix}openapi.json"
+    fi
+    if pages_favicon_active "$domain"; then favicon=true; fi
+    gb_render "$GB_DOCS_SRC/static-endpoint.html.tmpl" "$output" "DOMAIN=$domain" "PREFIX=$prefix" \
+        "LABEL=$label" "IS_ROOT=$is_root" "FAVICON=$favicon" "CSS=$(cat "$GB_DOCS_SRC/base.css")" \
+        "ACCESS_MODE_LABEL=$(docs_access_label "$EP_ACCESS_MODE")" "EXAMPLE_PATH=$example" \
+        "OPENAPI_URL=$openapi_url" "EXTENSIONS_LIST=$(type_static_extensions_html)" \
+        "CACHE_TTL=$EP_CACHE_TTL" "SHA_CACHE_TTL=$EP_SHA_CACHE_TTL" "ACCESS_HTML=$(cat "$access")"
+}
+
+# type_static_check_label DOMAIN LABEL: version folders and a root endpoint
+# never share a domain.
+type_static_check_label() {
+    local domain="$1" label="$2" existing
+    gb_valid_endpoint_label "$label" || { gb_warn "Invalid version label: $label (v1, v2, ... or root)"; return 1; }
+    existing="$(ep_versions "$domain" | tr '\n' ' ')"
+    existing="${existing% }"
+    [[ -n "$existing" ]] || return 0
+    if pages_is_root "$label"; then
+        gb_warn "$domain already serves version folders ($existing); its root cannot become an endpoint as well."
+        return 1
+    elif [[ "$existing" == "$GB_ROOT_LABEL" ]]; then
+        gb_warn "$domain serves its only endpoint at the domain root; remove that endpoint before adding version folders."
+        return 1
+    fi
+}
+
+# The domain page: one row per endpoint. A root-endpoint domain has no
+# separate domain page (pages.sh serves the endpoint's page at /).
 type_static_render_docs() {
-    local output="$1" rows first example access no_versions=false ext_list
+    local output="$1" rows first example access no_versions=false favicon=false versions_json=false
     rows="$(docs_versions_rows "$EP_DOMAIN")"
     first="$(ep_versions "$EP_DOMAIN" | head -1)"
     [[ -n "$rows" ]] || no_versions=true
     example="path/to/document.json"
     access="$(gb_tmpdir)/access-$EP_SLUG.html"
-    docs_render_access "$access" "${first:-v1}" "$example"
-    ext_list="$(printf '%s' "$EP_EXTENSIONS" | sed 's/,/, /g; s/\([a-z0-9]\+\)/<code>.\1<\/code>/g')"
+    docs_render_access "$access" "/${first:-v1}/" "$example"
+    if pages_favicon_active "$EP_DOMAIN"; then favicon=true; fi
+    if pages_versions_active "$EP_DOMAIN"; then versions_json=true; fi
     gb_render "$GB_DOCS_SRC/static.html.tmpl" "$output" "DOMAIN=$EP_DOMAIN" \
         "CSS=$(cat "$GB_DOCS_SRC/base.css")" "ACCESS_MODE_LABEL=$(docs_access_label "$EP_ACCESS_MODE")" \
         "VERSIONS_ROWS=$rows" "NO_VERSIONS=$no_versions" "FIRST_VERSION=${first:-v1}" \
-        "EXAMPLE_PATH=$example" "EXTENSIONS_LIST=$ext_list" "CACHE_TTL=$EP_CACHE_TTL" \
-        "SHA_CACHE_TTL=$EP_SHA_CACHE_TTL" "ACCESS_HTML=$(cat "$access")"
+        "EXAMPLE_PATH=$example" "EXTENSIONS_LIST=$(type_static_extensions_html)" "CACHE_TTL=$EP_CACHE_TTL" \
+        "SHA_CACHE_TTL=$EP_SHA_CACHE_TTL" "ACCESS_HTML=$(cat "$access")" "FAVICON=$favicon" "VERSIONS_JSON=$versions_json"
 }
 
 # --- deploy ------------------------------------------------------------------
@@ -121,13 +190,15 @@ type_static_create() {
 # Interactive deployment of a new static endpoint.
 type_static_deploy_interactive() {
     local domain label repo ref subpath extensions mode schedule selection cfmode
-    ui_msg "New static endpoint" "This walkthrough asks for: the domain, the first version label, the git repository, branch and folder, the file types to serve, the access mode, the check schedule$(cf_enabled 2>/dev/null && printf ', the Cloudflare mode' || true), and whether to go live now or stage the endpoint.\n\nIt then creates the sync user and its deploy key, installs the timers and nginx, and shows the public key to add to the repository. Cancel at any question to stop without changes."
-    domain="$(ui_input "New static endpoint" "Domain name (DNS may still point at another server; you choose when it goes live)" "")" || return 1
+    ui_msg "New static domain" "This walkthrough asks for: the domain, its first endpoint (a version folder such as v2, or the domain root), the git repository, branch and folder, the file types to serve, the access mode, the check schedule$(cf_enabled 2>/dev/null && printf ', the Cloudflare mode' || true), and whether to go live now or stage the domain.\n\nIt then creates the sync user and its deploy key, installs the timers, nginx and the documentation pages, and shows the public key to add to the repository. Cancel at any question to stop without changes."
+    domain="$(ui_input "New static domain" "Domain name (DNS may still point at another server; you choose when it goes live)" "")" || return 1
     gb_valid_domain "$domain" || { ui_msg "Invalid" "That is not a valid domain name."; return 1; }
-    ep_exists "$domain" && { ui_msg "Exists" "$domain is already an endpoint."; return 1; }
+    ep_exists "$domain" && { ui_msg "Exists" "$domain is already set up on this server."; return 1; }
     GB_DEPLOY_MODE="$(endpoint_prompt_deploy_mode "$domain")" || return 1
-    label="$(ui_input "Version" "Version served under https://$domain/<version>/ (v1, v2, ...)" "v2")" || return 1
-    gb_valid_version "$label" || { ui_msg "Invalid" "Version labels look like v1, v2, v3."; return 1; }
+    label="$(ui_input "First endpoint" "Version folder served under https://$domain/<version>/ (v1, v2, ...).\n\nLeave it empty when this domain serves a single endpoint at its root, https://$domain/, without version folders." "v2")" || return 1
+    label="${label// /}"
+    [[ -n "$label" ]] || label="$GB_ROOT_LABEL"
+    gb_valid_endpoint_label "$label" || { ui_msg "Invalid" "Version labels look like v1, v2, v3; leave the field empty for the domain root."; return 1; }
     repo="$(ui_input "Repository" "Git repository holding the files, as an SSH URL for private repositories: git@github.com:owner/repo.git. The user before @ is the host's SSH user (always git on GitHub, GitLab and Gitea), not your account; this server's deploy key is the identity. Self-hosted with another user or port: ssh://user@host:port/path/repo.git. Public repositories may use https://." "git@github.com:getbible/")" || return 1
     gb_valid_repo_url "$repo" || { ui_msg "Invalid" "That does not look like a git URL."; return 1; }
     ref="$(ui_input "Branch or tag" "Git branch or tag to publish" "master")" || return 1
@@ -170,7 +241,7 @@ type_static_deploy_cli() {
     mode="${mode:-$(gb_global DEFAULT_ACCESS_MODE metered)}"
     schedule="${schedule:-$(gb_global DEFAULT_SYNC_SCHEDULE weekly)}"
     gb_valid_domain "$domain" || gb_die "Invalid domain: $domain"
-    gb_valid_version "$label" || gb_die "Invalid version label: $label (expected v1, v2, ...)"
+    gb_valid_endpoint_label "$label" || gb_die "Invalid version label: $label (expected v1, v2, ... or root for a domain without version folders)"
     gb_valid_repo_url "$repo" || gb_die "Invalid repository URL: $repo"
     gb_valid_subpath "$subpath" || gb_die "Invalid source path: $subpath"
     type_static_create "$domain" "$extensions" "$mode" "$schedule"
@@ -190,13 +261,13 @@ type_static_deploy_finish() {
     fi
     endpoint_apply "$domain"
     if ep_is_live "$domain"; then
-        tg_notify ok "Endpoint deployed: $domain" "Static endpoint with version $label. The first sync runs once the deploy key is authorised on the repository."
+        tg_notify ok "Domain deployed: $domain" "Static domain with endpoint $(pages_label_text "$label"). The first sync runs once the deploy key is authorised on the repository."
         if ! nginx_cert_exists "$domain"; then
-            ui_msg "No certificate yet" "$domain is live but has no Let's Encrypt certificate, so it answers HTTP only (challenges are served, everything else redirects to HTTPS). Once DNS reaches this server, choose Endpoint > Certificate > Issue."
+            ui_msg "No certificate yet" "$domain is live but has no Let's Encrypt certificate, so it answers HTTP only (challenges are served, everything else redirects to HTTPS). Once DNS reaches this server, choose Domain > Certificate > Issue."
         fi
     else
-        tg_notify ok "Endpoint staged: $domain" "Static endpoint with version $label, prepared on $(hostname -f 2>/dev/null || hostname). Not live: no certificate or DNS change until 'Go live'."
-        ui_msg "Staged" "$domain is staged on this server: synchronisation, nginx and a placeholder certificate are in place, but no certificate was requested and DNS was not changed.\n\nSync its data, verify it, and choose 'Go live' from the main menu or the endpoint menu when it should take over."
+        tg_notify ok "Domain staged: $domain" "Static domain with endpoint $(pages_label_text "$label"), prepared on $(hostname -f 2>/dev/null || hostname). Not live: no certificate or DNS change until 'Go live'."
+        ui_msg "Staged" "$domain is staged on this server: synchronisation, nginx, its pages and a placeholder certificate are in place, but no certificate was requested and DNS was not changed.\n\nSync its data, verify it, and choose 'Go live' from the main menu or the domain menu when it should take over."
     fi
     type_static_show_key "$domain"
     if ui_yesno "First sync" "Has the deploy key been added to the repository? Run the first sync now?" no; then
@@ -219,9 +290,10 @@ Key file : $(sync_home "$domain")/.ssh/id_ed25519.pub"
 type_static_add_version() {
     local domain="$1" label="$2" repo="$3" ref="$4" subpath="$5"
     ep_version_exists "$domain" "$label" && gb_die "Version $label already exists on $domain"
+    type_static_check_label "$domain" "$label" || return 1
     ep_version_create "$domain" "$label" "$repo" "$ref" "$subpath"
     endpoint_apply "$domain"
-    tg_notify ok "Version added: $domain $label" "Repository $repo ($ref). The timer will publish it on the next check; use 'Sync now' to publish immediately."
+    tg_notify ok "Endpoint added: $domain $label" "Repository $repo ($ref). The timer will publish it on the next check; use 'Sync now' to publish immediately."
 }
 
 # type_static_change_version DOMAIN LABEL REPO REF SUBPATH: point an existing
@@ -240,7 +312,7 @@ type_static_change_version() {
     ep_version_set "$domain" "$label" REPO_REF "$ref"
     ep_version_set "$domain" "$label" SOURCE_PATH "$subpath"
     endpoint_apply "$domain" || return 1
-    tg_notify info "Version source changed: $domain $label" "Repository $repo ($ref), folder $subpath. The next sync publishes from there; use 'Sync now' to do it at once."
+    tg_notify info "Endpoint source changed: $domain $label" "Repository $repo ($ref), folder $subpath. The next sync publishes from there; use 'Sync now' to do it at once."
 }
 
 type_static_remove_version() {
@@ -251,7 +323,7 @@ type_static_remove_version() {
     rm -f -- "$(ep_version_path "$domain" "$label")"
     rm -rf -- "$(ep_releases_dir "$domain" "$label")"
     endpoint_apply "$domain"
-    tg_notify warn "Version removed: $domain $label" "The version is no longer served and its releases were deleted."
+    tg_notify warn "Endpoint removed: $domain $label" "The endpoint is no longer served and its releases were deleted."
 }
 
 # --- endpoint submenu actions ------------------------------------------------
@@ -260,7 +332,7 @@ type_static_menu_items() {
         sync "Sync now (check the repositories and publish updates)" \
         force "Force a full resync of a version" \
         key "Show the deploy key" \
-        versions "Manage versions" \
+        versions "Endpoints: add, change or remove version folders" \
         filetypes "File types served (json, sha, txt, html)" \
         repoaccess "Test repository access (deploy key and branch)"
 }
@@ -316,27 +388,32 @@ type_static_pick_version() {
     local domain="$1" label
     local -a items=()
     while read -r label; do [[ -n "$label" ]] && items+=("$label" "$(ep_version_get "$domain" "$label" REPO_URL)"); done < <(ep_versions "$domain")
-    [[ ${#items[@]} -gt 0 ]] || { ui_msg "Versions" "No versions configured."; return 1; }
-    ui_menu "Versions of $domain" "Choose a version" "${items[@]}"
+    [[ ${#items[@]} -gt 0 ]] || { ui_msg "Endpoints" "No endpoints configured."; return 1; }
+    ui_menu "Endpoints of $domain" "Choose an endpoint (root is the domain root)" "${items[@]}"
 }
 
 type_static_versions_menu() {
     local domain="$1" choice label repo ref subpath
     while true; do
-        choice="$(ui_menu "Versions of $domain" "$(ep_versions "$domain" | tr '\n' ' ')" \
-            add "Add a version" \
-            change "Change a version's repository, branch or folder (keeps its releases)" \
-            remove "Remove a version" \
-            status "Show version status" \
+        choice="$(ui_menu "Endpoints of $domain" "Endpoints: $(ep_versions "$domain" | sed "s/^$GB_ROOT_LABEL\$/the domain root/" | tr '\n' ' ')" \
+            add "Add a version folder" \
+            change "Change an endpoint's repository, branch or folder (keeps its releases)" \
+            remove "Remove an endpoint" \
+            status "Show an endpoint's sync status" \
             back "Back")" || return 0
         case "$choice" in
             add)
-                label="$(ui_input "Version" "New version label (v1, v2, ...)" "")" || continue
+                if pages_has_root_endpoint "$domain"; then
+                    ui_msg "Domain root" "$domain serves its only endpoint at the domain root (https://$domain/). Version folders cannot be added next to it; remove that endpoint first if the domain should switch to version folders."
+                    continue
+                fi
+                label="$(ui_input "Version folder" "New version folder (v1, v2, ...), served under https://$domain/<version>/" "")" || continue
                 gb_valid_version "$label" || { ui_msg "Invalid" "Version labels look like v1, v2, v3."; continue; }
+                ep_version_exists "$domain" "$label" && { ui_msg "Exists" "$domain already has $label."; continue; }
                 repo="$(ui_input "Repository" "Git repository" "$(ep_version_get "$domain" "$(ep_versions "$domain" | head -1)" REPO_URL)")" || continue
                 ref="$(ui_input "Branch or tag" "Git branch or tag" "master")" || continue
                 subpath="$(ui_input "Source path" "Folder inside the repository (. for the root)" ".")" || continue
-                ui_run "Add version" type_static_add_version "$domain" "$label" "$repo" "$ref" "$subpath" || true
+                ui_run "Add endpoint" type_static_add_version "$domain" "$label" "$repo" "$ref" "$subpath" || true
                 ;;
             change)
                 label="$(type_static_pick_version "$domain")" || continue
@@ -346,13 +423,13 @@ type_static_versions_menu() {
                 subpath="$(ui_input "Source path" "Folder inside the repository (. for the root)" "$(ep_version_get "$domain" "$label" SOURCE_PATH)")" || continue
                 gb_valid_subpath "$subpath" || { ui_msg "Invalid" "Source paths are relative, without '..'."; continue; }
                 endpoint_confirm_hand_edits "$domain" || continue
-                ui_run "Change version source" type_static_change_version "$domain" "$label" "$repo" "$ref" "$subpath" || true
+                ui_run "Change endpoint source" type_static_change_version "$domain" "$label" "$repo" "$ref" "$subpath" || true
                 GB_OVERWRITE_HAND_EDITS=false
                 ;;
             remove)
                 label="$(type_static_pick_version "$domain")" || continue
-                ui_yesno "Remove version" "Remove $label from $domain? Its releases on disk are deleted." no || continue
-                ui_run "Remove version" type_static_remove_version "$domain" "$label" || true
+                ui_yesno "Remove endpoint" "Remove $(pages_label_text "$label") from $domain? Its releases on disk are deleted." no || continue
+                ui_run "Remove endpoint" type_static_remove_version "$domain" "$label" || true
                 ;;
             status)
                 label="$(type_static_pick_version "$domain")" || continue

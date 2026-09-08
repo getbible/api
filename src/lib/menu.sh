@@ -10,17 +10,17 @@ menu_main() {
     menu_check_tools
     while true; do
         choice="$(ui_menu "getBible API" "$(menu_overview)" \
-            endpoints "Endpoints: status, logs, access, tokens, sync" \
-            deploy "Deploy a new endpoint (live now, or staged for later)" \
-            golive "Go live: switch a staged endpoint to its public name" \
-            update "Update all endpoints (after git pull)" \
+            domains "Domains: status, pages, logs, access, tokens, sync" \
+            deploy "Deploy a new domain (live now, or staged for later)" \
+            golive "Go live: switch a staged domain to its public name" \
+            update "Update all domains (after git pull)" \
             analytics "Traffic analytics: calls and unique callers" \
             logs "Logs: view, archives, rotate" \
-            settings "Settings: Telegram, Cloudflare, defaults, retention" \
+            settings "Settings: Telegram, Cloudflare, favicon, defaults, retention" \
             system "System: host check, dependencies, migration, self-test" \
             exit "Exit")" || return 0
         case "$choice" in
-            endpoints) menu_endpoints ;;
+            domains) menu_endpoints ;;
             deploy) menu_deploy ;;
             golive) golive_menu ;;
             update) menu_update ;;
@@ -43,7 +43,7 @@ menu_check_tools() {
     [[ -n "$missing" ]] || return 0
     platform_detect
     if [[ "$PLATFORM_PACKAGE_MANAGER" == apt ]]; then
-        if ui_yesno "Missing tools" "This host lacks:$missing\n\nEndpoints cannot be deployed completely without them. Install them now with apt (the same as System > Install dependencies)?" yes; then
+        if ui_yesno "Missing tools" "This host lacks:$missing\n\nDomains cannot be deployed completely without them. Install them now with apt (the same as System > Install dependencies)?" yes; then
             ui_run "Install dependencies" doctor_install_deps || true
             return 0
         fi
@@ -59,7 +59,7 @@ menu_overview() {
         lines="$lines$(ep_summary_line "$domain")"$'\n'
     done < <(ep_list)
     if (( count == 0 )); then
-        printf 'No endpoints yet. Deploy one to begin.\n'
+        printf 'No domains yet. Deploy one to begin.\n'
     else
         printf '%s' "$lines"
     fi
@@ -72,27 +72,30 @@ menu_endpoints() {
         [[ -n "$domain" ]] || continue
         items+=("$domain" "$(ep_get "$domain" TYPE) $(ep_get "$domain" KIND) · $(ep_get "$domain" ACCESS_MODE)")
     done < <(ep_list)
-    [[ ${#items[@]} -gt 0 ]] || { ui_msg "Endpoints" "No endpoints are deployed yet."; return 0; }
-    domain="$(ui_menu "Endpoints" "Choose an endpoint" "${items[@]}")" || return 0
+    [[ ${#items[@]} -gt 0 ]] || { ui_msg "Domains" "No domains are deployed yet."; return 0; }
+    domain="$(ui_menu "Domains" "Choose a domain" "${items[@]}")" || return 0
     menu_endpoint "$domain"
 }
 
 menu_endpoint() {
-    local domain="$1" choice out
+    local domain="$1" choice out type_text
     ep_load "$domain"
     endpoint_source_type "$EP_TYPE"
+    type_text="$EP_TYPE"
+    [[ -z "$EP_KIND" || "$EP_KIND" == "$EP_TYPE" ]] || type_text="$EP_TYPE $EP_KIND"
     while true; do
         local -a extra=() golive=()
         mapfile -t extra < <("type_${EP_TYPE}_menu_items")
         if ep_is_live "$domain"; then
             golive=(stage "Stage again: stop taking over this name (for rolling back; DNS is not changed)")
         else
-            golive=(golive "Go live: certificate, DNS, HTTPS (this endpoint is staged)")
+            golive=(golive "Go live: certificate, DNS, HTTPS (this domain is staged)")
         fi
-        choice="$(ui_menu "$domain" "$EP_TYPE $EP_KIND · access: $(ep_get "$domain" ACCESS_MODE) · $(ep_publication "$domain")" \
+        choice="$(ui_menu "$domain" "$type_text · endpoints: $(pages_endpoints "$domain" | sed "s/^$GB_ROOT_LABEL\$/the domain root/" | tr '\n' ' ')· access: $(ep_get "$domain" ACCESS_MODE) · $(ep_publication "$domain")" \
             status "Status and health" \
             verify "Verify this server end to end (service, nginx, TLS)" \
             "${golive[@]+"${golive[@]}"}" \
+            pages "Pages and OpenAPI: documentation pages, favicon, versions.json" \
             logs "Logs" \
             access "Access mode (open, metered, token only)" \
             limits "Limits for anonymous callers" \
@@ -101,7 +104,7 @@ menu_endpoint() {
             cloudflare "Cloudflare settings for this domain" \
             "${extra[@]}" \
             apply "Re-apply configuration" \
-            remove "Remove this endpoint" \
+            remove "Remove this domain" \
             back "Back")" || return 0
         case "$choice" in
             status)
@@ -114,6 +117,7 @@ menu_endpoint() {
                 ui_textbox "Verify: $domain" "$out" ;;
             golive) golive_interactive "$domain" || true ;;
             stage) golive_stage_again_interactive "$domain" ;;
+            pages) pages_menu "$domain" ;;
             certificate) certs_menu "$domain" ;;
             logs) menu_endpoint_logs "$domain" ;;
             access)
@@ -146,7 +150,7 @@ menu_endpoint_logs() {
         choice="$(ui_menu "Logs: $domain" "$(ep_log_dir "$domain")" \
             access "Access log (last 200 lines)" \
             error "Error log (last 200 lines)" \
-            app "Application log (runtime endpoints)" \
+            app "Application log (runtime domains)" \
             journal "Service journal" \
             archives "Archived logs" \
             back "Back")" || return 0
@@ -162,8 +166,8 @@ menu_endpoint_logs() {
 
 menu_deploy() {
     local choice
-    choice="$(ui_menu "Deploy" "What kind of endpoint?" \
-        static "Static files synced from a git repository" \
+    choice="$(ui_menu "Deploy" "What kind of domain?" \
+        static "Static files synced from git repositories (one per endpoint)" \
         runtime "Runtime service (query or search) on the librarian" \
         back "Back")" || return 0
     case "$choice" in
@@ -181,8 +185,8 @@ menu_update() {
     [[ -n "$dirty" ]] && text="$text (local modifications present)"
     local choice
     choice="$(ui_menu "Update" "$text" \
-        apply "Update all endpoints from the current checkout" \
-        pull "git pull first, then update all endpoints" \
+        apply "Update all domains from the current checkout" \
+        pull "git pull first, then update all domains" \
         back "Back")" || return 0
     case "$choice" in
         apply) ui_run "Update all" update_all ;;
@@ -201,7 +205,7 @@ menu_analytics() {
 menu_logs() {
     local choice domain out
     choice="$(ui_menu "Logs" "Retention: $(gb_global LOG_ROTATE_KEEP 30) archives of $(gb_global LOG_ROTATE_SIZE 1G) each, checked hourly" \
-        view "View an endpoint's logs" \
+        view "View a domain's logs" \
         rotate "Rotate now (files above the size limit)" \
         force "Force rotation of every log now" \
         retention "Change retention" \
@@ -220,8 +224,8 @@ menu_pick_domain() {
     local domain
     local -a items=()
     while read -r domain; do [[ -n "$domain" ]] && items+=("$domain" "$(ep_get "$domain" TYPE)"); done < <(ep_list)
-    [[ ${#items[@]} -gt 0 ]] || { ui_msg "Endpoints" "No endpoints yet."; return 1; }
-    ui_menu "Endpoints" "Choose an endpoint" "${items[@]}"
+    [[ ${#items[@]} -gt 0 ]] || { ui_msg "Domains" "No domains yet."; return 1; }
+    ui_menu "Domains" "Choose a domain" "${items[@]}"
 }
 
 menu_settings() {
@@ -230,9 +234,10 @@ menu_settings() {
         choice="$(ui_menu "Settings" "$GB_ETC" \
             telegram "Telegram notifications" \
             cloudflare "Cloudflare API token" \
-            defaults "Defaults for new endpoints (access, limits, caching, schedule)" \
+            favicon "Favicon for all domains: $(favicon_status_text | sed 's/^System favicon: //')" \
+            defaults "Defaults for new domains (access, limits, caching, schedule)" \
             retention "Log retention" \
-            deploymode "New endpoints: go live at once, or stage them for a later go-live" \
+            deploymode "New domains: go live at once, or stage them for a later go-live" \
             certmethod "Certificate validation: automatic, http, or dns-cloudflare" \
             certbot "Let's Encrypt contact email" \
             addresses "Public addresses used for DNS records (empty: detected)" \
@@ -241,6 +246,7 @@ menu_settings() {
         case "$choice" in
             telegram) menu_settings_telegram ;;
             cloudflare) cloudflare_configure ;;
+            favicon) menu_settings_favicon ;;
             defaults) menu_settings_defaults ;;
             retention) menu_settings_retention ;;
             deploymode) menu_settings_deploy_mode ;;
@@ -257,7 +263,7 @@ menu_settings() {
                 else
                     gb_global_set HSTS_INCLUDE_SUBDOMAINS false
                 fi
-                ui_msg "HSTS" "Saved. Run Update to re-render every endpoint." ;;
+                ui_msg "HSTS" "Saved. Run Update to re-render every domain." ;;
             back) return 0 ;;
         esac
     done
@@ -266,11 +272,34 @@ menu_settings() {
 menu_settings_deploy_mode() {
     local current mode
     current="$(gb_global DEFAULT_DEPLOY_MODE live)"
-    mode="$(ui_radiolist "New endpoints" "What should a newly deployed endpoint do by default? The deploy walkthrough still asks each time.\n\nStage them while building a replacement server: everything is installed, but no certificate is requested and DNS is untouched until you choose 'Go live' per endpoint." \
+    mode="$(ui_radiolist "New domains" "What should a newly deployed domain do by default? The deploy walkthrough still asks each time.\n\nStage them while building a replacement server: everything is installed, but no certificate is requested and DNS is untouched until you choose 'Go live' per domain." \
         live "Go live at once: certificate and Cloudflare DNS on deploy" "$([[ "$current" == live ]] && echo on || echo off)" \
-        staged "Stage: prepare everything, go live later per endpoint" "$([[ "$current" == staged ]] && echo on || echo off)")" || return 0
+        staged "Stage: prepare everything, go live later per domain" "$([[ "$current" == staged ]] && echo on || echo off)")" || return 0
     gb_global_set DEFAULT_DEPLOY_MODE "$mode"
-    ui_msg "New endpoints" "New endpoints are $mode by default. Existing endpoints are not affected."
+    ui_msg "New domains" "New domains are $mode by default. Existing domains are not affected."
+}
+
+# The favicon every domain serves at /favicon.ico unless it has its own.
+menu_settings_favicon() {
+    local choice file
+    choice="$(ui_menu "Favicon" "$(favicon_status_text)\n\nEvery domain serves this file at /favicon.ico and links it from its generated pages, unless the domain has a favicon of its own (Domain > Pages and OpenAPI > Favicon)." \
+        file "Set it from a file on this server (.ico, .png, .svg or .gif)" \
+        none "Remove it (domains without their own then serve none)" \
+        back "Back")" || return 0
+    case "$choice" in
+        back) return 0 ;;
+        file)
+            file="$(ui_input "Favicon" "Path of the favicon file on this server" "")" || return 0
+            [[ -f "$file" ]] || { ui_msg "Invalid" "No such file: $file"; return 0; }
+            pages_mime_for "$file" >/dev/null || { ui_msg "Invalid" "Favicons are .ico, .png, .svg or .gif files."; return 0; }
+            ui_run "System favicon" favicon_set_system "$file" || return 0 ;;
+        none)
+            ui_yesno "Favicon" "Remove the system favicon? Domains without a favicon of their own then answer 404 at /favicon.ico." no || return 0
+            ui_run "System favicon" favicon_set_system none || return 0 ;;
+    esac
+    if ui_yesno "Publish" "Publish the change to every domain now? (The same as Update all domains; it can also wait for the next update.)" yes; then
+        ui_run "Publish favicon" endpoint_apply_all || true
+    fi
 }
 
 menu_settings_cert_method() {
@@ -324,7 +353,7 @@ menu_settings_defaults() {
         value="$(ui_input "Defaults" "$label" "$(gb_global "$key")")" || return 0
         gb_global_set "$key" "$value"
     done
-    ui_msg "Defaults" "Saved. Existing endpoints keep their own values."
+    ui_msg "Defaults" "Saved. Existing domains keep their own values."
 }
 
 menu_settings_retention() {

@@ -1,0 +1,23 @@
+    # {{DOMAIN}} endpoint {{VERSION}}: its documentation page and OpenAPI
+    # document. A request for /{{VERSION}}/ that carries a query string or a
+    # body is the service's business and is handed to its /{{VERSION}} route.
+{{#IF DOCS_FILE}}
+    location = /{{VERSION}}/ {
+        if ($args != "") { rewrite ^ /{{VERSION}} last; }
+        if ($request_method !~ ^(GET|HEAD)$) { rewrite ^ /{{VERSION}} last; }
+        root {{DOCS_ROOT}};
+        types { }
+        default_type text/html;
+        try_files {{DOCS_FILE}} =404;
+        include snippets/getbible/headers-html.conf;
+    }
+{{/IF}}{{#IF OPENAPI_FILE}}
+    location = /{{VERSION}}/openapi.json {
+        root {{OPENAPI_ROOT}};
+        types { }
+        default_type application/json;
+        try_files {{OPENAPI_FILE}} =404;
+        include snippets/getbible/headers.conf;
+        add_header Cache-Control "public, max-age=300" always;
+    }
+{{/IF}}

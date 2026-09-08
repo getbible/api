@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# The endpoint registry: one directory per domain under /etc/getbible/endpoints
-# holding endpoint.conf, versions/<label>.conf, tokens.json, and a state
-# directory under /var/lib/getbible/state/<domain>.
+# The domain registry: one directory per domain under /etc/getbible/endpoints
+# holding endpoint.conf (the domain), versions/<label>.conf (its endpoints),
+# tokens.json, and a state directory under /var/lib/getbible/state/<domain>.
+# The directory names predate the domain/endpoint vocabulary and stay as they
+# are so existing installations keep working.
 
 [[ -n "${GB_REGISTRY_LOADED:-}" ]] && return 0
 GB_REGISTRY_LOADED=1
@@ -39,12 +41,13 @@ ep_set() { cfg_set "$(ep_conf "$1")" "$2" "$3"; }
 # ep_load DOMAIN: define EP_* variables from endpoint.conf.
 ep_load() {
     local domain="$1" key
-    ep_exists "$domain" || gb_die "Unknown endpoint: $domain"
+    ep_exists "$domain" || gb_die "Unknown domain: $domain"
     for key in DOMAIN SLUG TYPE KIND ACCESS_MODE RATE_PER_SECOND RATE_BURST QUOTA_HOUR QUOTA_DAY \
                CONN_LIMIT CLOUDFLARE_MODE CLOUDFLARE_CACHE CLOUDFLARE_ORIGIN_PULLS DOCS_SOURCE \
                EXTENSIONS CACHE_TTL SHA_CACHE_TTL SYNC_SCHEDULE SYNC_USER VERSION REPOSITORY \
                WORKERS THREADS WARM_TRANSLATIONS DEFAULT_TRANSLATION DEFAULT_REFERENCE \
-               ALLOWED_TRANSLATIONS REQUIRE_CHECKSUMS PYTHON_VERSION CREATED ENABLED LIVE; do
+               ALLOWED_TRANSLATIONS REQUIRE_CHECKSUMS PYTHON_VERSION CREATED ENABLED LIVE \
+               FAVICON_SOURCE FAVICON_MIME; do
         printf -v "EP_$key" '%s' ""
     done
     cfg_load "$(ep_conf "$domain")" EP
@@ -55,7 +58,7 @@ ep_load() {
 ep_create() {
     local domain="$1" type="$2" kind="$3" conf
     gb_valid_domain "$domain" || gb_die "Invalid domain: $domain"
-    ep_exists "$domain" && gb_die "Endpoint already exists: $domain"
+    ep_exists "$domain" && gb_die "Domain already exists: $domain"
     conf="$(ep_conf "$domain")"
     gb_ensure_dir "$(ep_dir "$domain")" 0750
     cfg_set "$conf" GB_SCHEMA 1
@@ -74,7 +77,8 @@ ep_create() {
     cfg_set "$conf" CLOUDFLARE_MODE off
     cfg_set "$conf" CLOUDFLARE_CACHE bypass
     cfg_set "$conf" CLOUDFLARE_ORIGIN_PULLS false
-    cfg_set "$conf" DOCS_SOURCE template
+    cfg_set "$conf" DOCS_SOURCE generated
+    cfg_set "$conf" FAVICON_SOURCE default
     cfg_set "$conf" CREATED "$(gb_timestamp)"
     chmod 0640 "$conf" 2>/dev/null || true
     gb_ensure_dir "$(ep_state_dir "$domain")" 0750
@@ -105,7 +109,7 @@ ep_state_set() {
     cfg_set "$(ep_state_conf "$1")" "$2" "$3"
 }
 
-# --- versions (static endpoints) --------------------------------------------
+# --- versions: the endpoints of a domain (version folders, or "root") --------
 ep_versions() {
     local dir
     dir="$(ep_versions_dir "$1")"
@@ -121,16 +125,16 @@ ep_version_set() { cfg_set "$(ep_version_conf "$1" "$2")" "$3" "$4"; }
 # ep_version_load DOMAIN LABEL: define EV_* variables.
 ep_version_load() {
     local key
-    for key in LABEL REPO_URL REPO_REF SOURCE_PATH ENABLED CREATED; do
+    for key in LABEL REPO_URL REPO_REF SOURCE_PATH ENABLED CREATED DOCS_SOURCE DOCS_REPO_PATH OPENAPI_SOURCE OPENAPI_REPO_PATH; do
         printf -v "EV_$key" '%s' ""
     done
-    ep_version_exists "$1" "$2" || gb_die "Unknown version $2 for $1"
+    ep_version_exists "$1" "$2" || gb_die "Unknown endpoint $2 for $1"
     cfg_load "$(ep_version_conf "$1" "$2")" EV
 }
 
 ep_version_create() {
     local domain="$1" label="$2" repo="$3" ref="$4" subpath="$5" conf
-    gb_valid_version "$label" || gb_die "Invalid version label: $label (expected v1, v2, ...)"
+    gb_valid_endpoint_label "$label" || gb_die "Invalid version label: $label (expected v1, v2, ... or root)"
     gb_valid_repo_url "$repo" || gb_die "Invalid repository URL: $repo"
     gb_valid_subpath "$subpath" || gb_die "Invalid source path: $subpath"
     [[ "$ref" =~ ^[A-Za-z0-9._/-]{1,120}$ ]] || gb_die "Invalid git reference: $ref"
@@ -155,11 +159,12 @@ ep_releases_dir() { printf '%s/%s/releases/%s\n' "$GB_SRV" "$1" "$2"; }
 ep_summary_line() {
     local domain="$1"
     ep_load "$domain"
-    local extra=""
+    local extra endpoints
+    endpoints="$(ep_versions "$domain" | sed 's/^root$/domain root/' | tr '\n' ' ')"
     if [[ "$EP_TYPE" == static ]]; then
-        extra="versions: $(ep_versions "$domain" | tr '\n' ' ')"
+        extra="endpoints: ${endpoints:-none}"
     else
-        extra="kind: $EP_KIND $EP_VERSION"
+        extra="kind: $EP_KIND · endpoints: ${endpoints:-$EP_VERSION }"
     fi
     printf '%-32s %-8s %-8s %s · %s\n' "$domain" "$EP_TYPE" "$EP_ACCESS_MODE" "$extra" "$(ep_publication "$domain")"
 }

@@ -27,7 +27,13 @@ sha1sum "$REL/kjv/1/1.json" | cut -d' ' -f1 > "$REL/kjv/1/1.sha"
 printf 'hello\n' > "$REL/kjv/readme.txt"
 printf '<script>alert(1)</script>\n' > "$REL/kjv/evil.html"
 printf 'secret\n' > "$REL/.hidden"
+# The repository ships the endpoint's OpenAPI document (the static default).
+printf '{"openapi":"3.1.0","info":{"title":"static fixture","version":"v2"},"paths":{}}\n' > "$REL/openapi.json"
 ln -sfn "releases/v2/20260101T000000Z-abcdef1" "$IT_SB/srv/getbible/$DOMAIN/v2"
+# The system favicon every domain serves; publishing it re-applies the domain,
+# and the pages notice the OpenAPI document that is now in the tree.
+printf '\x00\x00\x01\x00' > "$IT_SB/icon.ico"
+"$IT_ROOT/getbible.sh" favicon "$IT_SB/icon.ico" >/dev/null 2>&1
 # GB_PREFIX intentionally skips host account/group creation. Give this test
 # fixture the equivalent reader-group access used by real static deployments.
 chgrp -R "$IT_NGINX_USER" "$IT_SB/srv/getbible/$DOMAIN"
@@ -56,6 +62,21 @@ it_check "docs page at root"         "200"              "$(it_status "$DOMAIN" /
 it_check "docs page is html"         "text/html"        "$(it_header "$DOMAIN" / content-type)"
 it_check "docs csp"                  "style-src"        "$(it_header "$DOMAIN" / content-security-policy)"
 it_check "health"                    '{"status":"ok"}'  "$(it_body "$DOMAIN" /healthz)"
+
+echo "-- pages, OpenAPI documents, favicon --"
+it_check "endpoint page 200"         "200"              "$(it_status "$DOMAIN" /v2/)"
+it_check "endpoint page is html"     "text/html"        "$(it_header "$DOMAIN" /v2/ content-type)"
+it_check "endpoint page names itself" "<code>/v2/</code>" "$(it_body "$DOMAIN" /v2/)"
+it_check "endpoint page links openapi" 'href="/v2/openapi.json"' "$(it_body "$DOMAIN" /v2/)"
+it_check "version redirects to folder" "location: https://$DOMAIN/v2/" "$(it_header "$DOMAIN" /v2 location)"
+it_check "openapi from the tree"     '"openapi":"3.1.0"' "$(it_body "$DOMAIN" /v2/openapi.json | tr -d ' \n')"
+it_check "openapi is json"           "application/json" "$(it_header "$DOMAIN" /v2/openapi.json content-type)"
+it_check "openapi cacheable"         "max-age=300"      "$(it_header "$DOMAIN" /v2/openapi.json cache-control)"
+it_check "versions.json lists v2"    '"openapi": "https://'"$DOMAIN"'/v2/openapi.json"' "$(it_body "$DOMAIN" /versions.json)"
+it_check "domain page links versions" 'href="/versions.json"' "$(it_body "$DOMAIN" /)"
+it_check "favicon served"            "200"              "$(it_status "$DOMAIN" /favicon.ico)"
+it_check "favicon type"              "image/vnd.microsoft.icon" "$(it_header "$DOMAIN" /favicon.ico content-type)"
+it_check "pages link the favicon"    'href="/favicon.ico"' "$(it_body "$DOMAIN" /v2/)"
 
 echo "-- headers --"
 it_check "cors open"                 "access-control-allow-origin: *" "$(it_header "$DOMAIN" /v2/kjv/1/1.json access-control-allow-origin)"
@@ -100,6 +121,8 @@ it_check "protected SHA is not shared-cacheable" "private, no-store" "$(it_heade
 it_check "protected text is not shared-cacheable" "private, no-store" "$(it_headers "$DOMAIN" /v2/kjv/readme.txt -H "Authorization: Bearer $TOKEN" | grep -i '^cache-control')"
 it_check "wrong token -> 401"        "401"              "$(it_status "$DOMAIN" /v2/kjv/1/1.json -H "Authorization: Bearer gbwrong")"
 it_check "docs still public"         "200"              "$(it_status "$DOMAIN" /)"
+it_check "endpoint page still public" "200"             "$(it_status "$DOMAIN" /v2/)"
+it_check "openapi still public"      "200"              "$(it_status "$DOMAIN" /v2/openapi.json)"
 it_check "preflight still public"    "204"              "$(it_status "$DOMAIN" /v2/kjv/1/1.json -X OPTIONS)"
 
 echo "-- open access --"
@@ -153,5 +176,40 @@ it_check "staged docs page"          "200"              "$(it_status "$STAGED" /
 it_check "staged health"             '{"status":"ok"}'  "$(it_body "$STAGED" /healthz)"
 it_check "placeholder certificate"   "$STAGED"          "$(openssl s_client -connect "127.0.0.1:$IT_HTTPS_PORT" -servername "$STAGED" </dev/null 2>/dev/null | openssl x509 -noout -subject)"
 it_check "live endpoint unaffected"  "200"              "$(it_status "$DOMAIN" /v2/kjv/1/1.json)"
+
+echo "-- a domain whose only endpoint is its root --"
+# No version folders: the tree is served at /, the page at / comes from the
+# repository (an HTML file, although .html is not a served type), and the
+# OpenAPI document at /openapi.json comes from the repository too.
+ROOTDOM="root.example.test"
+"$IT_ROOT/getbible.sh" deploy static --domain "$ROOTDOM" --version root \
+    --repo "file:///nonexistent/repo.git" --extensions json,sha,txt --access open >/dev/null 2>&1
+it_selfsigned "$ROOTDOM"
+"$IT_ROOT/getbible.sh" pages "$ROOTDOM" docs root repository docs/index.html >/dev/null 2>&1
+RREL="$IT_SB/srv/getbible/$ROOTDOM/releases/root/20260101T000000Z-abcdef1"
+mkdir -p "$RREL/kjv/1" "$RREL/docs"
+cp "$REL/kjv/1/1.json" "$REL/kjv/1/1.sha" "$RREL/kjv/1/"
+printf '<!doctype html><title>root</title><h1>from the repository</h1>\n' > "$RREL/docs/index.html"
+printf '<h1>not served</h1>\n' > "$RREL/kjv/page.html"
+printf '{"openapi":"3.1.0","info":{"title":"root fixture","version":"root"},"paths":{}}\n' > "$RREL/openapi.json"
+ln -sfn "releases/root/20260101T000000Z-abcdef1" "$IT_SB/srv/getbible/$ROOTDOM/root"
+chgrp -R "$IT_NGINX_USER" "$IT_SB/srv/getbible/$ROOTDOM"
+chmod -R g+rX "$IT_SB/srv/getbible/$ROOTDOM"
+"$IT_ROOT/getbible.sh" pages "$ROOTDOM" publish >/dev/null 2>&1
+it_nginx_reload
+it_check "root tree at /"            "200"              "$(it_status "$ROOTDOM" /kjv/1/1.json)"
+it_check "root tree json"            "application/json" "$(it_header "$ROOTDOM" /kjv/1/1.json content-type)"
+it_check "root tree sha"             "200"              "$(it_status "$ROOTDOM" /kjv/1/1.sha)"
+it_check "root html not allowlisted" "404"              "$(it_status "$ROOTDOM" /kjv/page.html)"
+it_check "root page from repository" "from the repository" "$(it_body "$ROOTDOM" /)"
+it_check "root page is html"         "text/html"        "$(it_header "$ROOTDOM" / content-type)"
+it_check "root page path not served" "404"              "$(it_status "$ROOTDOM" /docs/index.html)"
+it_check "root openapi"              '"title":"rootfixture"' "$(it_body "$ROOTDOM" /openapi.json | tr -d ' \n')"
+it_check "root favicon"              "200"              "$(it_status "$ROOTDOM" /favicon.ico)"
+it_check "root has no versions.json" "404"              "$(it_status "$ROOTDOM" /versions.json)"
+it_check "root unknown folder"       "404"              "$(it_status "$ROOTDOM" /v2/kjv/1/1.json)"
+it_check "root dotfile hidden"       "404"              "$(it_status "$ROOTDOM" /.hidden)"
+it_check "root health"               '{"status":"ok"}'  "$(it_body "$ROOTDOM" /healthz)"
+it_check "root query string rejected" "400"             "$(it_status "$ROOTDOM" '/kjv/1/1.json?x=1')"
 
 it_summary

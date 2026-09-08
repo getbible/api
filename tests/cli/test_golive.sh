@@ -79,7 +79,7 @@ D=staged.example.test
 echo "-- staged deployment --"
 "$GB" deploy static --domain "$D" --version v2 --repo git@github.com:getbible/v2_scripture.git --extensions json,sha,txt --staged >/dev/null 2>&1 || { echo "staged deploy failed"; exit 1; }
 check "recorded as staged"        "LIVE=false"                  "$(conf "$D")"
-check "overview shows staged"     "versions: v2  · staged"      "$("$GB" status 2>/dev/null)"
+check "overview shows staged"     "endpoints: v2  · staged"      "$("$GB" status 2>/dev/null)"
 check "status shows publication"  "Publication : staged"        "$("$GB" status "$D" 2>/dev/null)"
 check "placeholder certificate"   "BEGIN CERTIFICATE"           "$(cat "$PLACEHOLDERS/$D/fullchain.pem")"
 check "placeholder key private"   "600"                         "$(stat -c %a "$PLACEHOLDERS/$D/privkey.pem")"

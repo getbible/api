@@ -45,8 +45,8 @@ update_all() {
     fi
     exec 8>"$GB_VAR/update.lock"
     flock -n 8 || gb_die "Another update is running."
-    gb_step "Updating every endpoint from commit $commit"
-    tg_notify start "Update started" "getbible.sh update at commit $commit on $(ep_list | wc -l) endpoint(s)."
+    gb_step "Updating every domain from commit $commit"
+    tg_notify start "Update started" "getbible.sh update at commit $commit on $(ep_list | wc -l) domain(s)."
     logs_render_rotation
     while read -r domain; do
         [[ -n "$domain" ]] || continue
@@ -61,10 +61,10 @@ update_all() {
         cloudflare_refresh_ips_if_enabled || true
     fi
     if (( failures == 0 )); then
-        tg_notify ok "Update complete" "$count endpoint(s) are at commit $commit."
-        gb_log "Update complete: $count endpoint(s) at $commit."
+        tg_notify ok "Update complete" "$count domain(s) are at commit $commit."
+        gb_log "Update complete: $count domain(s) at $commit."
     else
-        tg_notify fail "Update finished with failures" "$failures of $count endpoint(s) failed at commit $commit. Check getbible.sh status."
+        tg_notify fail "Update finished with failures" "$failures of $count domain(s) failed at commit $commit. Check getbible.sh status."
         gb_warn "Update finished with $failures failure(s)."
         return 1
     fi

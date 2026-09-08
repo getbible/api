@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{DOMAIN}} · getBible API</title>
+{{#IF FAVICON}}<link rel="icon" href="/favicon.ico">
+{{/IF}}<style>{{CSS}}</style>
+</head>
+<body>
+<main>
+<h1>{{DOMAIN}}</h1>
+<p class="lead">The getBible <strong>{{KIND}}</strong> API: {{DESCRIPTION}}. <span class="badge">{{ACCESS_MODE_LABEL}}</span></p>
+
+<h2>Endpoints</h2>
+<p>Every path starts with a version segment. Each version is served by its own service and has its own documentation page and OpenAPI document.</p>
+<table>
+<tr><th>Version</th><th>Route</th><th>Documentation</th><th>OpenAPI</th></tr>
+{{ENDPOINT_ROWS}}
+</table>
+
+<h2>How to call it</h2>
+<pre><code>curl https://{{DOMAIN}}/{{EXAMPLE_PATH}}</code></pre>
+<ul>
+<li>Responses are JSON with open CORS (<code>Access-Control-Allow-Origin: *</code>); preflights answer <code>204</code>.</li>
+<li>Health: <code>GET /healthz</code>; readiness (the service can read scripture): <code>GET /readyz</code>.</li>
+<li>Every error is an <a href="https://www.rfc-editor.org/rfc/rfc9457">RFC 9457 problem document</a> (<code>application/problem+json</code>).</li>
+</ul>
+
+<h2>Access</h2>
+{{ACCESS_HTML}}
+
+<footer>Served by getBible · <a href="https://getbible.net">getbible.net</a> · Requests carry an <code>X-Request-ID</code> header; quote it when reporting a problem.</footer>
+</main>
+</body>
+</html>

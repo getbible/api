@@ -50,13 +50,37 @@ server {
         return 400;
     }
 {{/IF}}
-    # Documentation for this API lives at the domain root.
+{{#IF DOMAIN_PAGE}}
+    # The domain page, or the root endpoint's page when there are no version folders.
     location = / {
-        root {{WWW_DIR}};
-        try_files /index.html =404;
+        root {{DOMAIN_PAGE_ROOT}};
+        try_files {{DOMAIN_PAGE_FILE}} =404;
         include snippets/getbible/headers-html.conf;
     }
-
+{{/IF}}{{#IF FAVICON}}
+    location = /favicon.ico {
+        root {{WWW_DIR}};
+        types { }
+        default_type {{FAVICON_MIME}};
+        try_files /favicon.ico =404;
+        include snippets/getbible/headers.conf;
+        add_header Cache-Control "public, max-age=86400" always;
+    }
+{{/IF}}{{#IF VERSIONS_JSON}}
+    location = /versions.json {
+        root {{WWW_DIR}};
+        try_files /versions.json =404;
+        include snippets/getbible/headers.conf;
+        add_header Cache-Control "public, max-age=300" always;
+    }
+{{/IF}}{{#IF DOMAIN_OPENAPI}}
+    location = /openapi.json {
+        root {{DOMAIN_OPENAPI_ROOT}};
+        try_files {{DOMAIN_OPENAPI_FILE}} =404;
+        include snippets/getbible/headers.conf;
+        add_header Cache-Control "public, max-age=300" always;
+    }
+{{/IF}}
 {{LOCATIONS}}
     location ~ /\. {
         access_log off;

@@ -97,7 +97,7 @@ sync_pin_host() {
 
 # Render and enable the service + timer for one version.
 sync_install_version() {
-    local domain="$1" label="$2" schedule unit user home stage_service stage_timer
+    local domain="$1" label="$2" schedule unit user home stage_service stage_timer extras
     ep_load "$domain"
     ep_version_load "$domain" "$label"
     user="$(sync_user "$domain")"
@@ -106,11 +106,18 @@ sync_install_version() {
     schedule="${EP_SYNC_SCHEDULE:-$(gb_global DEFAULT_SYNC_SCHEDULE weekly)}"
     stage_service="$(gb_tmpdir)/$unit.service"
     stage_timer="$(gb_tmpdir)/$unit.timer"
+    # A page or OpenAPI document that comes from the repository is exported
+    # by path, whatever file types the endpoint otherwise serves.
+    extras=""
+    [[ "${EV_DOCS_SOURCE:-generated}" != repository ]] || extras="${EV_DOCS_REPO_PATH:-index.html}"
+    if [[ "${EV_OPENAPI_SOURCE:-$(type_static_openapi_default)}" == repository ]]; then
+        extras="${extras:+$extras,}${EV_OPENAPI_REPO_PATH:-openapi.json}"
+    fi
     gb_render "$GB_TYPES/static/templates/sync.service.tmpl" "$stage_service" \
         "DOMAIN=$domain" "LABEL=$label" "REPO_URL=$EV_REPO_URL" "REPO_REF=$EV_REPO_REF" \
-        "SOURCE_PATH=$EV_SOURCE_PATH" "EXTENSIONS=$EP_EXTENSIONS" "USER=$user" \
+        "SOURCE_PATH=$EV_SOURCE_PATH" "EXTENSIONS=$EP_EXTENSIONS" "EXTRA_FILES=$extras" "USER=$user" \
         "GROUP=$GB_READERS_GROUP" "HOME=$home" "DATA_DIR=$(ep_data_dir "$domain")" \
-        "LIBEXEC=$GB_LIBEXEC" "TELEGRAM_CONF=$GB_TELEGRAM_CONF"
+        "LIBEXEC=$GB_LIBEXEC" "TELEGRAM_CONF=$GB_TELEGRAM_CONF" "GETBIBLE=${GB_SELF:-$GB_REPO_DIR/getbible.sh}"
     gb_render "$GB_TYPES/static/templates/sync.timer.tmpl" "$stage_timer" \
         "DOMAIN=$domain" "LABEL=$label" "REPO_URL=$EV_REPO_URL" "SCHEDULE=$schedule"
     sd_install_unit "$stage_service" "$unit.service"
@@ -175,7 +182,7 @@ sync_test_access() {
 sync_status_text() {
     local domain="$1" label="$2" unit next
     unit="$(sync_unit "$domain" "$label")"
-    printf 'Version %s of %s\n' "$label" "$domain"
+    printf 'Endpoint %s of %s\n' "$(pages_label_text "$label")" "$domain"
     printf '  repository : %s (%s)\n' "$(ep_version_get "$domain" "$label" REPO_URL)" "$(ep_version_get "$domain" "$label" REPO_REF)"
     printf '  source path: %s\n' "$(ep_version_get "$domain" "$label" SOURCE_PATH)"
     printf '  live path  : %s\n' "$(ep_version_path "$domain" "$label")"
