@@ -1,10 +1,16 @@
 # Cloudflare
 
-Cloudflare blocks API clients when a zone runs with its website defaults:
-the browser integrity check, Bot Fight Mode and challenge pages all treat
-curl, bots and mobile apps as attackers. The fix is not to turn the proxy
-off but to give the API hostnames an API-safe profile, which this tool
-applies per domain.
+Direct traffic is the default. New domains use `off`: the tool does not
+manage Cloudflare DNS or enable its proxy. A stored Cloudflare token does
+not change this choice. Select `dns` on an individual domain if Cloudflare
+should manage its A/AAAA records while clients connect directly to the
+server. Select `proxied` explicitly only for domains that should use the
+Cloudflare proxy.
+
+For a proxied domain, the tool applies an API-friendly profile so browser
+challenges and Cloudflare rate limiting do not obstruct API clients.
+The existing origin access modes and unlimited access for valid tokens
+are unchanged.
 
 ## Token
 
@@ -57,12 +63,24 @@ Domain > Cloudflare settings, or `getbible.sh cloudflare mode DOMAIN off|dns|pro
 
 | Mode | Effect |
 | --- | --- |
-| `off` | not managed |
+| `off` (default) | not managed; no DNS or proxy changes |
 | `dns` | the A/AAAA records are created or updated, grey cloud: traffic reaches the origin directly |
 | `proxied` | orange cloud, plus the API profile below |
 
-The API profile for a proxied host, applied as rules that only match that
-hostname so the rest of the zone is untouched:
+To move an already proxied domain to direct traffic, select `dns`.
+Selecting `off` stops management and deliberately leaves existing
+Cloudflare configuration as it is.
+
+The API profile for a proxied host is applied using rules that only match
+that hostname. Rules carry the exact description `getbible:<domain>`.
+The manager updates and deletes these individual rules by ID, and adds
+new rules without replacing the shared ruleset. Existing rule positions,
+other hosts' rules, their metadata, and concurrent unrelated edits are
+preserved. A missing entry point is created with a create request; a
+concurrent creation is re-read instead of overwritten. Removal of an absent
+rule does nothing, and removal failures are reported.
+
+The profile consists of:
 
 - configuration rule: browser integrity check off, security level
   "essentially off", SSL strict;
@@ -84,6 +102,13 @@ Origin side, for proxied hosts:
 Zone-wide toggles that cannot be scoped to a host (Bot Fight Mode off;
 HTTP/3, brotli, TLS 1.2 minimum, always HTTPS) are under System > Cloudflare
 origin tools and applied only on explicit request.
+
+## Operator output
+
+Cloudflare menu actions show labeled results and a DNS table with each
+record's routing mode and address. The command-line DNS, zone and token
+commands continue to print JSON for automation. The helper also accepts
+`--human` before a command for the readable form.
 
 ## Plans
 

@@ -16,8 +16,8 @@ Usage:
   getbible-cloudflare origin-ca
 
 The API token comes from the CLOUDFLARE_API_TOKEN environment variable. Every
-command prints JSON on stdout and exits non-zero with a message on stderr on
-failure. Rules created here carry the description "getbible:<domain>" so
+command prints JSON on stdout (prefix the command with --human for menu-style
+output) and exits non-zero with a message on stderr on failure. Rules created here carry the description "getbible:<domain>" so
 they are updated in place and never duplicate.
 """
 
@@ -137,17 +137,50 @@ def entrypoint(zone_id: str, phase: str) -> dict | None:
 
 
 def replace_rule(zone_id: str, phase: str, description: str, rule: dict | None) -> dict:
-    """Insert, update or remove the rule carrying `description` in a phase."""
+    """Change only this host's managed rule, never replace a shared ruleset.
+
+    Keep an existing rule in its current position. The single-rule endpoints
+    also preserve unrelated rules changed after our GET. Exact descriptions
+    identify the rules created by this tool, including older installations.
+    """
     current = entrypoint(zone_id, phase)
-    rules = [r for r in (current or {}).get("rules", []) if r.get("description") != description]
-    kept = []
-    for existing in rules:
-        kept.append({k: existing[k] for k in ("action", "expression", "description", "enabled", "action_parameters") if k in existing})
-    if rule is not None:
-        rule = dict(rule)
-        rule["description"] = description
-        kept.append(rule)
-    return request("PUT", f"/zones/{zone_id}/rulesets/phases/{phase}/entrypoint", {"rules": kept})["result"]
+    wanted = dict(rule, description=description) if rule is not None else None
+    if current is None:
+        if wanted is None:
+            return {}
+        try:
+            # POST creates a new entry point; unlike PUT it cannot overwrite
+            # an entry point another administrator creates after our GET.
+            return request("POST", f"/zones/{zone_id}/rulesets", {
+                "name": f"getBible {phase}", "kind": "zone", "phase": phase,
+                "rules": [wanted],
+            })["result"]
+        except CloudflareError:
+            # Another writer may have created it, or our successful POST may
+            # have lost its response. Re-read and update only our rule.
+            current = entrypoint(zone_id, phase)
+            if current is None:
+                raise
+
+    owned = [r for r in current.get("rules", []) if r.get("description") == description]
+    if wanted is None and not owned:
+        return current
+    ruleset_id = current.get("id")
+    if not ruleset_id or any(not item.get("id") for item in owned):
+        raise CloudflareError(f"Cloudflare returned a rule without an ID in {phase}")
+    path = f"/zones/{zone_id}/rulesets/{ruleset_id}/rules"
+    result = current
+    if wanted is not None:
+        if not owned:
+            return request("POST", path, wanted)["result"]
+        existing = owned.pop(0)
+        if existing.get("ref"):
+            wanted["ref"] = existing["ref"]
+        result = request("PATCH", f"{path}/{existing['id']}", wanted)["result"]
+    # Remove only exact managed matches (including any historical duplicates).
+    for existing in owned:
+        result = request("DELETE", f"{path}/{existing['id']}")["result"]
+    return result
 
 
 def cmd_host_rules(domain: str, args: list[str]) -> dict:
@@ -226,11 +259,14 @@ def cmd_protect_access(domain: str) -> dict:
 def cmd_host_rules_remove(domain: str) -> dict:
     zone = find_zone(domain)
     description = f"getbible:{domain}"
+    errors = []
     for phase in ("http_config_settings", "http_request_cache_settings", "http_request_firewall_custom"):
         try:
             replace_rule(zone["id"], phase, description, None)
-        except SystemExit:
-            pass
+        except CloudflareError as error:
+            errors.append(f"{phase}: {error}")
+    if errors:
+        raise CloudflareError("Could not remove all host rules: " + "; ".join(errors))
     return {"zone": zone["name"], "removed": description}
 
 
@@ -277,7 +313,46 @@ def cmd_ips() -> dict:
     return {"ipv4": v4, "ipv6": v6}
 
 
+def human_report(out: dict) -> str:
+    """Readable menu output; the command-line default remains JSON."""
+    lines = []
+
+    def value_text(value):
+        if isinstance(value, bool):
+            return "yes" if value else "no"
+        return str(value) if value is not None else "-"
+
+    def field(key, value, indent=""):
+        label = key.replace("_", " ").capitalize()
+        if isinstance(value, dict):
+            lines.append(f"{indent}{label}")
+            for child_key, child in value.items():
+                field(child_key, child, indent + "  ")
+        elif isinstance(value, list):
+            lines.append(f"{indent}{label}: " + ("" if value else "none"))
+            for child in value:
+                lines.append(f"{indent}  {value_text(child)}")
+        else:
+            lines.append(f"{indent}{label:<24} {value_text(value)}")
+
+    for key, value in out.items():
+        if key != "records":
+            field(key, value)
+    if "records" in out:
+        lines.extend(["", "DNS records", f"  {'Type':<7} {'Routing':<18} Address / value"])
+        for record in out["records"]:
+            proxied = record.get("proxied")
+            routing = "Cloudflare proxy" if proxied is True else "Direct / DNS only" if proxied is False else "-"
+            lines.append(f"  {record['type']:<7} {routing:<18} {record['content']}")
+        if not out["records"]:
+            lines.append("  No records.")
+    return "\n".join(lines)
+
+
 def main(argv: list[str]) -> int:
+    human = len(argv) > 1 and argv[1] == "--human"
+    if human:
+        argv = [argv[0], *argv[2:]]
     if len(argv) < 2 or argv[1] in {"-h", "--help"}:
         sys.stderr.write(__doc__)
         return 2
@@ -311,7 +386,7 @@ def main(argv: list[str]) -> int:
         return 0
     else:
         raise CloudflareError(f"unknown command {command}")
-    print(json.dumps(out, indent=2))
+    print(human_report(out) if human else json.dumps(out, indent=2))
     return 0
 
 

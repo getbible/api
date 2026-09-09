@@ -14,6 +14,9 @@ cf_cmd() {
     CLOUDFLARE_API_TOKEN="$(cf_token)" "$GB_PYTHON" "$GB_TOOLS/getbible-cloudflare" "$@"
 }
 
+# Keep CLI JSON for scripts; menus and operation logs use readable reports.
+cf_human() { cf_cmd --human "$@"; }
+
 cloudflare_configure() {
     local token result
     token="$(ui_password "Cloudflare" "API token (Zone:Read, DNS:Edit, Zone Settings:Edit, Zone WAF:Edit, Cache Purge:Purge, SSL and Certificates:Edit). Empty keeps the stored one.")" || return 1
@@ -26,7 +29,7 @@ cloudflare_configure() {
             certs_cloudflare_credentials_write || true
         fi
     fi
-    if result="$(cf_cmd verify 2>&1)"; then
+    if result="$(cf_human verify 2>&1)"; then
         gb_global_set CLOUDFLARE_ENABLED true
         ui_msg "Cloudflare" "Token verified:\n$result"
     else
@@ -63,7 +66,7 @@ cloudflare_protect_access() {
         return 1
     fi
     gb_step "Disable shared caching and purge formerly public responses for $domain"
-    cf_cmd protect-access "$domain" >&2 || return 1
+    cf_human protect-access "$domain" >&2 || return 1
     ep_state_set "$domain" EDGE_CACHE_POLICY protected-v1
     tg_notify info "Protected cache policy: $domain" "Cloudflare caching disabled; previously cached host content purged."
 }
@@ -82,8 +85,8 @@ cloudflare_apply() {
         cache=bypass
         cloudflare_protect_access "$domain" || return 1
     fi
-    cf_enabled || { gb_warn "No Cloudflare token stored; skipping Cloudflare for $domain."; return 0; }
     [[ "$mode" == off ]] && return 0
+    cf_enabled || { gb_warn "No Cloudflare token stored; skipping Cloudflare for $domain."; return 0; }
     ipv4="$(cf_public_ipv4)"
     ipv6="$(cf_public_ipv6)"
     proxied=false
@@ -92,11 +95,11 @@ cloudflare_apply() {
     local -a args=(dns "$domain" --proxied "$proxied")
     [[ -n "$ipv4" ]] && args+=(--ipv4 "$ipv4")
     [[ -n "$ipv6" ]] && args+=(--ipv6 "$ipv6")
-    cf_cmd "${args[@]}" >&2 || return 1
+    cf_human "${args[@]}" >&2 || return 1
     ep_state_set "$domain" CLOUDFLARE_DNS_AT "$(gb_timestamp)"
     if [[ "$mode" == proxied ]]; then
         gb_step "Cloudflare rules for $domain (cache: $cache)"
-        cf_cmd host-rules "$domain" --cache "$cache" --security api >&2 || return 1
+        cf_human host-rules "$domain" --cache "$cache" --security api >&2 || return 1
         if [[ "$(ep_get "$domain" ACCESS_MODE metered)" != token ]]; then
             ep_state_set "$domain" EDGE_CACHE_POLICY "public-$cache"
         fi
@@ -105,7 +108,7 @@ cloudflare_apply() {
             cloudflare_install_origin_ca
         fi
     else
-        cf_cmd host-rules-remove "$domain" >&2 || true
+        cf_human host-rules-remove "$domain" >&2 || gb_warn "DNS now routes directly, but some managed Cloudflare rules could not be removed."
     fi
     tg_notify info "Cloudflare updated: $domain" "Mode: $mode, cache: $cache."
 }
@@ -230,12 +233,12 @@ cloudflare_endpoint_menu() {
             pulls)
                 if ui_yesno "Origin pulls" "Require Cloudflare's client certificate on this domain? Only meaningful in proxied mode; direct access to the origin stops working." "$([[ "$pulls" == true ]] && echo yes || echo no)"; then
                     ep_set "$domain" CLOUDFLARE_ORIGIN_PULLS true
-                    ui_run "Enable origin pulls" cf_cmd origin-pulls "$domain" on
+                    ui_run "Enable origin pulls" cf_human origin-pulls "$domain" on
                 else
                     ep_set "$domain" CLOUDFLARE_ORIGIN_PULLS false
                 fi ;;
             apply) ui_run "Cloudflare apply" cloudflare_apply_and_render "$domain" ;;
-            show) ui_run "DNS records" cf_cmd dns-show "$domain" ;;
+            show) ui_run "DNS records" cf_human dns-show "$domain" ;;
             back) return 0 ;;
         esac
     done
@@ -253,11 +256,11 @@ cloudflare_system_menu() {
         botfight)
             local domain
             domain="$(ui_input "Zone" "A domain inside the zone" "$(ep_list | head -1)")" || return 0
-            ui_run "Bot Fight Mode off" cf_cmd bot-fight "$domain" off ;;
+            ui_run "Bot Fight Mode off" cf_human bot-fight "$domain" off ;;
         settings)
             local domain
             domain="$(ui_input "Zone" "A domain inside the zone" "$(ep_list | head -1)")" || return 0
-            ui_run "Zone settings" cf_cmd zone-settings "$domain" --http3 on --brotli on --min-tls 1.2 --always-https on --tls13 on ;;
+            ui_run "Zone settings" cf_human zone-settings "$domain" --http3 on --brotli on --min-tls 1.2 --always-https on --tls13 on ;;
     esac
 }
 
