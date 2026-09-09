@@ -131,17 +131,44 @@ else:
     raise SystemExit('private SSH server did not start')
 PY
 
-run_sync_unit() {
-    local unit="$1" override_key="${2:-}" command user
+run_sync_unit() (
+    local unit="$1" override_key="${2:-}" command user working_directory
     local -a environment=()
     mapfile -t environment < <(sed -n 's/^Environment=//p' "$unit")
     command="$(sed -n 's/^ExecStart=//p' "$unit")"
     user="$(sed -n 's/^User=//p' "$unit")"
+    working_directory="$(sed -n 's/^WorkingDirectory=//p' "$unit")"
+    # A system service defaults to /, never the operator's source checkout.
+    # Change directory before dropping privileges so a private caller path
+    # cannot make Git's initial directory inspection fail.
+    cd -- "${working_directory:-/}" || return 1
     [[ -z "$override_key" ]] || environment+=("GB_SYNC_KEY=$override_key")
     # Execute the installed service command as its declared user, with exactly
     # its rendered environment. Notifications are disabled for this fixture.
     runuser -u "$user" -- env "${environment[@]}" GB_NOTIFY=/nonexistent-notifier "$command"
-}
+)
+# Reproduce an operator or CI checkout that the sync account cannot traverse.
+# All service invocations must use their own working directory independently.
+PRIVATE_CHECKOUT="$SB/operator-private/checkout"
+mkdir -p "$PRIVATE_CHECKOUT"
+chmod 0700 "$SB/operator-private"
+assert 'caller checkout is inaccessible to the sync account' runuser -u "$SYNC_USER" -- test ! -x "$PRIVATE_CHECKOUT"
+cd -- "$PRIVATE_CHECKOUT"
+check_repository_access() (
+    local endpoint="$1" caller_directory
+    caller_directory="$(pwd -P)"
+    for lib in core config registry sync; do
+        # shellcheck source=/dev/null
+        source "$ROOT/src/lib/$lib.sh"
+    done
+    # Retain the sandbox's resolved registry/home paths while enabling the
+    # real runuser/SSH probe against the private server and fixture accounts.
+    GB_PREFIX=""
+    sync_test_access "$DOMAIN" "$endpoint" > "$SB/access-$endpoint.log" 2>&1 || return 1
+    [[ "$(pwd -P)" == "$caller_directory" ]]
+)
+assert 'v1 access probe succeeds from private checkout and preserves caller cwd' check_repository_access v1
+assert 'v2 access probe succeeds from private checkout and preserves caller cwd' check_repository_access v2
 run_sync_unit "$UNIT_V1" > "$SB/sync-v1.log" 2>&1
 run_sync_unit "$UNIT_V2" > "$SB/sync-v2.log" 2>&1
 assert 'v1 authenticates and publishes its own repository' grep -Fxq '{"endpoint":"v1"}' "$SYNC_DATA/v1/doc.json"
@@ -157,4 +184,5 @@ assert 'wrong key leaves v2 publication unchanged' test "$(readlink -f "$SYNC_DA
 assert 'wrong key leaves v2 published bytes intact' grep -Fxq '{"endpoint":"v2"}' "$SYNC_DATA/v2/doc.json"
 run_sync_unit "$UNIT_V2" > "$SB/retry.log" 2>&1
 assert 'correct key can still check the unchanged repository' grep -q 'up to date' "$SB/retry.log"
+assert 'service execution preserves the caller working directory' test "$(pwd -P)" = "$PRIVATE_CHECKOUT"
 printf 'Real SSH endpoint identity checks passed.\n'

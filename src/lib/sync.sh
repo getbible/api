@@ -207,7 +207,9 @@ sync_test_access() {
     home="$(sync_home "$domain")"
     [[ -z "$GB_PREFIX" && "$GB_DRY_RUN" != true ]] || { gb_warn "Repository access cannot be verified in dry-run or prefix mode."; return 1; }
     printf -v command 'ssh -F /dev/null -i %q -o IdentitiesOnly=yes -o IdentityAgent=none -o UserKnownHostsFile=%q -o StrictHostKeyChecking=yes -o BatchMode=yes' "$key" "$home/.ssh/known_hosts"
-    refs="$(runuser -u "$user" -- env HOME="$home" GIT_SSH_COMMAND="$command" GIT_TERMINAL_PROMPT=0 \
+    # Operators may start the CLI in a private checkout or /root. Git must run
+    # from a directory the restricted sync account can traverse.
+    refs="$(cd "$home" && runuser -u "$user" -- env HOME="$home" GIT_SSH_COMMAND="$command" GIT_TERMINAL_PROMPT=0 \
         git ls-remote --exit-code "$url" "$ref" "refs/heads/$ref" "refs/tags/$ref")" || return 1
     if [[ "$ref" == refs/heads/* || "$ref" == refs/tags/* || "$ref" == HEAD ]]; then
         refs="$(awk -v ref="$ref" '$2 == ref {print}' <<< "$refs")"
