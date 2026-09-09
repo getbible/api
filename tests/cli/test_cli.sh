@@ -109,8 +109,9 @@ ln -sfn "releases/v2/r1" "$SB/srv/getbible/$D/v2"
 check "versions.json lists v2"   '"openapi": "https://'"$D"'/v2/openapi.json"' "$(cat "$SB/var/www/getbible/$D/versions.json")"
 check "domain page links openapi" '<a href="/v2/openapi.json">openapi.json</a>' "$(cat "$SB/var/www/getbible/$D/index.html")"
 "$GB" version add "$D" v3 --repo git@github.com:getbible/v3.git >/dev/null 2>&1
-mkdir -p "$SB/srv/getbible/$D/v3"
-printf '{}\n' > "$SB/srv/getbible/$D/v3/openapi.json"
+mkdir -p "$SB/srv/getbible/$D/releases/v3/r1"
+printf '{}\n' > "$SB/srv/getbible/$D/releases/v3/r1/openapi.json"
+ln -s "releases/v3/r1" "$SB/srv/getbible/$D/v3"
 "$GB" pages "$D" publish >/dev/null 2>&1
 check "discovery adds new version" '"version": "v3"' "$(cat "$SB/var/www/getbible/$D/versions.json")"
 sed -i 's/^ENABLED=true$/ENABLED=false/' "$SB/etc/getbible/endpoints/$D/versions/v3.conf"

@@ -66,8 +66,11 @@ endpoint_apply() {
 pass=0
 check() { "$@" || { printf 'FAIL: %s\n' "$*" >&2; exit 1; }; pass=$((pass + 1)); }
 domain=query.example.test
-type_runtime_create "$domain" query v2 "$ROOT/tests/python/fixtures/repository" metered ''
-ep_version_set "$domain" v2 REQUIRE_CHECKSUMS false
+REPO="$GB_PREFIX/scripture"
+mkdir -p "$REPO"
+cp -a "$ROOT/tests/python/fixtures/repository/." "$REPO/"
+type_runtime_create "$domain" query v2 "$REPO" metered ''
+ep_version_set "$domain" v2 REQUIRE_CHECKSUMS true # older releases recorded this by default
 ep_version_set "$domain" v2 DEFAULT_TRANSLATION test
 ep_version_set "$domain" v2 DEFAULT_REFERENCE Ge1:1
 root="$(rt_root "$domain" v2)"
@@ -87,6 +90,7 @@ check grep -q "WorkingDirectory=$first_release" "$first_candidate/service.unit"
 check grep -q -- "--config $first_candidate/gunicorn.conf.py" "$first_candidate/service.unit"
 check grep -q 'KillSignal=SIGTERM' "$first_candidate/service.unit"
 check grep -q 'QUERY_DEFAULT_TRANSLATION="test"' "$first_candidate/runtime.env"
+check grep -q 'GETBIBLE_REQUIRE_CHECKSUMS="false"' "$first_candidate/runtime.env"
 check test "$(grep -c '^enable ' "$events" || true)" = 0
 type_runtime_before_switch "$domain"
 check grep -q "^enable $(rt_generation_unit "$domain" v2 "$first_candidate").socket" "$events"
@@ -176,8 +180,7 @@ ep_version_set "$domain" v2 DEFAULT_REFERENCE Ge1:1
 # A second version is its own service: own root, units, sockets, cache and
 # environment file, deployed by the same transaction as the first.
 mkdir -p "$GB_SRC/apps"
-printf '{"value": 1}\n' > "$ROOT/tests/python/fixtures/repository/.v3-marker" 2>/dev/null || true
-rm -f "$ROOT/tests/python/fixtures/repository/.v3-marker"
+cp -a "$REPO/v2" "$REPO/v3"
 # Stubs called by the type module (newer shellcheck reports SC2329, older SC2317).
 # shellcheck disable=SC2317,SC2329
 rt_kind_versions() { printf 'v2\nv3\n'; }
@@ -193,7 +196,7 @@ rt_manifest_load() {
     cfg_load "$GB_APPS/$kind/manifest.conf" RM
     RM_DIR="$kind"
 }
-rt_record_endpoint "$domain" v3 v3 "$ROOT/tests/python/fixtures/repository" ""
+rt_record_endpoint "$domain" v3 v3 "$REPO" ""
 ep_version_set "$domain" v3 REQUIRE_CHECKSUMS false
 ep_version_set "$domain" v3 DEFAULT_TRANSLATION test
 check test "$(rt_root "$domain" v3)" = "$GB_OPT/query/v3"
@@ -236,7 +239,7 @@ legacy_domain=search.example.test
 ep_create "$legacy_domain" runtime search
 ep_set "$legacy_domain" ACCESS_MODE metered
 ep_set "$legacy_domain" VERSION v2
-ep_set "$legacy_domain" REPOSITORY "$ROOT/tests/python/fixtures/repository"
+ep_set "$legacy_domain" REPOSITORY "$REPO"
 ep_set "$legacy_domain" WORKERS 2
 ep_set "$legacy_domain" THREADS 4
 ep_set "$legacy_domain" WARM_TRANSLATIONS test
@@ -248,7 +251,7 @@ legacy_release="$(py_build_release search "$legacy_domain")"
 py_switch_release search "$legacy_release"
 mkdir -p "$(ep_dir "$legacy_domain")"
 printf 'GETBIBLE_REPOSITORY=%s\nGETBIBLE_VERSION=v2\nSEARCH_DEFAULT_TRANSLATION=test\nSEARCH_WORKERS=2\nSEARCH_THREADS=4\nGETBIBLE_REQUIRE_CHECKSUMS=false\n' \
-    "$ROOT/tests/python/fixtures/repository" > "$(ep_dir "$legacy_domain")/runtime.env"
+    "$REPO" > "$(ep_dir "$legacy_domain")/runtime.env"
 legacy_env_hash="$(gb_sha256_file "$(ep_dir "$legacy_domain")/runtime.env")"
 check test "$(type_runtime_endpoints "$legacy_domain")" = v2
 check test "$(rt_layout "$legacy_domain" v2)" = legacy

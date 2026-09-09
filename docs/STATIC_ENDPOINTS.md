@@ -84,6 +84,8 @@ Their validation belongs to the upstream builders. There is no validation
 on requests, and no second pass over the exported corpus. A private export
 index records Git blob identities for reuse; it is only an optimization,
 and a missing index simply causes the files to be copied on that sync.
+A forced sync always copies the committed blobs again, bypassing inode reuse,
+so it also restores the repository's exact bytes after local file damage.
 
 Nothing in the export pipeline runs as root and nothing reloads nginx.
 Release directories are unique, concurrent runs are locked, and hard-linked

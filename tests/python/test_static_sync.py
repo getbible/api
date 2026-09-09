@@ -111,8 +111,9 @@ class StaticSyncTest(unittest.TestCase):
         self.assertEqual((first / "doc.json").read_bytes(), original)
         self.assertEqual((second / "doc.json").read_bytes(), original)
         self.assertFalse(marker.exists())
-        # Unchanged files stay shared without rewriting any linked content.
-        self.assertEqual((first / "doc.json").stat().st_ino, (third / "doc.json").stat().st_ino)
+        # Forced exports reread Git so a reset also repairs locally damaged bytes.
+        self.assertNotEqual((first / "doc.json").stat().st_ino, (third / "doc.json").stat().st_ino)
+        self.assertNotEqual((second / "doc.json").stat().st_ino, (third / "doc.json").stat().st_ino)
         self.assertNotEqual((first / ".revision").stat().st_ino, (third / ".revision").stat().st_ino)
 
     def test_annotated_qualified_tag_is_published_once_and_branch_ambiguity_fails(self) -> None:
@@ -287,6 +288,19 @@ fi
         self.assertNotEqual(revision, first)
         self.assertEqual((self.live / ".revision").read_text().strip(), revision)
         self.assertEqual(json.loads((self.live / "doc.json").read_text()), {"value": "advanced"})
+
+
+    def test_force_restores_repository_bytes_after_local_damage(self) -> None:
+        self.sync()
+        before = self.live.resolve()
+        original = (before / "doc.json").read_bytes()
+        damaged = original.replace(b"first", b"wrong")
+        (before / "doc.json").write_bytes(damaged)
+        self.sync(GB_SYNC_FORCE="1")
+        self.assertEqual((self.live / "doc.json").read_bytes(), original)
+        self.assertEqual((before / "doc.json").read_bytes(), damaged)
+        self.assertNotEqual((self.live / "doc.json").stat().st_ino,
+                            (before / "doc.json").stat().st_ino)
 
 
 if __name__ == "__main__":
