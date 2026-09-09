@@ -7,10 +7,11 @@ GB_PYTHON_LOADED=1
 # shellcheck source=platform.sh
 source "${GB_LIB:-$(dirname -- "${BASH_SOURCE[0]}")}/platform.sh"
 
-# A root holds one service's releases/, deployments/ and current link. It is
-# given as an absolute path, or as a kind name for the layout of installations
-# from before every version had its own service (/opt/getbible/<kind>).
-py_app_root() { if [[ "$1" == /* ]]; then printf '%s\n' "$1"; else printf '%s/%s\n' "$GB_OPT" "$1"; fi; }
+# ROOT is the absolute directory for one endpoint's releases and generations.
+py_app_root() {
+    [[ "$1" == /* ]] || gb_die "Runtime release root must be an absolute endpoint path."
+    printf '%s\n' "$1"
+}
 py_releases_dir() { printf '%s/releases\n' "$(py_app_root "$1")"; }
 py_current_link() { printf '%s/current\n' "$(py_app_root "$1")"; }
 py_current_release() { readlink -f -- "$(py_current_link "$1")" 2>/dev/null || true; }

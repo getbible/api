@@ -70,7 +70,6 @@ REPO="$GB_PREFIX/scripture"
 mkdir -p "$REPO"
 cp -a "$ROOT/tests/python/fixtures/repository/." "$REPO/"
 type_runtime_create "$domain" query v2 "$REPO" metered ''
-ep_version_set "$domain" v2 REQUIRE_CHECKSUMS true # older releases recorded this by default
 ep_version_set "$domain" v2 DEFAULT_TRANSLATION test
 ep_version_set "$domain" v2 DEFAULT_REFERENCE Ge1:1
 root="$(rt_root "$domain" v2)"
@@ -90,7 +89,6 @@ check grep -q "WorkingDirectory=$first_release" "$first_candidate/service.unit"
 check grep -q -- "--config $first_candidate/gunicorn.conf.py" "$first_candidate/service.unit"
 check grep -q 'KillSignal=SIGTERM' "$first_candidate/service.unit"
 check grep -q 'QUERY_DEFAULT_TRANSLATION="test"' "$first_candidate/runtime.env"
-check grep -q 'GETBIBLE_REQUIRE_CHECKSUMS="false"' "$first_candidate/runtime.env"
 check test "$(grep -c '^enable ' "$events" || true)" = 0
 type_runtime_before_switch "$domain"
 check grep -q "^enable $(rt_generation_unit "$domain" v2 "$first_candidate").socket" "$events"
@@ -197,7 +195,6 @@ rt_manifest_load() {
     RM_DIR="$kind"
 }
 rt_record_endpoint "$domain" v3 v3 "$REPO" ""
-ep_version_set "$domain" v3 REQUIRE_CHECKSUMS false
 ep_version_set "$domain" v3 DEFAULT_TRANSLATION test
 check test "$(rt_root "$domain" v3)" = "$GB_OPT/query/v3"
 check test "$(type_runtime_endpoints "$domain" | tr '\n' ' ')" = "v2 v3 "
@@ -231,50 +228,23 @@ unset GB_TYPE_RUNTIME_LOADED
 # shellcheck source=../../src/types/runtime/type.sh
 source "$ROOT/src/types/runtime/type.sh"
 
-# A domain recorded before endpoints had records keeps its paths and units:
-# the legacy layout. Migration retains the traditional service/configuration
-# until readiness and nginx switching succeed, and keeps a usable rollback
-# target afterward.
-legacy_domain=search.example.test
-ep_create "$legacy_domain" runtime search
-ep_set "$legacy_domain" ACCESS_MODE metered
-ep_set "$legacy_domain" VERSION v2
-ep_set "$legacy_domain" REPOSITORY "$REPO"
-ep_set "$legacy_domain" WORKERS 2
-ep_set "$legacy_domain" THREADS 4
-ep_set "$legacy_domain" WARM_TRANSLATIONS test
-ep_set "$legacy_domain" REQUIRE_CHECKSUMS false
-ep_set "$legacy_domain" DEFAULT_TRANSLATION test
-ep_set "$legacy_domain" CACHE_TTL 60
-ep_set "$legacy_domain" PYTHON_VERSION 3.12.14
-legacy_release="$(py_build_release search "$legacy_domain")"
-py_switch_release search "$legacy_release"
-mkdir -p "$(ep_dir "$legacy_domain")"
-printf 'GETBIBLE_REPOSITORY=%s\nGETBIBLE_VERSION=v2\nSEARCH_DEFAULT_TRANSLATION=test\nSEARCH_WORKERS=2\nSEARCH_THREADS=4\nGETBIBLE_REQUIRE_CHECKSUMS=false\n' \
-    "$REPO" > "$(ep_dir "$legacy_domain")/runtime.env"
-legacy_env_hash="$(gb_sha256_file "$(ep_dir "$legacy_domain")/runtime.env")"
-check test "$(type_runtime_endpoints "$legacy_domain")" = v2
-check test "$(rt_layout "$legacy_domain" v2)" = legacy
-check test "$(rt_root "$legacy_domain" v2)" = "$GB_OPT/search"
-check test "$(rt_env_file "$legacy_domain" v2)" = "$(ep_dir "$legacy_domain")/runtime.env"
-check test "$(ep_version_get "$legacy_domain" v2 WORKERS)" = 2
-check test "$(ep_get "$legacy_domain" DEFAULT_ENDPOINT)" = v2
-check test -z "$(ep_get "$legacy_domain" VERSION)"
-check test -z "$(ep_get "$legacy_domain" WORKERS)"
+# A fresh search endpoint must pass its expensive readiness probe. Once live,
+# its settings updates and rollback use the same retained generation model.
+search_domain=search.example.test
+type_runtime_create "$search_domain" search v2 "$REPO" metered test
+ep_version_set "$search_domain" v2 DEFAULT_TRANSLATION test
 FAIL_PROBE=true
-if endpoint_apply "$legacy_domain"; then echo 'failed search probe accepted' >&2; exit 1; fi
+if endpoint_apply "$search_domain"; then echo 'failed search probe accepted' >&2; exit 1; fi
 FAIL_PROBE=false
-check test "$(gb_sha256_file "$(rt_env_file "$legacy_domain" v2)")" = "$legacy_env_hash"
-check test "$(rt_live_unit "$legacy_domain" v2)" = getbible-search
-check test "$(py_current_release search)" = "$legacy_release"
-endpoint_apply "$legacy_domain"
-check test -f "$(rt_previous_generation "$legacy_domain" v2)/.legacy-unit"
-check test "$(cat "$(rt_previous_generation "$legacy_domain" v2)/.release")" = "$legacy_release"
-check grep -q '^retire getbible-search$' "$events"
-check grep -q '^enable getbible-search-2' "$events"
-rt_rollback "$legacy_domain" v2
-check test "$(ep_version_get "$legacy_domain" v2 DEFAULT_TRANSLATION)" = test
-check test "$(py_current_release search)" = "$legacy_release"
+check test -z "$(rt_active_generation "$search_domain" v2)"
+endpoint_apply "$search_domain"
+search_generation="$(rt_active_generation "$search_domain" v2)"
+search_release="$(py_current_release "$(rt_root "$search_domain" v2)")"
+rt_set_setting "$search_domain" v2 DEFAULT_TRANSLATION kjv
+check test "$(rt_previous_generation "$search_domain" v2)" = "$search_generation"
+rt_rollback "$search_domain" v2
+check test "$(ep_version_get "$search_domain" v2 DEFAULT_TRANSLATION)" = test
+check test "$(py_current_release "$(rt_root "$search_domain" v2)")" = "$search_release"
 
 # A dependency/code rebuild warms an isolated cache; retaining the old cache
 # keeps a schema-changing library upgrade from damaging rollback readiness.

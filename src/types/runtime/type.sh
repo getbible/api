@@ -71,8 +71,6 @@ rt_manifest_load() {
 }
 
 rt_user() { printf 'getbible-%s\n' "$1"; }
-# The single service of an installation from before deployment generations.
-rt_unit() { printf 'getbible-%s\n' "$1"; }
 
 rt_kind_deployed_on() {
     # Print the domain already using KIND, if any (one domain per kind).
@@ -85,51 +83,12 @@ rt_kind_deployed_on() {
 }
 
 # --- endpoints: the versions of a runtime domain ------------------------------
-# Every endpoint is recorded under versions/<label>.conf with its own settings
-# and two keys that never change afterwards: APP_VERSION, the version the
-# implementation speaks (the label, or the chosen version for a root
-# endpoint), and LAYOUT. "versioned" puts the endpoint's releases,
-# generations, sockets, caches and units under paths that carry its label;
-# "legacy" keeps the paths of an installation from before every version had
-# its own service (/opt/getbible/<kind>, getbible-<kind>-<generation>), so a
-# running service is never moved.
-RT_VERSION_SETTINGS=(REPOSITORY WORKERS THREADS WARM_TRANSLATIONS DEFAULT_TRANSLATION DEFAULT_REFERENCE ALLOWED_TRANSLATIONS REQUIRE_CHECKSUMS PYTHON_VERSION CACHE_TTL)
+# Every endpoint has its own record and immutable APP_VERSION (the version
+# implemented, which can differ from the label only for a root endpoint).
+# Releases, generations, sockets, caches and units always carry its label.
+RT_VERSION_SETTINGS=(REPOSITORY WORKERS THREADS WARM_TRANSLATIONS DEFAULT_TRANSLATION DEFAULT_REFERENCE ALLOWED_TRANSLATIONS PYTHON_VERSION CACHE_TTL)
 
-# rt_ensure_versions DOMAIN: give a domain recorded before endpoints had
-# records (VERSION and the settings in endpoint.conf) its endpoint record.
-rt_ensure_versions() {
-    local domain="$1" version key value conf
-    version="$(ep_get "$domain" VERSION)"
-    [[ -n "$version" ]] || return 0
-    conf="$(ep_version_conf "$domain" "$version")"
-    if [[ -f "$conf" && -n "$(cfg_get "$conf" LAYOUT)" ]]; then return 0; fi
-    gb_ensure_dir "$(ep_versions_dir "$domain")" 0750 || return 1
-    if [[ ! -f "$conf" ]]; then
-        cfg_set "$conf" LABEL "$version"
-        cfg_set "$conf" ENABLED true
-        cfg_set "$conf" CREATED "$(gb_timestamp)"
-    fi
-    cfg_set "$conf" LAYOUT legacy
-    cfg_set "$conf" APP_VERSION "$version"
-    for key in "${RT_VERSION_SETTINGS[@]}"; do
-        [[ -z "$(cfg_get "$conf" "$key")" ]] || continue
-        value="$(ep_get "$domain" "$key")"
-        [[ -z "$value" ]] || cfg_set "$conf" "$key" "$value"
-    done
-    chmod 0640 "$conf" 2>/dev/null || true
-    [[ -n "$(ep_get "$domain" DEFAULT_ENDPOINT)" ]] || ep_set "$domain" DEFAULT_ENDPOINT "$version"
-    # The record is the only home of these keys from now on; an endpoint
-    # removed later must not come back from endpoint.conf.
-    for key in VERSION "${RT_VERSION_SETTINGS[@]}"; do
-        cfg_delete "$(ep_conf "$domain")" "$key"
-    done
-    gb_log "Recorded endpoint $version of $domain with its settings; it keeps its current paths and units."
-}
-
-type_runtime_endpoints() {
-    rt_ensure_versions "$1" || return 1
-    ep_versions "$1"
-}
+type_runtime_endpoints() { ep_versions "$1"; }
 
 # Runtime endpoints generate their OpenAPI document from the kind's template.
 type_runtime_openapi_default() { printf 'generated\n'; }
@@ -146,39 +105,37 @@ type_runtime_default_endpoint() {
     fi
 }
 
-rt_layout() { ep_version_get "$1" "$2" LAYOUT versioned; }
 rt_app_version() { ep_version_get "$1" "$2" APP_VERSION "$2"; }
-rt_is_legacy() { [[ "$(rt_layout "$1" "$2")" == legacy ]]; }
 
 # rt_root DOMAIN LABEL: the directory with the endpoint's releases/,
 # deployments/, current, active and previous.
 rt_root() {
     local kind
     kind="$(ep_get "$1" KIND)"
-    if rt_is_legacy "$1" "$2"; then printf '%s/%s\n' "$GB_OPT" "$kind"; else printf '%s/%s/%s\n' "$GB_OPT" "$kind" "$2"; fi
+    printf '%s/%s/%s\n' "$GB_OPT" "$kind" "$2"
 }
 rt_unit_prefix() {
     local kind
     kind="$(ep_get "$1" KIND)"
-    if rt_is_legacy "$1" "$2"; then printf 'getbible-%s\n' "$kind"; else printf 'getbible-%s-%s\n' "$kind" "$2"; fi
+    printf 'getbible-%s-%s\n' "$kind" "$2"
 }
 rt_socket_dir() {
     local kind
     kind="$(ep_get "$1" KIND)"
-    if rt_is_legacy "$1" "$2"; then printf '%s/%s\n' "$GB_RUN" "$kind"; else printf '%s/%s/%s\n' "$GB_RUN" "$kind" "$2"; fi
+    printf '%s/%s/%s\n' "$GB_RUN" "$kind" "$2"
 }
 # Relative to /var/cache, the form systemd's CacheDirectory= takes.
 rt_cache_subdir() {
     local kind
     kind="$(ep_get "$1" KIND)"
-    if rt_is_legacy "$1" "$2"; then printf 'getbible/%s\n' "$kind"; else printf 'getbible/%s/%s\n' "$kind" "$2"; fi
+    printf 'getbible/%s/%s\n' "$kind" "$2"
 }
 rt_cache_root() { printf '%s/var/cache/%s\n' "$GB_PREFIX" "$(rt_cache_subdir "$1" "$2")"; }
 rt_env_file() {
-    if rt_is_legacy "$1" "$2"; then printf '%s/runtime.env\n' "$(ep_dir "$1")"; else printf '%s/runtime-%s.env\n' "$(ep_dir "$1")" "$2"; fi
+    printf '%s/runtime-%s.env\n' "$(ep_dir "$1")" "$2"
 }
 rt_app_log() {
-    if rt_is_legacy "$1" "$2"; then printf '%s/app/app.log\n' "$(ep_log_dir "$1")"; else printf '%s/app/%s.log\n' "$(ep_log_dir "$1")" "$2"; fi
+    printf '%s/app/%s.log\n' "$(ep_log_dir "$1")" "$2"
 }
 # rt_cache_dir DOMAIN LABEL RELEASE: the librarian cache of one release.
 rt_cache_dir() { printf '%s/releases/%s/librarian\n' "$(rt_cache_root "$1" "$2")" "$(basename -- "$3")"; }
@@ -191,13 +148,13 @@ rt_active_generation() { local p; p="$(rt_root "$1" "$2")/active"; [[ -L "$p" ]]
 rt_previous_generation() { local p; p="$(rt_root "$1" "$2")/previous"; [[ -L "$p" ]] && readlink -f -- "$p" || true; }
 # rt_generation_unit DOMAIN LABEL GENERATION
 rt_generation_unit() {
-    if [[ -f "$3/.legacy-unit" ]]; then cat "$3/.legacy-unit"; else printf '%s-%s\n' "$(rt_unit_prefix "$1" "$2")" "$(basename -- "$3")"; fi
+    printf '%s-%s\n' "$(rt_unit_prefix "$1" "$2")" "$(basename -- "$3")"
 }
 rt_generation_socket() { printf '%s/%s.sock\n' "$(rt_socket_dir "$1" "$2")" "$(basename -- "$3")"; }
 rt_live_unit() {
     local active
     active="$(rt_active_generation "$1" "$2")"
-    if [[ -n "$active" ]]; then rt_generation_unit "$1" "$2" "$active"; else rt_unit "$(ep_get "$1" KIND)"; fi
+    if [[ -n "$active" ]]; then rt_generation_unit "$1" "$2" "$active"; else rt_unit_prefix "$1" "$2"; fi
 }
 rt_socket() {
     local active
@@ -224,35 +181,6 @@ rt_proxy_socket() {
     fi
 }
 
-# Preserve the last traditional single-service installation as a rollback
-# target when migrating to isolated generations. Reconstruct runtime settings
-# from its actual environment, since the registry may already contain edits.
-rt_capture_legacy_generation() {
-    local domain="$1" label="$2" release="$3" generation key env_key value kind
-    kind="$(ep_get "$domain" KIND)"
-    [[ -f "$(rt_env_file "$domain" "$label")" && -d "$release" ]] || return 0
-    generation="$(mktemp -d "$(rt_deployments_dir "$domain" "$label")/legacy-XXXXXX")" || return 1
-    chmod 0755 "$generation" || return 1
-    printf '%s\n' "$release" > "$generation/.release" || return 1
-    printf '%s\n' "$(rt_unit "$kind")" > "$generation/.legacy-unit" || return 1
-    gb_install_file "$(rt_env_file "$domain" "$label")" "$generation/runtime.env" 0600 || return 1
-    gb_install_file "$(ep_conf "$domain")" "$generation/endpoint.conf" 0600 || return 1
-    gb_install_file "$(ep_version_conf "$domain" "$label")" "$generation/version.conf" 0600 || return 1
-    for key in REPOSITORY APP_VERSION REQUIRE_CHECKSUMS DEFAULT_TRANSLATION DEFAULT_REFERENCE ALLOWED_TRANSLATIONS WORKERS THREADS WARM_TRANSLATIONS; do
-        case "$key" in
-            REPOSITORY|REQUIRE_CHECKSUMS) env_key="GETBIBLE_$key" ;;
-            APP_VERSION) env_key=GETBIBLE_VERSION ;;
-            DEFAULT_REFERENCE) env_key=QUERY_DEFAULT_REFERENCE ;;
-            *) env_key="${RM_ENV_PREFIX}_$key" ;;
-        esac
-        value="$(cfg_get "$generation/runtime.env" "$env_key" __missing__)"
-        [[ "$value" != __missing__ ]] || continue
-        value="${value#\"}"; value="${value%\"}"
-        cfg_set "$generation/version.conf" "$key" "$value" || return 1
-    done
-    printf '%s\n' "$generation"
-}
-
 # rt_validate_settings DOMAIN LABEL
 rt_validate_settings() {
     local domain="$1" label="$2" key value
@@ -273,7 +201,6 @@ rt_validate_settings() {
     value="$(ep_version_get "$domain" "$label" CACHE_TTL 300)"
     [[ "$value" =~ ^[0-9]{1,7}$ ]] || { gb_warn "CACHE_TTL of $domain $label must be a nonnegative integer"; return 1; }
     gb_valid_version "$(rt_app_version "$domain" "$label")" || { gb_warn "APP_VERSION of $domain $label must be v1, v2, ..."; return 1; }
-    [[ "$(rt_layout "$domain" "$label")" =~ ^(legacy|versioned)$ ]] || { gb_warn "LAYOUT of $domain $label must be legacy or versioned"; return 1; }
 }
 
 # rt_deployment_inputs DOMAIN LABEL RELEASE: everything a generation depends on.
@@ -281,7 +208,7 @@ rt_deployment_inputs() {
     local domain="$1" label="$2" release="$3" key
     {
         printf '%s\n' "$release"
-        printf 'LAYOUT=%s\nAPP_VERSION=%s\nACCESS_MODE=%s\n' "$(rt_layout "$domain" "$label")" "$(rt_app_version "$domain" "$label")" "$(ep_get "$domain" ACCESS_MODE)"
+        printf 'APP_VERSION=%s\nACCESS_MODE=%s\n' "$(rt_app_version "$domain" "$label")" "$(ep_get "$domain" ACCESS_MODE)"
         for key in "${RT_VERSION_SETTINGS[@]}"; do
             printf '%s=%s\n' "$key" "$(ep_version_get "$domain" "$label" "$key")"
         done
@@ -312,7 +239,6 @@ type_runtime_prepare() {
     RT_DOMAIN="$domain"; RT_COMMITTED=false; RT_LABELS=()
     RT_CANDIDATES=(); RT_OLD_GENERATIONS=(); RT_OLD_RELEASES=(); RT_OLD_UNITS=(); RT_OLD_SOCKETS=()
     ep_load "$domain"
-    rt_ensure_versions "$domain" || return 1
     kind="$EP_KIND"
     rt_manifest_load "$kind"
     user="$(rt_user "$kind")"
@@ -369,9 +295,6 @@ rt_prepare_endpoint() {
     active="$(rt_active_generation "$domain" "$label")"
     RT_OLD_GENERATIONS[$label]="$active"; RT_OLD_RELEASES[$label]="$current"
     RT_OLD_UNITS[$label]="$(rt_live_unit "$domain" "$label")"; RT_OLD_SOCKETS[$label]="$(rt_socket "$domain" "$label")"
-    if [[ -z "$active" && -n "$current" && "$GB_DRY_RUN" != true ]] && rt_is_legacy "$domain" "$label"; then
-        RT_OLD_GENERATIONS[$label]="$(rt_capture_legacy_generation "$domain" "$label" "$current")" || return 1
-    fi
     for target in "$root/active" "$root/previous" "$(py_current_link "$root")" "$(rt_env_file "$domain" "$label")"; do
         gb_backup_file "$target" "$RT_STATE_BACKUP/$label" || return 1
     done
@@ -442,7 +365,7 @@ rt_render_env() {
     expensive=$(( threads / 2 )); (( expensive < 1 )) && expensive=1
     gb_render "$GB_TYPES/runtime/templates/env.tmpl" "$stage" \
         "KIND=$EP_KIND" "DOMAIN=$domain" "LABEL=$label" "REPOSITORY=$EV_REPOSITORY" "VERSION=$(rt_app_version "$domain" "$label")" \
-        "CACHE_DIR=$(rt_cache_dir "$domain" "$label" "$release")" "CACHE_TTL_SECONDS=900" "REQUIRE_CHECKSUMS=false" \
+        "CACHE_DIR=$(rt_cache_dir "$domain" "$label" "$release")" "CACHE_TTL_SECONDS=900" \
         "APP_LOG=$(rt_app_log "$domain" "$label")" "ENV_PREFIX=$RM_ENV_PREFIX" "ACCESS_MODE=$EP_ACCESS_MODE" \
         "DEFAULT_TRANSLATION=${EV_DEFAULT_TRANSLATION:-kjv}" "ALLOWED_TRANSLATIONS=$EV_ALLOWED_TRANSLATIONS" \
         "CACHE_SECONDS=${EV_CACHE_TTL:-$RM_CACHE_SECONDS}" "WORKERS=${EV_WORKERS:-$RM_WORKERS}" \
@@ -724,9 +647,7 @@ type_runtime_remove() {
         [[ -n "$label" ]] || continue
         rt_remove_endpoint_services "$domain" "$label"
     done < <(ep_versions "$domain")
-    sd_remove_unit "$(rt_unit "$kind").service"; sd_remove_unit "$(rt_unit "$kind").socket"
     sd_daemon_reload
-    rm -f -- "$(ep_dir "$domain")/runtime.env"
     if [[ "$purge" == true ]]; then
         rm -rf -- "${GB_OPT:?}/${kind:?}" "${GB_CACHE:?}/${kind:?}" "$GB_PREFIX/var/cache/nginx/getbible/$(gb_slug "$domain")"
         if gb_user_exists "$user" && [[ -z "$GB_PREFIX" && "$GB_DRY_RUN" != true ]]; then userdel "$user" 2>/dev/null || true; fi
@@ -743,13 +664,13 @@ type_runtime_status() {
     while read -r label; do
         [[ -n "$label" ]] || continue
         root="$(rt_root "$domain" "$label")"; unit="$(rt_live_unit "$domain" "$label")"; socket="$(rt_socket "$domain" "$label")"; release="$(py_current_release "$root")"
-        printf '\nEndpoint %s of %s (%s, %s layout)\n' "$(pages_label_text "$label")" "$domain" "$(rt_app_version "$domain" "$label")" "$(rt_layout "$domain" "$label")"
+        printf '\nEndpoint %s of %s (%s)\n' "$(pages_label_text "$label")" "$domain" "$(rt_app_version "$domain" "$label")"
         printf '  Service   : %s (%s)\n' "$unit.service" "$(sd_status_line "$unit.service")"
         printf '  Socket    : %s (%s)\n' "$socket" "$(sd_status_line "$unit.socket")"
         printf '  Generation: %s\n' "$(rt_active_generation "$domain" "$label")"
         printf '  Rollback  : %s\n' "$(rt_previous_generation "$domain" "$label")"
         printf '  Release   : %s\n' "$release"
-        printf '  Python    : %s\n' "$(cat "$release/.python-version" 2>/dev/null || echo legacy-system-python)"
+        printf '  Python    : %s\n' "$(cat "$release/.python-version" 2>/dev/null || echo unavailable)"
         printf '  Repository: %s (%s)\n' "$(ep_version_get "$domain" "$label" REPOSITORY)" "$(rt_app_version "$domain" "$label")"
         printf '  Workers   : %s x %s threads; warm: %s\n' "$(ep_version_get "$domain" "$label" WORKERS)" "$(ep_version_get "$domain" "$label" THREADS)" "$(ep_version_get "$domain" "$label" WARM_TRANSLATIONS "-")"
         printf '  App log   : %s\n' "$(rt_app_log "$domain" "$label")"
@@ -853,7 +774,6 @@ rt_record_endpoint() {
     cfg_set "$conf" LABEL "$label"
     cfg_set "$conf" ENABLED true
     cfg_set "$conf" CREATED "$(gb_timestamp)"
-    cfg_set "$conf" LAYOUT versioned
     cfg_set "$conf" APP_VERSION "$version"
     cfg_set "$conf" REPOSITORY "$repository"
     cfg_set "$conf" WORKERS "$RM_WORKERS"
@@ -862,7 +782,6 @@ rt_record_endpoint() {
     cfg_set "$conf" DEFAULT_TRANSLATION kjv
     cfg_set "$conf" DEFAULT_REFERENCE "Mat7:7"
     cfg_set "$conf" ALLOWED_TRANSLATIONS ""
-    cfg_set "$conf" REQUIRE_CHECKSUMS false
     cfg_set "$conf" CACHE_TTL "$RM_CACHE_SECONDS"
     cfg_set "$conf" PYTHON_VERSION "$(py_resolve_version "${python:-auto}")"
     chmod 0640 "$conf" 2>/dev/null || true
@@ -906,22 +825,20 @@ type_runtime_create() {
     rt_record_endpoint "$domain" "$label" "$version" "$repository" "$warm" "$python"
 }
 
-# rt_add_endpoint DOMAIN VERSION REPOSITORY WARM PYTHON DEFAULT_TRANSLATION DEFAULT_REFERENCE REQUIRE_CHECKSUMS
+# rt_add_endpoint DOMAIN VERSION REPOSITORY WARM PYTHON DEFAULT_TRANSLATION DEFAULT_REFERENCE
 rt_add_endpoint() {
-    local domain="$1" version="$2" repository="$3" warm="$4" python="$5" translation="$6" reference="$7" checksums="$8"
+    local domain="$1" version="$2" repository="$3" warm="$4" python="$5" translation="$6" reference="$7"
     rt_check_new_endpoint "$domain" "$version" "$version" || return 1
     [[ -n "$repository" ]] || repository="$(rt_default_repository "$version")"
     [[ -n "$repository" ]] || repository="$(ep_version_get "$domain" "$(type_runtime_default_endpoint "$domain")" REPOSITORY)"
     rt_validate_repository "$repository" "$version" || return 1
     [[ -z "$warm" || "$warm" =~ ^[a-z0-9_-]+(,[a-z0-9_-]+)*$ ]] || { gb_warn "Invalid warm-up translation list: $warm"; return 1; }
     [[ -z "$translation" ]] || gb_valid_translation "$translation" || { gb_warn "Invalid default translation: $translation"; return 1; }
-    [[ -z "$checksums" || "$checksums" == true || "$checksums" == false ]] || { gb_warn "REQUIRE_CHECKSUMS is true or false"; return 1; }
     rt_manifest_load "$(ep_get "$domain" KIND)" "$version"
     [[ -n "$warm" ]] || warm="$RM_WARM_TRANSLATIONS"
     rt_record_endpoint "$domain" "$version" "$version" "$repository" "$warm" "$python" || return 1
     [[ -z "$translation" ]] || ep_version_set "$domain" "$version" DEFAULT_TRANSLATION "$translation"
     [[ -z "$reference" ]] || ep_version_set "$domain" "$version" DEFAULT_REFERENCE "$reference"
-    [[ "$checksums" != true ]] || gb_warn "Local scripture does not require checksum files; --require-checksums is retained for compatibility."
     if ! endpoint_apply "$domain"; then
         gb_warn "The new endpoint could not be deployed; its record stays so you can fix the cause and re-apply, or remove it."
         return 1
@@ -950,15 +867,10 @@ rt_remove_endpoint() {
     # No request reaches the service any more; take it down and clean up.
     rt_remove_endpoint_services "$domain" "$label"
     sd_daemon_reload
-    if rt_is_legacy "$domain" "$label"; then
-        rm -rf -- "$root/releases" "$root/deployments" "$root/active" "$root/previous" "$root/current"
-    else
-        rm -rf -- "$root"
-    fi
+    rm -rf -- "$root"
     rm -rf -- "$(rt_cache_root "$domain" "$label")"
     rm -rf -- "$(pages_endpoint_dir "$domain" "$label")"
     ep_version_remove_config "$domain" "$label"
-    [[ "$(ep_get "$domain" VERSION)" != "$label" ]] || cfg_delete "$(ep_conf "$domain")" VERSION
     pages_publish "$domain" || gb_warn "The domain's pages could not be refreshed; re-apply $domain."
     tg_notify warn "Endpoint removed: $domain $label" "Its service, releases and cache were deleted; $(ep_get "$domain" DEFAULT_ENDPOINT) is the default endpoint."
 }
@@ -989,7 +901,7 @@ rt_resolve_label() {
 
 # --- deploy ------------------------------------------------------------------
 type_runtime_deploy_cli() {
-    local domain="" kind="" version="" repository="" mode="" warm="" checksums=false default_translation="" default_reference="" python="" label=""
+    local domain="" kind="" version="" repository="" mode="" warm="" default_translation="" default_reference="" python="" label=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --domain) domain="$2"; shift 2 ;;
@@ -999,7 +911,6 @@ type_runtime_deploy_cli() {
             --repository) repository="$2"; shift 2 ;;
             --access) mode="$2"; shift 2 ;;
             --warm) warm="$2"; shift 2 ;;
-            --require-checksums) checksums="$2"; shift 2 ;;
             --default-translation) default_translation="$2"; shift 2 ;;
             --default-reference) default_reference="$2"; shift 2 ;;
             --python) python="$2"; shift 2 ;;
@@ -1017,8 +928,6 @@ type_runtime_deploy_cli() {
     [[ -n "$warm" ]] || warm="$RM_WARM_TRANSLATIONS"
     [[ -n "$repository" ]] || repository="$(rt_default_repository "$version")"
     [[ -n "$repository" ]] || gb_die "No synced local static endpoint provides $version; sync it first or pass --repository PATH containing $version/"
-    [[ "$checksums" == true || "$checksums" == false ]] || gb_die "--require-checksums must be true or false"
-    [[ "$checksums" != true ]] || gb_warn "Local scripture does not require checksum files; --require-checksums is retained for compatibility."
     [[ -z "$python" ]] || python="$(py_resolve_version "$python")"
     type_runtime_create "$domain" "$kind" "$version" "$repository" "$mode" "$warm" "$label" "$python" || return 1
     if [[ -n "$default_translation" ]]; then
@@ -1128,7 +1037,7 @@ type_runtime_deploy_finish() {
     conflicts="$(nginx_conflicts "$domain")"
     if [[ -n "$conflicts" ]]; then
         gb_warn "$domain is already declared in: $conflicts"
-        if ! ui_yesno "Conflict" "Another nginx file already declares $domain:\n$conflicts\n\nContinue anyway? (Use the migration action to retire the old configuration.)" no; then
+        if ! ui_yesno "Conflict" "Another nginx file already declares $domain:\n$conflicts\n\nContinue anyway? Resolve the conflicting server block before applying this domain." no; then
             ep_remove_config "$domain"
             return 1
         fi
@@ -1196,7 +1105,7 @@ rt_update() {
 
 rt_setting_allowed() {
     case "$1" in
-        WORKERS|THREADS|WARM_TRANSLATIONS|DEFAULT_TRANSLATION|DEFAULT_REFERENCE|ALLOWED_TRANSLATIONS|REPOSITORY|REQUIRE_CHECKSUMS|CACHE_TTL) return 0 ;;
+        WORKERS|THREADS|WARM_TRANSLATIONS|DEFAULT_TRANSLATION|DEFAULT_REFERENCE|ALLOWED_TRANSLATIONS|REPOSITORY|CACHE_TTL) return 0 ;;
         *) gb_warn "Unsupported runtime setting: $1"; return 1 ;;
     esac
 }
@@ -1205,11 +1114,6 @@ rt_setting_allowed() {
 rt_set_setting() {
     local domain="$1" label="$2" key="$3" value="$4" backup status=0 conf
     rt_setting_allowed "$key" || return 1
-    if [[ "$key" == REQUIRE_CHECKSUMS ]]; then
-        [[ "$value" == true || "$value" == false ]] || { gb_warn "REQUIRE_CHECKSUMS must be true or false"; return 1; }
-        [[ "$value" != true ]] || gb_warn "Local scripture does not require checksum files; this legacy setting stays false."
-        value=false
-    fi
     ep_version_exists "$domain" "$label" || { gb_warn "$domain has no endpoint $label"; return 1; }
     conf="$(ep_version_conf "$domain" "$label")"
     backup="$(mktemp "$(gb_tmpdir)/runtime-settings.XXXXXX")" || return 1
@@ -1231,13 +1135,11 @@ rt_rollback() {
     local domain="$1" label="$2" previous backup key value status=0 conf source
     ep_version_exists "$domain" "$label" || { gb_warn "$domain has no endpoint $label"; return 1; }
     previous="$(rt_previous_generation "$domain" "$label")"
-    [[ -n "$previous" && ( -f "$previous/version.conf" || -f "$previous/endpoint.conf" ) ]] || { gb_warn "No retained runtime deployment of $domain $label to roll back to"; return 1; }
+    [[ -n "$previous" && -f "$previous/version.conf" ]] || { gb_warn "No retained runtime deployment of $domain $label to roll back to"; return 1; }
     conf="$(ep_version_conf "$domain" "$label")"
     backup="$(mktemp "$(gb_tmpdir)/runtime-rollback.XXXXXX")" || return 1
     cp -p -- "$conf" "$backup" || return 1
-    # Generations from before endpoint records kept the settings in their
-    # copy of endpoint.conf.
-    source="$previous/version.conf"; [[ -f "$source" ]] || source="$previous/endpoint.conf"
+    source="$previous/version.conf"
     for key in "${RT_VERSION_SETTINGS[@]}"; do
         value="$(cfg_get "$source" "$key" __missing__)"
         [[ "$value" != __missing__ ]] || continue
@@ -1312,7 +1214,6 @@ rt_settings_menu() {
     done
     value="$(rt_select_repository "$(rt_app_version "$domain" "$label")" "$(cfg_get "$stage" REPOSITORY)")" || { rm -f -- "$backup" "$stage"; return 0; }
     cfg_set "$stage" REPOSITORY "$value" || return 1
-    cfg_set "$stage" REQUIRE_CHECKSUMS false || return 1
     gb_install_file "$stage" "$conf" 0640 || return 1
     if ! rt_validate_settings "$domain" "$label"; then
         gb_install_file "$backup" "$conf" 0640 || return 1
@@ -1352,7 +1253,7 @@ rt_versions_menu() {
                     rt_manifest_load "$kind" "$version"
                     warm="$(ui_input "Warm-up" "Translations to index at start (comma separated)" "$RM_WARM_TRANSLATIONS")" || continue
                 fi
-                ui_run "Add endpoint $version" rt_add_endpoint "$domain" "$version" "$repository" "$warm" "" "" "" "" || true
+                ui_run "Add endpoint $version" rt_add_endpoint "$domain" "$version" "$repository" "$warm" "" "" "" || true
                 ;;
             default)
                 label="$(rt_pick_endpoint "$domain")" || continue

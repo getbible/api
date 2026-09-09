@@ -64,7 +64,7 @@ exit 1
 CURL
 chmod +x "$TEST_ROOT/bin/curl"
 export PATH="$TEST_ROOT/bin:$PATH"
-py_distribution() { printf '3.14.7 x86_64 20260901 %s https://github.com/astral-sh/python-build-standalone/releases/download/20260901/fixture.tar.gz\n' "$FIXTURE_HASH"; }
+py_distribution() { printf '3.14.7 %s 20260901 %s https://github.com/astral-sh/python-build-standalone/releases/download/20260901/fixture.tar.gz\n' "$PLATFORM_ARCH" "$FIXTURE_HASH"; }
 SAVED_HASH="$FIXTURE_HASH"
 FIXTURE_HASH="$(printf '%064d' 0)"
 if (py_managed_install 3.14) >/dev/null 2>&1; then echo 'FAIL: bad checksum installed'; exit 1; fi
@@ -87,23 +87,24 @@ GB_SRC="$ORIGINAL_SRC"
 # The fixture interpreter cannot create a real venv. This intentional build
 # failure must propagate even in an if/command-substitution context and remove
 # only the incomplete candidate, leaving the serving symlink unchanged.
-mkdir -p "$(py_releases_dir query)/serving"
-ln -s "$(py_releases_dir query)/serving" "$(py_current_link query)"
-if candidate="$(py_build_release query query.example.test 3.14 2>/dev/null)"; then
+ENDPOINT_ROOT="$GB_OPT/query/v2"
+mkdir -p "$(py_releases_dir "$ENDPOINT_ROOT")/serving"
+ln -s "$(py_releases_dir "$ENDPOINT_ROOT")/serving" "$(py_current_link "$ENDPOINT_ROOT")"
+if candidate="$(py_build_release "$ENDPOINT_ROOT" query.example.test 3.14 query 2>/dev/null)"; then
     echo 'FAIL: incomplete virtual environment was accepted' >&2
     exit 1
 fi
-assert_eq "$(py_current_release query)" "$(py_releases_dir query)/serving" 'failed build preserves live release'
-assert_eq "$(find "$(py_releases_dir query)" -mindepth 1 -maxdepth 1 -type d -printf '%f\n')" serving 'failed release is removed'
-rm -f "$(py_current_link query)"
-rm -rf "$(py_releases_dir query)/serving"
+assert_eq "$(py_current_release "$ENDPOINT_ROOT")" "$(py_releases_dir "$ENDPOINT_ROOT")/serving" 'failed build preserves live release'
+assert_eq "$(find "$(py_releases_dir "$ENDPOINT_ROOT")" -mindepth 1 -maxdepth 1 -type d -printf '%f\n')" serving 'failed release is removed'
+rm -f "$(py_current_link "$ENDPOINT_ROOT")"
+rm -rf "$(py_releases_dir "$ENDPOINT_ROOT")/serving"
 
 # Retention must preserve code belonging to retained deployment generations.
-for number in 01 02 03 04 05; do mkdir -p "$(py_releases_dir query)/$number"; done
-mkdir -p "$(py_app_root query)/deployments/rollback"
-printf '%s\n' "$(py_releases_dir query)/01" > "$(py_app_root query)/deployments/rollback/.release"
-ln -s "$(py_releases_dir query)/02" "$(py_current_link query)"
-py_prune_releases query 1
-[[ -d "$(py_releases_dir query)/01" && -d "$(py_releases_dir query)/02" && -d "$(py_releases_dir query)/05" ]] || { echo 'FAIL: protected release removed'; exit 1; }
-[[ ! -d "$(py_releases_dir query)/03" && ! -d "$(py_releases_dir query)/04" ]] || { echo 'FAIL: unused releases retained'; exit 1; }
+for number in 01 02 03 04 05; do mkdir -p "$(py_releases_dir "$ENDPOINT_ROOT")/$number"; done
+mkdir -p "$(py_app_root "$ENDPOINT_ROOT")/deployments/rollback"
+printf '%s\n' "$(py_releases_dir "$ENDPOINT_ROOT")/01" > "$(py_app_root "$ENDPOINT_ROOT")/deployments/rollback/.release"
+ln -s "$(py_releases_dir "$ENDPOINT_ROOT")/02" "$(py_current_link "$ENDPOINT_ROOT")"
+py_prune_releases "$ENDPOINT_ROOT" 1
+[[ -d "$(py_releases_dir "$ENDPOINT_ROOT")/01" && -d "$(py_releases_dir "$ENDPOINT_ROOT")/02" && -d "$(py_releases_dir "$ENDPOINT_ROOT")/05" ]] || { echo 'FAIL: protected release removed'; exit 1; }
+[[ ! -d "$(py_releases_dir "$ENDPOINT_ROOT")/03" && ! -d "$(py_releases_dir "$ENDPOINT_ROOT")/04" ]] || { echo 'FAIL: unused releases retained'; exit 1; }
 printf 'Managed Python and platform regressions passed\n'

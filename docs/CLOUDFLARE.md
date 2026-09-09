@@ -102,8 +102,8 @@ Origin side, for proxied hosts:
 The origin-pulls option uses Cloudflare's shared global AOP certificate and
 its matching CA at nginx. Explicitly enabling a domain enables the
 zone-wide `tls_client_auth` prerequisite. Applying a domain with this option
-enabled also reapplies that prerequisite, including when upgrading an older
-installation. A failed API call prevents enabling the domain setting; a
+enabled also reapplies that prerequisite. A failed API call prevents enabling
+the domain setting; a
 failed prerequisite or CA download during apply is reported as a failure.
 
 Disabling origin pulls in the domain menu removes only that domain's nginx

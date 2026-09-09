@@ -42,7 +42,7 @@ doctor_run() {
         doctor_check_dns_renewals
     fi
     if sd_available; then
-        sd_is_active certbot.timer && doctor_check "certbot.timer" ok active || doctor_check "certbot.timer" WARN "not active (snap certbot uses its own timer)"
+        sd_is_active certbot.timer && doctor_check "certbot.timer" ok active || doctor_check "certbot.timer" WARN "not active; run install-deps to enable automatic certificate renewal"
         sd_is_active getbible-logrotate.timer && doctor_check "log rotation timer" ok active || doctor_check "log rotation timer" WARN "not active; run any deploy or update"
     fi
     gb_group_exists "$GB_READERS_GROUP" && doctor_check "readers group" ok "$GB_READERS_GROUP" || doctor_check "readers group" WARN "created on first deploy"
@@ -56,12 +56,10 @@ doctor_run() {
     printf '\nListening: %s\n' "$(ss -ltn 2>/dev/null | awk 'NR>1 {print $4}' | grep -E ':(80|443)$' | sort -u | tr '\n' ' ')"
 }
 
-# Certificates issued here, or copied from another server, renew through
-# what their renewal configuration names: the webroot this tool serves, or
-# the DNS-01 credentials file. Anything else (a lineage from `certbot
-# --nginx`, say) would edit the rendered vhosts and is better reissued.
+# Check the recorded renewal settings of registered domains for configuration
+# drift: HTTP-01 needs the served webroot; DNS-01 needs its credentials and plugin.
 doctor_check_dns_renewals() {
-    local conf domain authenticator credentials webroot dns_broken="" foreign=""
+    local conf domain authenticator credentials webroot dns_broken="" webroot_broken="" unexpected=""
     for conf in "$GB_LETSENCRYPT"/renewal/*.conf; do
         [[ -f "$conf" ]] || continue
         domain="$(basename "$conf" .conf)"
@@ -75,16 +73,19 @@ doctor_check_dns_renewals() {
                 fi ;;
             webroot)
                 webroot="$(sed -n 's/^webroot_path[[:space:]]*=[[:space:]]*//p' "$conf" | head -1)"
-                [[ "$webroot" == *"$GB_ACME_ROOT"* ]] || foreign="$foreign $domain"
+                [[ "${webroot%,}" == "$GB_ACME_ROOT" ]] || webroot_broken="$webroot_broken $domain"
                 ;;
-            *) foreign="$foreign $domain" ;;
+            *) unexpected="$unexpected $domain" ;;
         esac
     done
     if [[ -n "$dns_broken" ]]; then
         doctor_check "DNS-01 renewals" WARN "missing credentials file or plugin for:$dns_broken (store the Cloudflare token under Settings; install python3-certbot-dns-cloudflare)"
     fi
-    if [[ -n "$foreign" ]]; then
-        doctor_check "certificate renewals" WARN "not issued by this tool:$foreign (renewal would use another method and could edit the rendered vhosts: certbot delete --cert-name DOMAIN, then Endpoint > Certificate > Issue)"
+    if [[ -n "$webroot_broken" ]]; then
+        doctor_check "HTTP-01 renewals" WARN "expected webroot $GB_ACME_ROOT is missing or changed for:$webroot_broken (check the domain's certbot renewal configuration)"
+    fi
+    if [[ -n "$unexpected" ]]; then
+        doctor_check "certificate renewals" WARN "unexpected or missing authenticator for:$unexpected (expected webroot or dns-cloudflare; check the domain's certbot renewal configuration)"
     fi
 }
 
@@ -106,9 +107,10 @@ doctor_install_deps() {
         DEBIAN_FRONTEND=noninteractive apt-get install -y python3-certbot-dns-cloudflare \
             || gb_warn "python3-certbot-dns-cloudflare could not be installed; certificates are validated over HTTP-01 only."
     else
-        gb_warn "python3-certbot-dns-cloudflare is not available from apt; with snap certbot install the certbot-dns-cloudflare snap for DNS-01."
+        gb_warn "python3-certbot-dns-cloudflare is not available from apt; certificates can still be validated over HTTP-01."
     fi
     gb_ensure_dir "$GB_ACME_ROOT" 0755
     sd_enable --now nginx || true
+    sd_enable --now certbot.timer || { gb_warn "Could not enable certbot.timer; automatic certificate renewal is unavailable."; return 1; }
     gb_log "Installed host tools. Runtime Python and packages are installed separately during explicit deployment/update."
 }

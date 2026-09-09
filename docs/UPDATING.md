@@ -100,58 +100,38 @@ nginx route change aborts the deployment and restores its prior routing, so
 review and reconcile local edits before retrying. Backup sets are retained
 under `/var/backups/getbible/`.
 
-## Migrate an existing installation
+## Maintenance checks
 
-### Existing HTTPS Git checkout
-
-Set up root's deploy key and `/root/.ssh/config` as in
-[INSTALL.md](INSTALL.md#1-clone), then point the clone at the SSH address and
-pull once by hand; that first pull brings in the `self-update` command:
-
-```sh
-cd /opt/getbible/api
-sudo git remote set-url origin git@github.com:getbible/api.git
-sudo git pull --ff-only
-```
-
-From then on use `sudo ./getbible.sh self-update`. A checkout with local
-edits must be reconciled first; if the branch has no upstream, set one
-(`sudo git branch --set-upstream-to=origin/main main`).
-
-### Copied installation without `.git`
-
-Keep the old directory as a backup and clone afresh into an empty directory
-(for example `/opt/getbible/api-git`) with the clone command in
-[INSTALL.md](INSTALL.md#1-clone); use the new path from then on, including in
-any shortcuts or scheduled commands, and do not copy the old tree over it.
-Registered domains and credentials stay in `/etc/getbible`, state in
-`/var/lib/getbible`, and data and releases in their existing paths; cloning
-the manager touches none of them.
-
-### Managed domains
-
-To apply changes to hosted domains after updating the manager, separately run
-`doctor` and the per-domain `update` commands above. Existing
-single-service runtime installations are captured as rollback generations;
-the first successful update moves them to owned Python and isolated deployment
-generations. An existing exact managed Python version remains selected on
-ordinary updates. Token-map permissions and per-request expiry maps migrate
-with the nginx configuration.
-
-A runtime domain recorded before endpoints had their own records (a `VERSION`
-key and the service settings in `endpoint.conf`) gets its endpoint record
-(`versions/<version>.conf`, `LAYOUT=legacy`) the first time the tool looks at
-it: the settings are copied into the record and every path, unit and socket
-stays where it is, so nothing running is moved or restarted by the migration
-itself. The next apply proceeds as any other. Versions added afterwards get
-their own paths (`/opt/getbible/<kind>/<version>/`). Static domains gain a
-page per endpoint and `versions.json` on their first update; nothing about
-their data changes.
+After updating the manager checkout, run `doctor` and the per-domain `update`
+commands above. Each endpoint keeps its selected managed Python version on
+ordinary updates. Runtime updates use the candidate, readiness, routing and
+rollback process described above; static updates preserve published releases
+and endpoint keys while applying the current configuration.
 
 Before updating a token-only endpoint behind Cloudflare, grant the connector
 Cache Purge permission. The update disables shared caching and purges that
 hostname's previously public content before activation. Missing permission or
 a failed purge aborts the protected transition. See [CLOUDFLARE.md](CLOUDFLARE.md).
+
+### Static endpoint deploy keys
+
+Static deploy keys are per endpoint and repository URL. Reapplying a domain
+preserves each endpoint's key when its URL is unchanged. A repository URL
+change selects a separate key, while branch and source-folder changes retain
+the existing key. Register a new repository key as read-only before testing
+access and syncing:
+
+```sh
+sudo ./getbible.sh deploy-key api.getbible.net v2
+# Register the displayed public key on v2's repository as a read-only deploy key.
+sudo ./getbible.sh repo-access api.getbible.net v2
+sudo ./getbible.sh sync api.getbible.net v2
+```
+
+Other endpoints keep their own keys and published data. Use `root` as the
+label for a domain without version folders. Root's manager-update key is
+independent. See [STATIC_ENDPOINTS.md](STATIC_ENDPOINTS.md) for the complete
+workflow with different repositories on one domain.
 
 ## Recovery and operational checks
 

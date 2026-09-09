@@ -23,10 +23,13 @@ cloudflare_configure() {
     if [[ -n "$token" ]]; then
         cfg_set "$GB_CLOUDFLARE_CONF" CLOUDFLARE_API_TOKEN "$token"
         chmod 0600 "$GB_CLOUDFLARE_CONF" 2>/dev/null || true
-        # certbot renews DNS-01 certificates from its own copy of the token,
-        # also for lineages copied from another server.
+        # Keep certbot's DNS-01 renewal credentials current when the token rotates.
         if declare -F certs_cloudflare_credentials_write >/dev/null; then
-            certs_cloudflare_credentials_write || true
+            certs_cloudflare_credentials_write || {
+                ui_msg "Cloudflare" "The token was saved, but Certbot's DNS-01 credentials could not be updated. Check the file permissions and save the token again before certificate renewal."
+                tg_notify fail "Cloudflare token update incomplete" "Certbot's DNS-01 renewal credentials could not be updated."
+                return 1
+            }
         fi
     fi
     if result="$(cf_human verify 2>&1)"; then

@@ -33,7 +33,8 @@ class StaticSyncTest(unittest.TestCase):
         self.live = self.data / "v2"
         self.env = dict(os.environ, GB_SYNC_DOMAIN="static.example.test", GB_SYNC_VERSION="v2",
                         GB_SYNC_REPO=str(self.repo), GB_SYNC_REF="main", GB_SYNC_HOME=str(self.home),
-                        GB_SYNC_DATA=str(self.data), GB_EXPORT=str(BIN / "getbible-export-tree"),
+                        GB_SYNC_DATA=str(self.data), GB_SYNC_KEY=str(self.home / ".ssh" / "id_ed25519"),
+                        GB_EXPORT=str(BIN / "getbible-export-tree"),
                         GB_NOTIFY="/nonexistent-notifier", GB_SYNC_EXTENSIONS="json,sha,txt")
 
     def git(self, *args: str) -> str:
@@ -147,6 +148,116 @@ class StaticSyncTest(unittest.TestCase):
         self.assertEqual((self.live / ".revision").read_text().strip(), revision)
         self.assertEqual(json.loads((self.live / "doc.json").read_text())["value"], "new origin")
 
+    def ssh_transport(self, repositories: dict[str, tuple[Path, Path]]) -> dict[str, str]:
+        """Exercise Git's actual SSH invocations against local upload-pack servers."""
+        bin_dir = self.root / "ssh-bin"
+        bin_dir.mkdir()
+        config = self.root / "ssh-repositories.json"
+        config.write_text(json.dumps({name: [str(repo), str(key)]
+                                      for name, (repo, key) in repositories.items()}))
+        launcher = bin_dir / "ssh"
+        launcher.write_text("""#!/usr/bin/env python3
+import json
+import os
+import shlex
+import sys
+
+args = sys.argv[1:]
+options = [args[i + 1] for i, arg in enumerate(args[:-1]) if arg == '-o']
+assert args[args.index('-F') + 1] == '/dev/null', args
+for option in ('IdentityAgent=none', 'IdentitiesOnly=yes',
+               'StrictHostKeyChecking=yes', 'BatchMode=yes'):
+    assert option in options, (option, args)
+assert any(option.startswith('UserKnownHostsFile=') for option in options), args
+identity = args[args.index('-i') + 1]
+command = shlex.split(args[-1])
+assert command[0] == 'git-upload-pack', command
+with open(os.environ['GB_TEST_SSH_REPOSITORIES']) as stream:
+    repository, expected_identity = json.load(stream)[command[1]]
+assert identity == expected_identity, (identity, expected_identity)
+assert os.path.isfile(identity), identity
+with open(os.environ['GB_TEST_SSH_CALLS'], 'a') as stream:
+    stream.write(json.dumps({'repository': command[1], 'identity': identity}) + '\\n')
+os.execvp('git-upload-pack', ['git-upload-pack', repository])
+""")
+        launcher.chmod(0o755)
+        return {"PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+                "GIT_SSH_VARIANT": "ssh", "SSH_AUTH_SOCK": "/untrusted-agent.sock",
+                "GB_TEST_SSH_REPOSITORIES": str(config),
+                "GB_TEST_SSH_CALLS": str(self.root / "ssh-calls.jsonl")}
+
+    def test_endpoints_use_their_selected_ssh_keys_for_discovery_and_fetch(self) -> None:
+        second = self.root / "second-upstream"
+        subprocess.run(["git", "clone", "--quiet", str(self.repo), str(second)], check=True)
+        original = self.repo
+        self.repo = second
+        self.git("config", "user.name", "Sync test")
+        self.git("config", "user.email", "sync@example.test")
+        self.payload("second endpoint")
+        self.commit()
+        self.repo = original
+        keys = self.home / ".ssh" / "keys with spaces"
+        keys.mkdir(parents=True)
+        first_key, second_key = keys / "v2's identity", keys / "v3 identity"
+        first_key.write_text("v2 fixture identity")
+        second_key.write_text("v3 fixture identity")
+        transport = self.ssh_transport({"owner/v2.git": (original, first_key),
+                                        "owner/v3.git": (second, second_key)})
+        self.sync(GB_SYNC_REPO="git@origin.example.test:owner/v2.git",
+                  GB_SYNC_KEY=str(first_key), **transport)
+        first_release = self.live.resolve()
+        self.sync(GB_SYNC_VERSION="v3", GB_SYNC_REPO="git@origin.example.test:owner/v3.git",
+                  GB_SYNC_KEY=str(second_key), **transport)
+        self.assertEqual(self.live.resolve(), first_release)
+        self.assertEqual(json.loads((self.live / "doc.json").read_text())["value"], "first")
+        self.assertEqual(json.loads((self.data / "v3" / "doc.json").read_text())["value"],
+                         "second endpoint")
+        calls = [json.loads(line) for line in (self.root / "ssh-calls.jsonl").read_text().splitlines()]
+        # Both ls-remote and fetch authenticate to each repository. Git must
+        # never offer the sibling identity or identities from an agent/config.
+        for repository, key in (("owner/v2.git", first_key), ("owner/v3.git", second_key)):
+            matching = [call for call in calls if call["repository"] == repository]
+            self.assertGreaterEqual(len(matching), 2)
+            self.assertEqual({call["identity"] for call in matching}, {str(key)})
+
+    def test_runner_requires_an_explicit_endpoint_key(self) -> None:
+        self.env.pop("GB_SYNC_KEY", None)
+        result = self.sync(success=False)
+        self.assertIn("GB_SYNC_KEY", result.stderr)
+        self.assertFalse(self.live.exists())
+
+    def test_repository_access_checks_selected_key_and_rejects_missing_refs(self) -> None:
+        key = self.home / ".ssh" / "endpoint key"
+        key.parent.mkdir(parents=True)
+        key.write_text("endpoint fixture identity")
+        transport = self.ssh_transport({"owner/v2.git": (self.repo, key)})
+        command = """
+source "$GB_TEST_ROOT/src/lib/core.sh"
+source "$GB_TEST_ROOT/src/lib/sync.sh"
+ep_version_get() {
+    case "$3" in
+        REPO_URL) printf '%s\\n' 'git@origin.example.test:owner/v2.git' ;;
+        REPO_REF) printf '%s\\n' "$GB_TEST_REF" ;;
+    esac
+}
+sync_home() { printf '%s\\n' "$GB_TEST_HOME"; }
+sync_user() { printf 'fixture-sync-user\\n'; }
+sync_key_file() { printf '%s\\n' "$GB_TEST_KEY"; }
+runuser() { shift 3; "$@"; }
+sync_test_access static.example.test v2
+"""
+        env = dict(os.environ, **transport, GB_PREFIX="", GB_TEST_ROOT=str(ROOT),
+                   GB_TEST_HOME=str(self.home), GB_TEST_KEY=str(key), GB_TEST_REF="main")
+        result = subprocess.run(["bash", "-c", command], env=env, capture_output=True,
+                                text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(self.git("rev-parse", "HEAD"), result.stdout)
+        for overrides in ({"GB_TEST_REF": "missing"}, {"GB_TEST_KEY": str(key) + "-wrong"}):
+            with self.subTest(overrides=overrides):
+                result = subprocess.run(["bash", "-c", command], env=dict(env, **overrides),
+                                        capture_output=True, text=True, timeout=30)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_extra_files_are_exported_by_path_whatever_their_type(self) -> None:
         # The endpoint page and OpenAPI document may come from the repository
         # even when .html is not a served type; nothing else of that type,
@@ -208,8 +319,7 @@ class StaticSyncTest(unittest.TestCase):
         for name, content in payloads.items():
             (self.repo / name).write_bytes(content)
         revision = self.commit()
-        # Legacy verifier configuration has no bearing on publication.
-        self.sync(GB_VERIFY="/nonexistent-verifier")
+        self.sync()
         for name, content in payloads.items():
             self.assertEqual((self.live / name).read_bytes(), content)
         self.assertEqual((self.live / ".revision").read_text().strip(), revision)

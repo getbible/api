@@ -27,7 +27,7 @@ for kind in query search; do
     flags=()
     [[ "$kind" != search ]] || flags=(--staged --root)
     "$IT_ROOT/getbible.sh" deploy runtime --domain "$domain" --kind "$kind" --repository "$FIXTURE" \
-        --require-checksums false --default-translation test --default-reference Ge1:1 --warm test \
+        --default-translation test --default-reference Ge1:1 --warm test \
         --access metered "${flags[@]+"${flags[@]}"}" >/dev/null 2>&1 || { echo "deploy $kind failed"; exit 1; }
     if [[ "$kind" != search ]]; then
         it_selfsigned "$domain"
@@ -168,8 +168,8 @@ echo "-- release rebuild is skipped when inputs are unchanged --"
 BEFORE="$(readlink -f "$IT_SB/opt/getbible/query/v2/current")"
 "$IT_ROOT/getbible.sh" apply "$Q" >/dev/null 2>&1
 it_check "same release kept"         "$BEFORE"                   "$(readlink -f "$IT_SB/opt/getbible/query/v2/current")"
-it_check "endpoint recorded"         "LAYOUT=versioned"          "$(cat "$IT_SB/etc/getbible/endpoints/$Q/versions/v2.conf")"
-it_check "status per endpoint"       "Endpoint v2 of $Q (v2, versioned layout)" "$("$IT_ROOT/getbible.sh" status "$Q" 2>/dev/null)"
+it_check "endpoint recorded"         "APP_VERSION=v2"            "$(cat "$IT_SB/etc/getbible/endpoints/$Q/versions/v2.conf")"
+it_check "status per endpoint"       "Endpoint v2 of $Q (v2)"     "$("$IT_ROOT/getbible.sh" status "$Q" 2>/dev/null)"
 
 echo "-- documentation remains public on token-only version folders --"
 "$IT_ROOT/getbible.sh" access "$Q" token >/dev/null 2>&1

@@ -112,7 +112,7 @@ nginx_render_global() {
     cp "$GB_NGINX_SRC/snippets/proxy.conf" "$stage/snippets/getbible/proxy.conf" || return 1
     printf '# placeholder so the tokens include always matches a file\n' > "$stage/getbible/tokens/_placeholder.map"
     printf '# placeholder so validity includes always match a file\n' > "$stage/getbible/token-validity/_placeholder.map"
-    # The shared identity map and its validity data must migrate together for
+    # The shared identity map and its validity data must update together for
     # all registered hosts, including when updating only one endpoint.
     local domain slug
     while IFS= read -r domain; do

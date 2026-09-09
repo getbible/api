@@ -17,14 +17,17 @@ applies the current checkout to hosted domains without fetching.
 
 - A **domain** is a host name: one nginx vhost, one certificate, one go-live.
 - An **endpoint** is one of a domain's version folders (`/v2/`): a tree
-  synced from its own repository (static) or a service of its own (runtime).
+  synced from its own repository with its own deploy key (static) or a
+  service of its own (runtime). Static deploy keys belong to endpoints,
+  never to a domain: endpoints on one domain may use different repositories.
   A domain set up without version folders serves a single endpoint at its
-  root, label `root`; domain and endpoint are then the same thing.
+  root, label `root`; that endpoint still owns its repository identity while
+  the domain owns the hostname and certificate.
 - Use these words in the menu, in output and in documentation. The registry
   directory (`/etc/getbible/endpoints/<domain>/endpoint.conf` for the
   domain, `versions/<label>.conf` for its endpoints), the `endpoint_*`
-  pipeline functions and the `ep_*` registry functions predate the
-  vocabulary and keep their names so installations keep working.
+  pipeline functions and the `ep_*` registry functions use these paths and
+  names consistently.
 
 ## Layout
 
@@ -65,6 +68,11 @@ remain public regardless of the data access mode.
 
 ## Rules
 
+- Support fresh installations and ongoing maintenance of this implementation.
+  Preserve normal updates, redeployment, certificate renewal and generation
+  rollback. Do not add conversion of old schemas, legacy filesystem layouts
+  or retirement routines for a previous server implementation.
+
 - Commits are authored in the maintainer's name. Do not add a
   `Co-Authored-By` trailer, a session link, an assistant name, or any other
   tool attribution to a commit message, tag, or pull request.
@@ -75,6 +83,13 @@ remain public regardless of the data access mode.
   `search` serves searches (and resolves a reference typed as a search).
   Neither exposes the other's routes.
 - Every error is an RFC 9457 problem document (`application/problem+json`).
+- Static domains share one sync system user and one nginx vhost, while each
+  endpoint has a separate SSH deploy key for its repository URL. Select the
+  key explicitly for every sync and access test; keep ordinary repository
+  hostnames, ignore ambient SSH configuration and agents, and preserve strict
+  host-key checking. A repository URL change selects a different key; changing
+  only its branch or source folder preserves the key. Root's key for updating
+  this manager is separate from every endpoint key.
 - nginx is only ever reloaded, never restarted, and only after `nginx -t`.
 - A staged domain (`LIVE=false`) never takes over its public name on its
   own: no apply requests a certificate or changes Cloudflare DNS or rules
@@ -91,7 +106,9 @@ remain public regardless of the data access mode.
   for every action, and the menu gathers every input before running it.
 - Never log a bearer token. Everything else about a request is logged.
 - Keep `tests/run.sh` green: shellcheck, Python unit tests, CLI tests. The
-  integration tests need nginx and are run when it is present.
+  integration tests need nginx, openssh-server and root. Run tests locally
+  before pushing changes; deployment changes also need the disposable Ubuntu
+  systemd acceptance test below.
 
 ## Adding a runtime kind
 
@@ -104,5 +121,7 @@ any of these is missing.
 
 ```sh
 tests/run.sh            # lint + unit + CLI
-tests/run.sh --all      # plus integration (needs nginx, runs as root)
+tests/run.sh --all      # plus nginx, runtime and SSH integration (runs as root)
+# Only on a fresh disposable Ubuntu VM, after install-deps:
+sudo env GB_CI_DISPOSABLE_HOST=1 tests/integration/systemd.sh
 ```

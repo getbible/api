@@ -3,15 +3,15 @@
 # of a name:
 #
 #   http            certonly in webroot mode. The port-80 server block of every
-#                   endpoint serves the ACME challenge directory, so the name
+#                   domain serves the ACME challenge directory, so the name
 #                   must already resolve to this server.
 #   dns-cloudflare  the certbot-dns-cloudflare plugin publishes a TXT record
 #                   with the stored Cloudflare API token, so a certificate can
-#                   be issued before any DNS change: on a staged endpoint, or
-#                   on a replacement server the name does not point to yet.
+#                   be issued for a staged domain before DNS points here.
 #
 # Renewal stays certbot's own timer with whichever authenticator issued the
-# certificate; a deploy hook reloads nginx and notifies. A staged endpoint
+# certificate; a deploy hook reloads nginx and notifies. All endpoints of a
+# domain share its certificate. A staged domain
 # carries a self-signed placeholder so its complete TLS vhost can be rendered
 # and tested before go-live replaces it.
 
@@ -45,7 +45,13 @@ certs_plugins() {
     cat "$cache"
 }
 
-certs_dns_cloudflare_installed() { certs_plugins | grep -q 'dns-cloudflare'; }
+certs_dns_cloudflare_installed() {
+    local plugins
+    # Read the complete output: grep -q can close the pipe early and make
+    # its producer fail with SIGPIPE under pipefail despite finding the plugin.
+    plugins="$(certs_plugins)" || return 1
+    [[ "$plugins" == *dns-cloudflare* ]]
+}
 
 # DNS-01 needs both the plugin and the token from Settings > Cloudflare.
 certs_dns_cloudflare_available() {
@@ -148,13 +154,14 @@ certs_http_probe() {
 }
 
 # certs_obtain DOMAIN [METHOD]: issue a certificate when none exists. Returns
-# 0 when a Let's Encrypt certificate is present afterwards.
+# 0 when a Let's Encrypt certificate and its renewal hook are present afterwards.
 certs_obtain() {
     local domain="$1" requested="${2:-}" method email
     local -a args=()
     if nginx_cert_exists "$domain"; then
         gb_log "Certificate for $domain already exists; reusing it."
-        return 0
+        certs_install_hook
+        return $?
     fi
     if ! certs_available; then
         gb_warn "certbot is not installed; $domain has no certificate (System > Install dependencies)."
@@ -178,7 +185,7 @@ certs_obtain() {
     gb_step "Requesting a certificate for $domain ($method)"
     mapfile -t args < <(certs_certbot_args "$domain" "$method" "$email")
     if "$GB_CERTBOT" "${args[@]}"; then
-        certs_install_hook
+        certs_install_hook || return 1
         tg_notify ok "Certificate issued" "A Let's Encrypt certificate was issued for $domain ($method)."
         return 0
     fi
@@ -192,13 +199,12 @@ certs_obtain() {
 }
 
 # certs_issue DOMAIN [METHOD]: obtain the certificate now and re-render the
-# endpoint so nginx serves it. A staged endpoint stays staged: no DNS change.
+# domain so nginx serves it. A staged domain stays staged: no DNS change.
 certs_issue() {
     local domain="$1" method="${2:-}"
     ep_exists "$domain" || gb_die "Unknown endpoint: $domain"
     if nginx_cert_exists "$domain"; then
         gb_log "$domain already has a Let's Encrypt certificate (expires $(certs_expiry "$domain"))."
-        return 0
     fi
     certs_obtain "$domain" "$method" || return 1
     endpoint_apply "$domain"
@@ -207,9 +213,9 @@ certs_issue() {
 # Reload nginx after every renewal and say so on Telegram.
 certs_install_hook() {
     local dir="$GB_LETSENCRYPT/renewal-hooks/deploy"
-    [[ -d "$GB_LETSENCRYPT" ]] || return 0
-    gb_ensure_dir "$dir" 0755
-    cat > "$(gb_tmpdir)/reload-hook" <<'HOOK'
+    [[ -d "$GB_LETSENCRYPT" ]] || { gb_warn "Cannot install the certificate renewal hook: $GB_LETSENCRYPT is missing."; return 1; }
+    gb_ensure_dir "$dir" 0755 || { gb_warn "Cannot create the certificate renewal hook directory: $dir"; return 1; }
+    cat > "$(gb_tmpdir)/reload-hook" <<'HOOK' || return 1
 #!/bin/sh
 # Installed by getbible.sh: reload nginx after a certificate renewal.
 if ! nginx -t || ! { systemctl reload nginx 2>/dev/null || nginx -s reload; }; then
@@ -222,13 +228,15 @@ if [ -x /usr/local/lib/getbible/getbible-notify ]; then
     /usr/local/lib/getbible/getbible-notify ok "Certificate renewed" "Renewed: ${RENEWED_DOMAINS:-unknown}. nginx reloaded."
 fi
 HOOK
-    gb_install_file "$(gb_tmpdir)/reload-hook" "$dir/getbible-reload-nginx.sh" 0755
+    gb_install_file "$(gb_tmpdir)/reload-hook" "$dir/getbible-reload-nginx.sh" 0755 \
+        || { gb_warn "Could not install the certificate renewal hook; nginx would not reload after renewal."; return 1; }
 }
 
 certs_renew_now() {
     local domain="$1"
     certs_available || { gb_warn "certbot is not installed (System > Install dependencies)."; return 1; }
     nginx_cert_exists "$domain" || { gb_warn "$domain has no Let's Encrypt certificate to renew; issue one first."; return 1; }
+    certs_install_hook || return 1
     "$GB_CERTBOT" renew --cert-name "$domain" --force-renewal --non-interactive && nginx_test && nginx_reload
 }
 
@@ -354,11 +362,11 @@ certs_menu() {
                 ui_textbox "Certificate: $domain" "$out" ;;
             issue)
                 if nginx_cert_exists "$domain"; then
-                    ui_msg "Certificate" "$domain already has a Let's Encrypt certificate (expires $(certs_expiry "$domain"))."
-                    continue
+                    method=""
+                else
+                    method="$(certs_prompt_method "$domain")" || continue
+                    certs_email_interactive || continue
                 fi
-                method="$(certs_prompt_method "$domain")" || continue
-                certs_email_interactive || continue
                 endpoint_confirm_hand_edits "$domain" || continue
                 ui_run "Issue certificate for $domain" certs_issue "$domain" "$method" || true
                 GB_OVERWRITE_HAND_EDITS=false ;;
@@ -384,7 +392,7 @@ certs_cli() {
         issue)
             [[ "${1:-}" == --method ]] && method="${2:-}"
             [[ -z "$method" ]] || certs_valid_method "$method" || gb_die "Certificate methods: auto, http, dns-cloudflare"
-            certs_email_interactive || return 1
+            if ! nginx_cert_exists "$domain"; then certs_email_interactive || return 1; fi
             certs_issue "$domain" "$method" ;;
         renew) certs_renew_now "$domain" ;;
         *) gb_die "cert DOMAIN status|issue [--method auto|http|dns-cloudflare]|renew" ;;

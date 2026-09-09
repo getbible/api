@@ -8,7 +8,7 @@ Everything about a request is logged; only bearer tokens are not.
 | --- | --- | --- |
 | `/var/log/getbible/<domain>/access.log` | nginx | request: time, host, endpoint, version, client address, method, full URI including the query string, status, bytes, request length, timing, upstream time, proxy cache state, referer, user agent, request id, token id, scheme, protocol, TLS version, Cloudflare country |
 | `/var/log/getbible/<domain>/error.log` | nginx | warning or error |
-| `/var/log/getbible/<domain>/app/<label>.log` | the runtime endpoint's service (`app.log` for a domain from before endpoints had records) | request: everything above plus the parsed reference, translation, search string, criteria, kind, totals, and the problem code on errors |
+| `/var/log/getbible/<domain>/app/<label>.log` | the runtime endpoint's service | request: everything above plus the parsed reference, translation, search string, criteria, kind, totals, and the problem code on errors |
 | systemd journal | services, sync, timers | lifecycle messages |
 
 All lines are JSON. The runtime apps also send warnings and errors to the

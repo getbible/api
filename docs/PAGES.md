@@ -10,9 +10,9 @@ over, and how nginx serves them.
   `api.getbible.net` and `query.getbible.net` are domains.
 - An **endpoint** is one of the domain's version folders: `/v2/`, `/v3/`.
   Each endpoint of a static domain is its own tree synchronised from its own
-  repository; each endpoint of a runtime domain is its own service. A domain
+  repository with its own deploy key; each runtime endpoint is its own service. A domain
   set up without version folders serves a single endpoint at its root (the
-  label `root`): domain and endpoint are then the same thing, and everything
+  label `root`): the endpoint is served directly at the domain root, and everything
   written below for `/vN/` applies to `/`.
 
 ## What a domain publishes

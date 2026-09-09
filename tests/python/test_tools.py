@@ -1,4 +1,4 @@
-"""The helper programs under src/bin: render, tokens, analytics, nginx-strip."""
+"""The helper programs under src/bin: render, tokens, analytics."""
 
 from __future__ import annotations
 
@@ -98,43 +98,6 @@ class AnalyticsTest(unittest.TestCase):
             text = run("getbible-analytics", "--log-root", str(root), "--window", "7d").stdout
             self.assertIn("unique callers (union): 5", text)
             self.assertNotIn("203.0.113", text)
-
-
-class NginxStripTest(unittest.TestCase):
-    CONFIG = """# comment
-server {
-    listen 80;
-    server_name api.example.test query.example.test;
-    return 301 https://$host$request_uri;
-}
-
-server {
-    listen 443 ssl;
-    server_name api.example.test;
-    location / { # } not a brace
-        try_files $uri =404;
-    }
-}
-
-server {
-    listen 443 ssl;
-    server_name other.example.test;
-}
-"""
-
-    def test_removes_only_matching_blocks(self) -> None:
-        with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as handle:
-            handle.write(self.CONFIG)
-        try:
-            result = run("getbible-nginx-strip", handle.name, "api.example.test")
-            self.assertNotIn("api.example.test", result.stdout)
-            self.assertIn("other.example.test", result.stdout)
-            self.assertIn("# comment", result.stdout)
-            self.assertEqual(result.stdout.count("server {"), 1)
-            nothing = run("getbible-nginx-strip", handle.name, "missing.example.test", check=False)
-            self.assertEqual(nothing.returncode, 3)
-        finally:
-            os.unlink(handle.name)
 
 
 class SettingsTest(unittest.TestCase):
