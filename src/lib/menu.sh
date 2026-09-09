@@ -16,7 +16,7 @@ menu_main() {
             update "Update all domains (after git pull)" \
             analytics "Traffic analytics: calls and unique callers" \
             logs "Logs: view, archives, rotate" \
-            settings "Settings: Telegram, Cloudflare, favicon, defaults, retention" \
+            settings "Settings: Telegram, Cloudflare, icons, defaults, retention" \
             system "System: host check, dependencies, migration, self-test" \
             exit "Exit")" || return 0
         case "$choice" in
@@ -112,7 +112,7 @@ menu_endpoint() {
             status "Status and health" \
             verify "Verify this server end to end (service, nginx, TLS)" \
             "${golive[@]+"${golive[@]}"}" \
-            pages "Pages and OpenAPI: documentation pages, favicon, versions.json" \
+            pages "Pages and OpenAPI: documentation pages, icons, versions.json" \
             logs "Logs" \
             access "Access mode (open, metered, token only)" \
             limits "Limits for anonymous callers" \
@@ -251,7 +251,7 @@ menu_settings() {
         choice="$(ui_menu "Settings" "$GB_ETC" \
             telegram "Telegram notifications" \
             cloudflare "Cloudflare API token" \
-            favicon "Favicon for all domains: $(favicon_status_text | sed 's/^System favicon: //')" \
+            icons "Icons for all domains: favicon $(favicon_status_text | sed 's/^System favicon: //; s/^the repository icon .*/from the repository/'), logo $(logo_status_text | sed 's/^System logo: //; s/^the repository icons .*/from the repository/')" \
             defaults "Defaults for new domains (access, limits, caching, schedule)" \
             retention "Log retention" \
             deploymode "New domains: go live at once, or stage them for a later go-live" \
@@ -263,7 +263,7 @@ menu_settings() {
         case "$choice" in
             telegram) menu_settings_telegram ;;
             cloudflare) cloudflare_configure ;;
-            favicon) menu_settings_favicon ;;
+            icons) menu_settings_icons ;;
             defaults) menu_settings_defaults ;;
             retention) menu_settings_retention ;;
             deploymode) menu_settings_deploy_mode ;;
@@ -296,26 +296,42 @@ menu_settings_deploy_mode() {
     ui_msg "New domains" "New domains are $mode by default. Existing domains are not affected."
 }
 
-# The favicon every domain serves at /favicon.ico unless it has its own.
-menu_settings_favicon() {
+# The icons every domain serves unless it has its own: the favicon at
+# /favicon.ico and the logo on the generated pages. The repository's icons
+# (img/) apply until they are replaced here.
+menu_settings_icons() {
     local choice file
-    choice="$(ui_menu "Favicon" "$(favicon_status_text)\n\nEvery domain serves this file at /favicon.ico and links it from its generated pages, unless the domain has a favicon of its own (Domain > Pages and OpenAPI > Favicon)." \
-        file "Set it from a file on this server (.ico, .png, .svg or .gif)" \
-        none "Remove it (domains without their own then serve none)" \
+    choice="$(ui_menu "Icons" "$(favicon_status_text)\n$(logo_status_text)\n\nEvery domain serves the favicon at /favicon.ico and shows the logo at the top of its generated pages (with the repository's logo, also the small icon at their foot), unless the domain has icons of its own (Domain > Pages and OpenAPI)." \
+        favicon-file "Favicon: a file from this server (.ico, .png, .svg or .gif)" \
+        favicon-default "Favicon: the repository's icon (img/$GB_ICON_FAVICON)" \
+        favicon-none "Favicon: none (domains without their own answer 404)" \
+        logo-file "Logo: a file from this server (.png, .jpg, .svg, .gif or .webp)" \
+        logo-default "Logo: the repository's icons (img/$GB_ICON_LOGO and companions)" \
+        logo-none "Logo: none (the pages show no images)" \
         back "Back")" || return 0
     case "$choice" in
         back) return 0 ;;
-        file)
+        favicon-file)
             file="$(ui_input "Favicon" "Path of the favicon file on this server" "")" || return 0
             [[ -f "$file" ]] || { ui_msg "Invalid" "No such file: $file"; return 0; }
-            pages_mime_for "$file" >/dev/null || { ui_msg "Invalid" "Favicons are .ico, .png, .svg or .gif files."; return 0; }
+            pages_mime_for "$file" >/dev/null || { ui_msg "Invalid" "$GB_FAVICON_TYPES_TEXT"; return 0; }
             ui_run "System favicon" favicon_set_system "$file" || return 0 ;;
-        none)
-            ui_yesno "Favicon" "Remove the system favicon? Domains without a favicon of their own then answer 404 at /favicon.ico." no || return 0
+        favicon-default) ui_run "System favicon" favicon_set_system default || return 0 ;;
+        favicon-none)
+            ui_yesno "Favicon" "Switch the system favicon off? Domains without a favicon of their own then answer 404 at /favicon.ico." no || return 0
             ui_run "System favicon" favicon_set_system none || return 0 ;;
+        logo-file)
+            file="$(ui_input "Logo" "Path of the logo file on this server" "")" || return 0
+            [[ -f "$file" ]] || { ui_msg "Invalid" "No such file: $file"; return 0; }
+            pages_logo_ext "$file" >/dev/null || { ui_msg "Invalid" "$GB_LOGO_TYPES_TEXT"; return 0; }
+            ui_run "System logo" logo_set_system "$file" || return 0 ;;
+        logo-default) ui_run "System logo" logo_set_system default || return 0 ;;
+        logo-none)
+            ui_yesno "Logo" "Switch the system logo off? The generated pages of domains without a logo of their own then show no images." no || return 0
+            ui_run "System logo" logo_set_system none || return 0 ;;
     esac
     if ui_yesno "Publish" "Publish the change to every domain now? (The same as Update all domains; it can also wait for the next update.)" yes; then
-        ui_run "Publish favicon" endpoint_apply_all || true
+        ui_run "Publish icons" endpoint_apply_all || true
     fi
 }
 

@@ -34,6 +34,62 @@ docs_render_access() {
     esac
 }
 
+# --- the icons on a page (pages.sh decides which apply) --------------------------
+# docs_icon_sizes NAME: "96x96" for icon-96.png (the repository's icons are
+# named after their size).
+docs_icon_sizes() {
+    local size="${1#icon-}"
+    size="${size%%.*}"
+    printf '%sx%s\n' "$size" "$size"
+}
+
+# docs_head_icons DOMAIN: the <link> and <meta> lines of a page's head: the
+# favicon (with the touch icon and the large icon when it is the repository's)
+# and the link-preview image. Empty for a domain that serves none.
+docs_head_icons() {
+    local domain="$1" name
+    if pages_favicon_active "$domain"; then
+        if pages_favicon_is_repository "$domain"; then
+            printf '<link rel="icon" type="%s" sizes="%s" href="/favicon.ico">\n' "$(pages_favicon_mime "$domain")" "$(docs_icon_sizes "$GB_ICON_FAVICON")"
+            if pages_img_present "$domain" "$GB_ICON_LARGE"; then
+                printf '<link rel="icon" type="image/png" sizes="%s" href="/img/%s">\n' "$(docs_icon_sizes "$GB_ICON_LARGE")" "$GB_ICON_LARGE"
+            fi
+            if pages_img_present "$domain" "$GB_ICON_TOUCH"; then
+                printf '<link rel="apple-touch-icon" sizes="%s" href="/img/%s">\n' "$(docs_icon_sizes "$GB_ICON_TOUCH")" "$GB_ICON_TOUCH"
+            fi
+        else
+            printf '<link rel="icon" href="/favicon.ico">\n'
+        fi
+    fi
+    if pages_logo_is_repository "$domain"; then
+        if pages_img_present "$domain" "$GB_ICON_SOCIAL"; then
+            printf '<meta property="og:image" content="https://%s/img/%s">\n' "$domain" "$GB_ICON_SOCIAL"
+        fi
+    elif pages_logo_active "$domain"; then
+        name="$(pages_logo_name "$domain")"
+        case "$name" in
+            *.png|*.jpg|*.jpeg|*.gif|*.webp) printf '<meta property="og:image" content="https://%s/img/%s">\n' "$domain" "$name" ;;
+        esac
+    fi
+    return 0
+}
+
+# docs_logo_url DOMAIN: the image at the top of a page; docs_icon_url DOMAIN:
+# the one at its foot (the repository's small icon, or the domain's own logo
+# scaled down). Both empty when the domain shows none.
+docs_logo_url() {
+    if pages_logo_active "$1"; then printf '/img/%s\n' "$(pages_logo_name "$1")"; fi
+    return 0
+}
+docs_icon_url() {
+    if pages_logo_is_repository "$1"; then
+        if pages_img_present "$1" "$GB_ICON_FAVICON"; then printf '/img/%s\n' "$GB_ICON_FAVICON"; fi
+    else
+        docs_logo_url "$1"
+    fi
+    return 0
+}
+
 # docs_render DOMAIN: publish every page of a domain (see pages.sh).
 docs_render() { pages_publish "$@"; }
 

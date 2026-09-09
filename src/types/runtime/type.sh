@@ -788,7 +788,8 @@ type_runtime_render_endpoint_docs() {
         "VERSION=$version" "PREFIX=$prefix" "VERSION_PATH=$version_path" "IS_ROOT=$is_root" "DEFAULT_TRANSLATION=${EV_DEFAULT_TRANSLATION:-kjv}" \
         "DEFAULT_REFERENCE=${EV_DEFAULT_REFERENCE:-Mat7:7}" "ACCESS_HTML=$(cat "$access")" \
         "CACHE_SECONDS=${EV_CACHE_TTL:-$RM_CACHE_SECONDS}" "TOKEN_REQUIRED=$(rt_token_required)" \
-        "FAVICON=$favicon" "OPENAPI_URL=$openapi_url"
+        "FAVICON=$favicon" "OPENAPI_URL=$openapi_url" \
+        "HEAD_ICONS=$(docs_head_icons "$domain")" "LOGO_URL=$(docs_logo_url "$domain")" "ICON_URL=$(docs_icon_url "$domain")"
 }
 
 # type_runtime_render_openapi DOMAIN LABEL OUTPUT: the implementation's OpenAPI
@@ -836,7 +837,8 @@ type_runtime_render_docs() {
     gb_render "$GB_DOCS_SRC/runtime.html.tmpl" "$output" "DOMAIN=$EP_DOMAIN" "KIND=$EP_KIND" \
         "DESCRIPTION=$RM_DESCRIPTION" "CSS=$(cat "$GB_DOCS_SRC/base.css")" \
         "ACCESS_MODE_LABEL=$(docs_access_label "$EP_ACCESS_MODE")" "ENDPOINT_ROWS=$(rt_endpoint_rows "$EP_DOMAIN")" \
-        "EXAMPLE_PATH=${default}/$(rt_example_path "$EP_DOMAIN" "$default")" "ACCESS_HTML=$(cat "$access")" "FAVICON=$favicon"
+        "EXAMPLE_PATH=${default}/$(rt_example_path "$EP_DOMAIN" "$default")" "ACCESS_HTML=$(cat "$access")" "FAVICON=$favicon" \
+        "HEAD_ICONS=$(docs_head_icons "$EP_DOMAIN")" "LOGO_URL=$(docs_logo_url "$EP_DOMAIN")" "ICON_URL=$(docs_icon_url "$EP_DOMAIN")"
 }
 
 # --- registry: domains and endpoints ------------------------------------------

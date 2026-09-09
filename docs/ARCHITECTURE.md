@@ -34,7 +34,7 @@ the menu. The libraries:
 | `users`, `systemd`, `certs`, `nginx` | system users and groups; units and timers; certbot over HTTP-01 or DNS-01 through Cloudflare, placeholder certificates for staged endpoints; render, stage, test, install, reload, drift |
 | `access` | access modes, limits, tokens and their nginx snippets |
 | `sync` | sync users, deploy keys, sync units |
-| `pages` | the files a domain publishes besides its data: pages, OpenAPI documents, favicon, versions.json, and where each comes from (`PAGES.md`) |
+| `pages` | the files a domain publishes besides its data: pages, OpenAPI documents, favicon and icons, versions.json, and where each comes from (`PAGES.md`) |
 | `platform`, `python` | host capability detection, reviewed standalone CPython distributions and immutable runtime releases |
 | `logs`, `analytics`, `telegram`, `cloudflare` | rotation, reports, notifications, Cloudflare |
 | `docs`, `endpoint`, `update`, `migrate`, `doctor`, `menu` | shared pieces of the documentation pages, the domain pipeline, update, legacy migration, host checks, the menu tree |
@@ -90,7 +90,7 @@ rest (`getbible-render`, `getbible-tokens`, `getbible-analytics`,
   root-only; all hosts' maps migrate together with the shared configuration.
 - `sites-available/<domain>.conf`: the vhost, port 80 with the ACME
   location and a redirect, port 443 with everything above, the exact
-  locations of the domain page, favicon, `versions.json` and `/openapi.json`,
+  locations of the domain page, favicon, `/img/`, `versions.json` and `/openapi.json`,
   and the type's locations: per endpoint its page and OpenAPI document (exact
   locations) and its tree (`^~ /vN/`, static) or its service (`= /vN`,
   `^~ /vN/`, runtime), then health and the fallback. A root endpoint's tree or
@@ -103,8 +103,9 @@ per-endpoint state, sync homes), `/var/backups/getbible` holds backup sets,
 `/var/log/getbible` holds logs. Data roots are `/srv/getbible` (static) and
 `/opt/getbible` (runtime releases), with librarian caches under
 `/var/cache/getbible/<kind>`; `/var/www/getbible/<domain>` holds the
-generated and operator-maintained pages and documents, and
-`/etc/getbible/favicon.ico` the system favicon.
+generated and operator-maintained pages and documents and the icons the
+pages show (`img/`, copied from the repository's `img/` unless replaced);
+`/etc/getbible/favicon.ico` and `logo.EXT` hold an operator's replacements.
 
 Runtime code releases and deployment generations are distinct. A generation
 holds environment, service/socket configuration and a release reference;

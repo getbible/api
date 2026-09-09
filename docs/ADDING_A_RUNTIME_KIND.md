@@ -95,8 +95,10 @@ root-mode code.
 endpoint: `/v2/`, or `/` for a root endpoint), `VERSION_PATH` (`/v2`, or `/`),
 `IS_ROOT`, `DEFAULT_TRANSLATION`, `DEFAULT_REFERENCE`, `TOKEN_REQUIRED`,
 `ACCESS_MODE_LABEL`, `ACCESS_HTML`, `CACHE_SECONDS`, `CSS` (the docs page
-stylesheet), `FAVICON` (whether the domain serves one) and `OPENAPI_URL` (the
-document's address, empty when the endpoint has none). Write public paths
+stylesheet), `HEAD_ICONS` (the icon links of the page head), `LOGO_URL` and
+`ICON_URL` (the images at the top and the foot of the page, empty when the
+domain shows none), `FAVICON` (whether the domain serves one) and
+`OPENAPI_URL` (the document's address, empty when the endpoint has none). Write public paths
 with `PREFIX` and guard version-specific text with `{{#UNLESS IS_ROOT}}` so
 the page and the document stay right for a root endpoint. The rendered
 OpenAPI document must be valid JSON; the deploy checks it. Both are

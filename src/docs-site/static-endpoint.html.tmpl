@@ -4,13 +4,17 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{DOMAIN}}{{PREFIX}} · getBible API</title>
-{{#IF FAVICON}}<link rel="icon" href="/favicon.ico">
-{{/IF}}<style>{{CSS}}</style>
+{{HEAD_ICONS}}<style>{{CSS}}</style>
 </head>
 <body>
 <main>
+<header class="brand">
+{{#IF LOGO_URL}}<a href="/"><img src="{{LOGO_URL}}" alt="getBible"></a>
+{{/IF}}<div>
 <h1>{{DOMAIN}}{{#UNLESS IS_ROOT}} <code>{{PREFIX}}</code>{{/UNLESS}}</h1>
 <p class="lead">{{#IF IS_ROOT}}The getBible static API at <code>{{DOMAIN}}</code>: every resource is a file served exactly as published.{{/IF}}{{#UNLESS IS_ROOT}}Version <code>{{LABEL}}</code> of the getBible static API at <code>{{DOMAIN}}</code>: every resource below this prefix is a file served exactly as published.{{/UNLESS}} <span class="badge">{{ACCESS_MODE_LABEL}}</span></p>
+</div>
+</header>
 
 <h2>Base URL</h2>
 <pre><code>https://{{DOMAIN}}{{PREFIX}}</code></pre>
@@ -45,7 +49,7 @@
 {{#UNLESS IS_ROOT}}
 <p><a href="/">All endpoints of {{DOMAIN}}</a></p>
 {{/UNLESS}}
-<footer>Served by getBible · <a href="https://getbible.net">getbible.net</a> · Requests carry an <code>X-Request-ID</code> header; quote it when reporting a problem.</footer>
+<footer>{{#IF ICON_URL}}<img src="{{ICON_URL}}" alt="">{{/IF}}Served by getBible · <a href="https://getbible.net">getbible.net</a> · Requests carry an <code>X-Request-ID</code> header; quote it when reporting a problem.</footer>
 </main>
 </body>
 </html>

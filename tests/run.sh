@@ -41,6 +41,12 @@ for manifest in src/apps/*/manifest.conf; do
 done
 echo "ok"
 
+step "the repository icons every domain serves by default"
+for icon in icon-96.png icon-180.png icon-230.png logo.png social.png; do
+    [[ -s "img/$icon" ]] || fail "img/$icon is missing"
+done
+echo "ok"
+
 step "python unit tests"
 VENV="${GB_TEST_VENV:-$ROOT/.venv-test}"
 if [[ ! -x "$VENV/bin/python" ]]; then

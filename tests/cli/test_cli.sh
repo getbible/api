@@ -16,6 +16,8 @@ check() {
         printf '  FAIL  %-48s expected %-24s got: %s\n' "$label" "$expected" "${actual:0:160}"; FAIL=$((FAIL + 1))
     fi
 }
+# The names of the regular files in a directory, sorted, on one line.
+names() { find "$1" -maxdepth 1 -type f -printf '%f\n' 2>/dev/null | sort | tr '\n' ' ' | sed 's/ $//'; }
 D=static.example.test
 "$GB" deploy static --domain "$D" --version v2 --repo git@github.com:getbible/v2_scripture.git --extensions json,sha,txt >/dev/null 2>&1 || { echo "deploy failed"; exit 1; }
 
@@ -44,7 +46,14 @@ check "docs list version"        "https://$D/v2/"          "$(cat "$SB/var/www/g
 check "endpoint page rendered"   "<h1>$D <code>/v2/</code></h1>" "$(cat "$SB/var/www/getbible/$D/v2/index.html")"
 check "endpoint page base url"   "https://$D/v2/path/to/document.json" "$(cat "$SB/var/www/getbible/$D/v2/index.html")"
 check "versions.json empty"      '"endpoints": []'         "$(cat "$SB/var/www/getbible/$D/versions.json")"
-check "no favicon without one"   ""                        "$(grep -c 'favicon' "$SB/var/www/getbible/$D/index.html" | sed 's/^0$//')"
+check "repository favicon published" "same"                "$(cmp -s "$ROOT/img/icon-96.png" "$SB/var/www/getbible/$D/favicon.ico" && echo same || echo different)"
+check "repository logo published" "same"                   "$(cmp -s "$ROOT/img/logo.png" "$SB/var/www/getbible/$D/img/logo.png" && echo same || echo different)"
+check "icons published"          "icon-180.png icon-230.png icon-96.png logo.png social.png" "$(names "$SB/var/www/getbible/$D/img")"
+check "page links png favicon"   '<link rel="icon" type="image/png" sizes="96x96" href="/favicon.ico">' "$(cat "$SB/var/www/getbible/$D/index.html")"
+check "page links touch icon"    '<link rel="apple-touch-icon" sizes="180x180" href="/img/icon-180.png">' "$(cat "$SB/var/www/getbible/$D/index.html")"
+check "page links preview image" "<meta property=\"og:image\" content=\"https://$D/img/social.png\">" "$(cat "$SB/var/www/getbible/$D/index.html")"
+check "page shows the logo"      '<img src="/img/logo.png" alt="getBible">' "$(cat "$SB/var/www/getbible/$D/v2/index.html")"
+check "page foot shows the icon" '<footer><img src="/img/icon-96.png" alt="">' "$(cat "$SB/var/www/getbible/$D/v2/index.html")"
 check "openapi from repository"  "GB_SYNC_EXTRA_FILES=openapi.json" "$(cat "$SB/etc/systemd/system/getbible-sync-static_example_test-v2.service")"
 check "sync refreshes pages"     "ExecStartPost=-+$ROOT/getbible.sh pages $D publish --yes" "$(cat "$SB/etc/systemd/system/getbible-sync-static_example_test-v2.service")"
 check "status names endpoints"   "Endpoints   : v2"        "$("$GB" status "$D" 2>/dev/null)"
@@ -66,12 +75,16 @@ check "endpoint page file"       "try_files /v2/index.html =404;" "$(cat "$SITE"
 check "version redirect"         "return 301 /v2/;"        "$(cat "$SITE")"
 check "openapi from the tree"    "try_files /v2/openapi.json =404;" "$(cat "$SITE")"
 check "versions.json location"   "location = /versions.json" "$(cat "$SITE")"
-check "no favicon location yet"  ""                        "$(grep -c 'location = /favicon.ico' "$SITE" | sed 's/^0$//')"
+check "favicon location png"     "default_type image/png;" "$(cat "$SITE")"
+check "images location"          "location ^~ /img/ {"     "$(cat "$SITE")"
 
 echo "-- pages, OpenAPI and favicon --"
 printf '\x00\x00\x01\x00' > "$SB/icon.ico"
 "$GB" favicon "$SB/icon.ico" >/dev/null 2>&1
 check "system favicon recorded"  "FAVICON_MIME=image/vnd.microsoft.icon" "$(cat "$SB/etc/getbible/getbible.conf")"
+check "system favicon custom"    "FAVICON_SOURCE=custom"   "$(cat "$SB/etc/getbible/getbible.conf")"
+check "own favicon: no touch icon" ""                      "$(grep -c 'apple-touch-icon' "$SB/var/www/getbible/$D/v2/index.html" | sed 's/^0$//')"
+check "own favicon: icons pruned" "icon-96.png logo.png social.png" "$(names "$SB/var/www/getbible/$D/img")"
 check "system favicon shown"     "System favicon: $SB/etc/getbible/favicon.ico" "$("$GB" favicon 2>/dev/null)"
 check "favicon published"        "same"                    "$(cmp -s "$SB/icon.ico" "$SB/var/www/getbible/$D/favicon.ico" && echo same || echo different)"
 check "favicon location"         "default_type image/vnd.microsoft.icon;" "$(cat "$SITE")"
@@ -82,6 +95,25 @@ check "favicon file removed"     ""                        "$(ls "$SB/var/www/ge
 check "favicon location gone"    ""                        "$(grep -c 'location = /favicon.ico' "$SITE" | sed 's/^0$//')"
 "$GB" pages "$D" favicon default >/dev/null 2>&1
 check "domain favicon default"   "default_type image/vnd.microsoft.icon;" "$(cat "$SITE")"
+"$GB" favicon default >/dev/null 2>&1
+check "repository favicon again" "same"                    "$(cmp -s "$ROOT/img/icon-96.png" "$SB/var/www/getbible/$D/favicon.ico" && echo same || echo different)"
+check "system favicon status"    "System favicon: the repository icon img/icon-96.png" "$("$GB" favicon 2>/dev/null)"
+check "touch icon is back"       "icon-180.png"            "$(names "$SB/var/www/getbible/$D/img")"
+printf '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"/>\n' > "$SB/logo.svg"
+"$GB" logo "$SB/logo.svg" >/dev/null 2>&1
+check "system logo recorded"     "LOGO_FILE=logo.svg"      "$(cat "$SB/etc/getbible/getbible.conf")"
+check "system logo kept"         "same"                    "$(cmp -s "$SB/logo.svg" "$SB/etc/getbible/logo.svg" && echo same || echo different)"
+check "own logo on the page"     '<img src="/img/logo.svg" alt="getBible">' "$(cat "$SB/var/www/getbible/$D/index.html")"
+check "own logo at the foot"     '<footer><img src="/img/logo.svg" alt="">' "$(cat "$SB/var/www/getbible/$D/index.html")"
+check "own logo: no preview meta" ""                       "$(grep -c 'og:image' "$SB/var/www/getbible/$D/index.html" | sed 's/^0$//')"
+check "own logo: companions pruned" "icon-180.png icon-230.png logo.svg" "$(names "$SB/var/www/getbible/$D/img")"
+"$GB" pages "$D" logo none >/dev/null 2>&1
+check "domain logo none"         "LOGO_SOURCE=none"        "$(cat "$SB/etc/getbible/endpoints/$D/endpoint.conf")"
+check "no logo on the page"      ""                        "$(grep -c '<img' "$SB/var/www/getbible/$D/index.html" | sed 's/^0$//')"
+"$GB" pages "$D" logo default >/dev/null 2>&1
+"$GB" logo default >/dev/null 2>&1
+check "repository logo again"    '<img src="/img/logo.png" alt="getBible">' "$(cat "$SB/var/www/getbible/$D/index.html")"
+check "system logo file removed" ""                        "$(find "$SB/etc/getbible" -maxdepth 1 -name 'logo.*' -printf '%f\n')"
 "$GB" pages "$D" docs v2 custom >/dev/null 2>&1
 check "page taken over"          "DOCS_SOURCE=custom"      "$(cat "$SB/etc/getbible/endpoints/$D/versions/v2.conf")"
 printf '<!-- maintained by hand -->\n' >> "$SB/var/www/getbible/$D/v2/index.html"
@@ -134,6 +166,7 @@ check "repository path checked"  "Invalid repository path" "$("$GB" pages "$D" d
 check "unknown page action"      "Actions:"                "$("$GB" pages "$D" docs v2 bogus 2>&1 || true)"
 check "domain page not none"     "generated or custom"     "$("$GB" pages "$D" docs none 2>&1 || true)"
 check "favicon type checked"     "Favicons are"            "$("$GB" pages "$D" favicon "$SB/domain.html" 2>&1 || true)"
+check "logo type checked"        "Logos are"               "$("$GB" pages "$D" logo "$SB/domain.html" 2>&1 || true)"
 
 echo "-- tokens and access --"
 TOKEN_JSON="$("$GB" token "$D" add "cli test" 2>/dev/null)"
