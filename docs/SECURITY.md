@@ -77,7 +77,8 @@ process that faces the network; everything behind it is isolated.
   throttling token holders; Cloudflare, when proxied, adds DDoS protection
   and can restrict origin access to its own certificate.
 - Runtime Bible data always comes from an existing local repository root;
-  upstream checksums are trusted rather than revalidated by the serving process.
+  the manager adds no corpus validation pass. Checksum files are optional;
+  the librarian can still use supplied hashes during its cached data loading.
 - Runtime dependencies are pinned to exact versions; a bump is a reviewed
   commit and an explicit update. CPython distributions have a committed URL,
   exact version, build and SHA-256; their interpreter and standard library do

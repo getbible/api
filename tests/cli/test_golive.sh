@@ -55,6 +55,8 @@ cat > "$SB/bin/python-cf" <<'PYCF'
 #!/usr/bin/env bash
 if [[ "${1:-}" == */getbible-cloudflare ]]; then
     shift
+    # Human-readable output is a global option before the operation name.
+    [[ "${1:-}" != --human ]] || shift
     printf '%s\n' "$*" >> "$CF_LOG"
     [[ -z "${CF_FAIL:-}" || "$1" != "$CF_FAIL" ]] || exit 1
     case "$1" in
@@ -271,7 +273,11 @@ check "origin files fetch failure aborts" "address ranges or origin CA could not
 check "eighth back to staged"     "LIVE=false"                  "$(conf "$D8")"
 check "no dns change on abort"    ""                            "$(grep -c '^dns ' "$CF_LOG" | sed 's/^0$//')"
 : > "$CF_LOG"
-OUT="$(CF_FAIL=host-rules "$GB" go-live "$D8" 2>&1 || true)"
+RULES_STATUS=0
+CF_FAIL=host-rules "$GB" go-live "$D8" > "$SB/rules-failure.out" 2>&1 || RULES_STATUS=$?
+OUT="$(cat "$SB/rules-failure.out")"
+check "rules failure makes go-live unsuccessful" "1" "$RULES_STATUS"
+check "rules failure retains pending verification" "GOLIVE_VERIFICATION=pending" "$(cat "$SB/var/lib/getbible/state/$D8/state.conf")"
 check "eighth is live"            "LIVE=true"                   "$(conf "$D8")"
 check "ranges fetched first"      "ips"                         "$(head -1 "$CF_LOG")"
 check "dns switched to address"   "dns $D8 --proxied true --ipv4 203.0.113.10" "$(cat "$CF_LOG")"
@@ -407,29 +413,7 @@ echo "-- live TLS cannot fall back to an untrusted certificate --"
 OUT="$(cat "$SB/golive-tls.out")"
 check "untrusted live certificate fails verification" "live_tls_exit=1" "$OUT"
 check "staged placeholder remains testable" "staged_tls_exit=0" "$OUT"
-check "live requests never retry insecurely" 
-if command -v nginx >/dev/null; then
-    unset GB_NGINX_FAKE_VERSION GB_NGINX_FAKE_BROTLI
-    export GB_NGINX_FAKE_IPV6=false
-    D6=sixth.example.test
-    "$GB" deploy static --domain "$D6" --version v2 --repo git@github.com:getbible/v2_scripture.git --staged >/dev/null 2>&1
-    mkdir -p "$SB/etc/nginx/logs" "$SB/var/cache/nginx/getbible"
-    sed -i -e 's/listen 80;/listen 127.0.0.1:18280;/' -e 's/listen 443 ssl\(.*\);/listen 127.0.0.1:18643 ssl\1;/' "$SB/etc/nginx/sites-available/$D6.conf"
-    find "$SB/etc/nginx/sites-enabled" -name '*.conf' ! -name "$D6.conf" -delete
-    cat > "$SB/etc/nginx/nginx-test.conf" <<EOF
-pid $SB/nginx.pid;
-error_log stderr warn;
-events { worker_connections 16; }
-http { access_log off; include /etc/nginx/mime.types; include $SB/etc/nginx/conf.d/*.conf; include $SB/etc/nginx/sites-enabled/*.conf; }
-EOF
-    check "nginx -t accepts placeholder" "successful"           "$(nginx -t -c "$SB/etc/nginx/nginx-test.conf" -p "$SB/etc/nginx" 2>&1)"
-else
-    echo "  (nginx not installed; skipped)"
-fi
-
-printf '\n== %d passed, %d failed ==\n' "$PASS" "$FAIL"
-[[ "$FAIL" -eq 0 ]]
-false\nfalse\ntrue\ntrue' "$(cat "$SB/probe-trust.log")"
+check "live requests never retry insecurely" $'false\nfalse\ntrue\ntrue' "$(cat "$SB/probe-trust.log")"
 
 echo "-- public propagation waits, then verifies HTTPS --"
 (
