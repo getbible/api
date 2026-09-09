@@ -11,8 +11,8 @@
 #   endpoint page     /vN/              generated | custom | repository | none
 #   endpoint OpenAPI  /vN/openapi.json  generated (runtime) | repository (static) | custom | none
 #   favicon           /favicon.ico      default (the system favicon) | custom | none
-#   versions.json     /versions.json    generated for domains with version folders (lists
-#                                       the endpoints whose OpenAPI document is present)
+#   versions.json     /versions.json    generated for every domain (lists enabled
+#                                       endpoints whose OpenAPI document is present)
 #
 # Generated files are rewritten on every apply and update. A custom file is
 # yours: it lives under /var/www/getbible/<domain>/, never inside a repository
@@ -191,9 +191,8 @@ pages_publish_favicon() {
     esac
 }
 
-# A domain with version folders publishes versions.json; a root-endpoint
-# domain has nothing to index.
-pages_versions_active() { ! pages_has_root_endpoint "$1" && [[ -n "$(pages_endpoints "$1")" ]]; }
+# Every domain publishes discovery, including one endpoint served at its root.
+pages_versions_active() { [[ -n "$(pages_endpoints "$1")" ]]; }
 
 # The endpoints versions.json lists: those whose OpenAPI document is
 # configured and present right now.
@@ -201,6 +200,7 @@ pages_versions_listed() {
     local domain="$1" label
     while read -r label; do
         [[ -n "$label" ]] || continue
+        [[ "$(ep_version_get "$domain" "$label" ENABLED true)" == true ]] || continue
         [[ "$(pages_openapi_source "$domain" "$label")" != none ]] || continue
         pages_file_present "$domain" "$label" openapi || continue
         printf '%s\n' "$label"
@@ -209,24 +209,36 @@ pages_versions_listed() {
 }
 
 # versions.json maps every listed endpoint to its OpenAPI document. It exists
-# for every domain with version folders, empty when no endpoint has a
-# document yet, so clients always find a valid index at the same address.
+# for every domain, empty when no endpoint has a document yet. No content
+# validation is needed: configured repositories and operator files are trusted.
 pages_publish_versions() {
-    local domain="$1" target stage
+    local domain="$1" target stage label version type
     target="$(pages_versions_file "$domain")"
     if ! pages_versions_active "$domain"; then
         [[ "$GB_DRY_RUN" == true ]] || rm -f -- "$target"
         return 0
     fi
     stage="$(gb_tmpdir)/versions-$(gb_slug "$domain").json"
-    pages_versions_listed "$domain" | "$GB_PYTHON" -c '
+    type="$(ep_get "$domain" TYPE)"
+    {
+        while read -r label; do
+            [[ -n "$label" ]] || continue
+            version="$label"
+            if pages_is_root "$label" && [[ "$type" == runtime ]]; then
+                version="$(ep_version_get "$domain" "$label" APP_VERSION "$label")"
+            fi
+            printf '%s\t%s\n' "$label" "$version"
+        done < <(pages_versions_listed "$domain")
+    } | "$GB_PYTHON" -c '
 import json, sys
 domain = sys.argv[1]
-labels = [line.strip() for line in sys.stdin if line.strip()]
-document = {"domain": domain, "endpoints": [
-    {"version": label, "url": f"https://{domain}/{label}/", "openapi": f"https://{domain}/{label}/openapi.json"}
-    for label in labels]}
-json.dump(document, sys.stdout, indent=2)
+endpoints = []
+for line in sys.stdin:
+    label, version = line.rstrip("\n").split("\t", 1)
+    prefix = "/" if label == "root" else f"/{label}/"
+    endpoints.append({"version": version, "url": f"https://{domain}{prefix}",
+                      "openapi": f"https://{domain}{prefix}openapi.json"})
+json.dump({"domain": domain, "endpoints": endpoints}, sys.stdout, indent=2)
 print()' "$domain" > "$stage" || return 1
     gb_install_file "$stage" "$target" 0644
 }

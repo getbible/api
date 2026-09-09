@@ -259,11 +259,11 @@ type_static_deploy_finish() {
             return 1
         fi
     fi
-    endpoint_apply "$domain"
+    endpoint_apply "$domain" || return 1
     if ep_is_live "$domain"; then
         tg_notify ok "Domain deployed: $domain" "Static domain with endpoint $(pages_label_text "$label"). The first sync runs once the deploy key is authorised on the repository."
         if ! nginx_cert_exists "$domain"; then
-            ui_msg "No certificate yet" "$domain is live but has no Let's Encrypt certificate, so it answers HTTP only (challenges are served, everything else redirects to HTTPS). Once DNS reaches this server, choose Domain > Certificate > Issue."
+            ui_msg "HTTPS pending" "$domain has no certificate yet. Port 80 serves challenges and redirects to HTTPS; API traffic needs a certificate. Choose Domain > Certificate > Issue once DNS reaches this server."
         fi
     else
         tg_notify ok "Domain staged: $domain" "Static domain with endpoint $(pages_label_text "$label"), prepared on $(hostname -f 2>/dev/null || hostname). Not live: no certificate or DNS change until 'Go live'."
@@ -292,7 +292,7 @@ type_static_add_version() {
     ep_version_exists "$domain" "$label" && gb_die "Version $label already exists on $domain"
     type_static_check_label "$domain" "$label" || return 1
     ep_version_create "$domain" "$label" "$repo" "$ref" "$subpath"
-    endpoint_apply "$domain"
+    endpoint_apply "$domain" || return 1
     tg_notify ok "Endpoint added: $domain $label" "Repository $repo ($ref). The timer will publish it on the next check; use 'Sync now' to publish immediately."
 }
 
@@ -322,7 +322,7 @@ type_static_remove_version() {
     ep_version_remove_config "$domain" "$label"
     rm -f -- "$(ep_version_path "$domain" "$label")"
     rm -rf -- "$(ep_releases_dir "$domain" "$label")"
-    endpoint_apply "$domain"
+    endpoint_apply "$domain" || return 1
     tg_notify warn "Endpoint removed: $domain $label" "The endpoint is no longer served and its releases were deleted."
 }
 

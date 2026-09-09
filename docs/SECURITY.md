@@ -11,9 +11,10 @@ process that faces the network; everything behind it is isolated.
 - Only allowed extensions are exported from a repository and only those are
   served, plus the page and OpenAPI document an endpoint takes from the
   repository by explicit path (no dot segments, never a symlink); dotfiles
-  never reach the live root. JSON syntax, available sibling
-  checksums and hash manifests are verified before publication. Malformed
-  manifests, unsafe paths and symlinks are rejected.
+  never reach the live root. Committed repository bytes are authoritative:
+  builders validate JSON, checksums and manifests upstream. Publication uses
+  Git object identity to reuse unchanged files without rereading their bodies;
+  unsafe paths, symlinks and interrupted transfers are still rejected.
 - nginx: no directory listings, no query strings, safe methods only, 1 KB
   body limit, short header and body timeouts, `server_tokens off`, locked
   CSP, `nosniff`, HSTS, JSON problem documents for every error.
@@ -75,6 +76,8 @@ process that faces the network; everything behind it is isolated.
 - Rate limits (metered mode) protect the origin from abuse without
   throttling token holders; Cloudflare, when proxied, adds DDoS protection
   and can restrict origin access to its own certificate.
+- Runtime Bible data always comes from an existing local repository root;
+  upstream checksums are trusted rather than revalidated by the serving process.
 - Runtime dependencies are pinned to exact versions; a bump is a reviewed
   commit and an explicit update. CPython distributions have a committed URL,
   exact version, build and SHA-256; their interpreter and standard library do

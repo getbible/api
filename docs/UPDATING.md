@@ -31,7 +31,7 @@ operator has taken over are left alone (`PAGES.md`).
 | `runtime DOMAIN [vN] set WORKERS 4` | Validates the endpoint's setting and activates a new generation; the running process receives the updated configuration. |
 | `runtime DOMAIN [vN] rollback` | Activates the endpoint's retained previous code, interpreter and settings, preserving the domain's current access mode, quotas and tokens. |
 | `version add DOMAIN v3` | Adds a version to a runtime domain as its own service (see `RUNTIME_ENDPOINTS.md`); `version default DOMAIN v3` makes it answer `/` and the short forms. |
-| `sync DOMAIN v2` | Fetches and verifies the selected static endpoint, then atomically changes its live symlink when needed. |
+| `sync DOMAIN v2` | Fetches and publishes the selected trusted static endpoint, then atomically changes its live symlink when needed. |
 
 See `runtime versions` for the reviewed interpreter catalog. New upstream
 Python releases become eligible after a repository change updates
@@ -57,7 +57,8 @@ Preparation failures leave the old runtime serving. Activation failures restore
 the prior routing and deployment state; a failed routing recovery retains
 processes and reports the failure for inspection. nginx is never restarted by
 the deployment pipeline. Static data rotation needs neither a runtime restart
-nor an nginx reload: incomplete or invalid exports are never published.
+nor an nginx reload: an interrupted export is never published. Upstream content
+is copied as committed, without a second JSON or checksum validation pass.
 
 Unchanged code and configuration reuse their existing deployment. Hand-edited
 managed files are detected against `/var/lib/getbible/ledger`: an interactive
@@ -110,7 +111,6 @@ atomic symlink restore while holding that endpoint's sync lock.
 
 CI exercises supported Python families, real nginx/Gunicorn, actual systemd
 service users, upgrades, failure recovery and a request-load smoke test. These
-checks do not establish an enterprise SLA. Before production, test the actual
-Bible corpus and expected concurrency, monitor HTTPS query/search responses,
-verify backups and recovery on a separate host, and establish capacity and
-host-maintenance procedures.
+checks do not establish an enterprise SLA. The source repositories remain authoritative; production
+updates do not run corpus validation or introduce additional monitoring/load
+tests. Maintain the host independently of the application.

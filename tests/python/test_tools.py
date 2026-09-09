@@ -1,9 +1,8 @@
-"""The helper programs under src/bin: render, tokens, verify-tree, analytics, nginx-strip."""
+"""The helper programs under src/bin: render, tokens, analytics, nginx-strip."""
 
 from __future__ import annotations
 
 import gzip
-import hashlib
 import json
 import os
 import subprocess
@@ -61,26 +60,6 @@ class TokensTest(unittest.TestCase):
             expired = json.loads(run("getbible-tokens", store, "add", "--label", "old", "--expires", "2000-01-01").stdout)
             self.assertEqual(run("getbible-tokens", store, "count").stdout.strip(), "0")
             self.assertIn(expired["id"], run("getbible-tokens", store, "list").stdout)
-
-
-class VerifyTreeTest(unittest.TestCase):
-    def test_sha_and_manifest_checks(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "kjv" / "1").mkdir(parents=True)
-            chapter = root / "kjv" / "1" / "1.json"
-            chapter.write_text('{"a":1}')
-            (root / "kjv" / "1" / "1.sha").write_text(hashlib.sha1(chapter.read_bytes()).hexdigest())
-            doc = root / "doc.json"
-            doc.write_text('{"b":2}')
-            (root / "hashes.json").write_text(json.dumps({"algorithm": "sha256", "files": {"doc.json": hashlib.sha256(doc.read_bytes()).hexdigest()}}))
-            summary = json.loads(run("getbible-verify-tree", str(root)).stdout)
-            self.assertEqual(summary["sha_checked"], 1)
-            self.assertEqual(summary["manifest_checked"], 1)
-            chapter.write_text('{"a":2}')
-            result = run("getbible-verify-tree", str(root), check=False)
-            self.assertEqual(result.returncode, 1)
-            self.assertIn("sha1 mismatch", result.stderr)
 
 
 class AnalyticsTest(unittest.TestCase):
