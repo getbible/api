@@ -77,6 +77,13 @@ it_check "domain page links versions" 'href="/versions.json"' "$(it_body "$DOMAI
 it_check "favicon served"            "200"              "$(it_status "$DOMAIN" /favicon.ico)"
 it_check "favicon type"              "image/vnd.microsoft.icon" "$(it_header "$DOMAIN" /favicon.ico content-type)"
 it_check "pages link the favicon"    'href="/favicon.ico"' "$(it_body "$DOMAIN" /v2/)"
+it_check "pages show the logo"       'src="/img/logo.png"' "$(it_body "$DOMAIN" /v2/)"
+it_check "logo served"               "200"              "$(it_status "$DOMAIN" /img/logo.png)"
+it_check "logo type"                 "image/png"        "$(it_header "$DOMAIN" /img/logo.png content-type)"
+it_check "logo cacheable"            "max-age=86400"    "$(it_header "$DOMAIN" /img/logo.png cache-control)"
+it_check "own favicon: no touch icon" "404"             "$(it_status "$DOMAIN" /img/icon-180.png)"
+it_check "images directory hidden"   "404"              "$(it_status "$DOMAIN" /img/)"
+it_check "unknown image"             "404"              "$(it_status "$DOMAIN" /img/nope.png)"
 
 echo "-- headers --"
 it_check "cors open"                 "access-control-allow-origin: *" "$(it_header "$DOMAIN" /v2/kjv/1/1.json access-control-allow-origin)"

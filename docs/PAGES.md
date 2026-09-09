@@ -1,4 +1,4 @@
-# Pages, OpenAPI documents, favicon and versions.json
+# Pages, OpenAPI documents, icons and versions.json
 
 Besides its data, every domain publishes a few files that describe it. This
 document says which files exist, where each one comes from, how to take one
@@ -24,7 +24,8 @@ over, and how nginx serves them.
 | `/vN/openapi.json` | the endpoint's OpenAPI document | generated (runtime only), repository (static only), custom, none |
 | `/versions.json` | the endpoints whose OpenAPI document is present, mapped to that document (including a single root endpoint) | generated |
 | `/version.json` | alias of `/versions.json`, serving the same generated file | generated |
-| `/favicon.ico` | the favicon linked from every generated page | the system favicon, the domain's own, none |
+| `/favicon.ico` | the favicon linked from every generated page | the repository's icon, the system favicon, the domain's own, none |
+| `/img/…` | the logo at the top of every generated page, the icon at its foot, the touch icon and the link-preview image | the repository's icons, the system logo, the domain's own, none |
 | `/openapi.json` | for a root endpoint its document; for a runtime domain with version folders the default endpoint's document, kept for clients that learnt the address before version folders existed | follows the endpoint |
 
 Every one of these is public in every access mode (open, metered, token
@@ -73,14 +74,39 @@ does not serve.
 The domain page has no `repository` or `none` source: a domain with version
 folders always has a page at `/` (generated or yours) that lists them.
 
-## Favicon
+## Icons: the favicon and the logo
 
-Settings > Favicon sets the favicon every domain serves at `/favicon.ico`
-(`.ico`, `.png`, `.svg` or `.gif`; the tool serves it with the matching media
-type). The file is kept under `/etc/getbible/favicon.ico` and published to
-every domain by Update all domains (the menu offers to do that at once). A
-domain can bring its own under Domain > Pages and OpenAPI > Favicon, or serve
-none. Generated pages link `/favicon.ico` only when the domain serves one.
+The repository ships the getBible icons in `img/`, and every domain publishes
+them by default: on every apply the tool copies them from the checkout into
+`/var/www/getbible/<domain>/` (`favicon.ico` and `img/`), so a new domain
+serves them from its first deploy and `update` brings a changed set to every
+domain.
+
+| File in `img/` | Where it is used |
+| --- | --- |
+| `icon-96.png` | `/favicon.ico`, the icon browsers show in the tab; also the small icon at the foot of every generated page |
+| `logo.png` | the logo at the top of every generated page |
+| `icon-180.png` | `apple-touch-icon` (home screens, bookmarks) |
+| `icon-230.png` | the large icon linked for shortcuts |
+| `social.png` | the image link previews show (`og:image`) |
+
+The favicon and the logo can each be replaced, for every domain or for one:
+
+- **Settings > Icons** (`getbible.sh favicon FILE`, `getbible.sh logo FILE`)
+  replaces the favicon (`.ico`, `.png`, `.svg` or `.gif`, served with the
+  matching media type) or the logo (`.png`, `.jpg`, `.svg`, `.gif` or `.webp`)
+  for every domain. The files are kept under `/etc/getbible/` (`favicon.ico`,
+  `logo.EXT`) and published by Update all domains (the menu offers to do that
+  at once). `default` returns to the repository's icon, `none` switches it
+  off. `getbible.sh icons` shows both.
+- **Domain > Pages and OpenAPI > Favicon / Logo** (`pages DOMAIN favicon
+  FILE`, `pages DOMAIN logo FILE`) does the same for one domain, or serves
+  none there.
+
+A replaced favicon is linked on its own (the touch icon and the large icon
+belong to the repository's set); a replaced logo is shown at the top and,
+scaled down, at the foot of the pages. With the logo switched off the pages
+show no images. Generated pages link only what the domain serves.
 
 ## Where to change these things
 
@@ -105,9 +131,13 @@ getbible.sh pages DOMAIN openapi v2 repository api/openapi.json
 getbible.sh pages DOMAIN openapi v2 from /root/openapi.json
 getbible.sh pages DOMAIN openapi v2 generated             # runtime endpoints
 getbible.sh pages DOMAIN favicon default|none|/root/icon.png
+getbible.sh pages DOMAIN logo default|none|/root/logo.png
 getbible.sh pages DOMAIN publish                          # rewrite the generated files only
-getbible.sh favicon /root/icon.ico                        # the system favicon, published to every domain
-getbible.sh favicon none
+getbible.sh icons                                         # the favicon and logo every domain serves by default
+getbible.sh favicon /root/icon.ico                        # replace the favicon for every domain
+getbible.sh favicon default|none
+getbible.sh logo /root/logo.png                           # replace the logo for every domain
+getbible.sh logo default|none
 ```
 
 For a root endpoint the endpoint label is `root`: `pages DOMAIN docs root
@@ -118,7 +148,8 @@ repository docs/index.html`.
 Pages and documents are exact locations (`location = /v2/`,
 `location = /v2/openapi.json`, `location = /`, `location = /versions.json`,
 `location = /favicon.ico`), rendered only for sources other than `none`, with
-`try_files` on the configured file and a fixed media type. A `custom` or
+`try_files` on the configured file and a fixed media type; the images under
+`/img/` are served by one prefix location with a media type per extension. A `custom` or
 `generated` file is served from `/var/www/getbible/<domain>/`, a `repository`
 file from `/srv/getbible/<domain>/` through the version's current-release
 symlink (with `open_file_cache off`, like the data). `/v2` without the slash

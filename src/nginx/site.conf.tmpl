@@ -71,6 +71,28 @@ server {
         include snippets/getbible/headers.conf;
         add_header Cache-Control "public, max-age=86400" always;
     }
+{{/IF}}{{#IF IMG}}
+    # The images the pages link: the logo, the icon at their foot, the touch
+    # icon and the link-preview image, each with its own media type.
+    location ^~ /img/ {
+        root {{WWW_DIR}};
+
+        location ~ ^/img/[A-Za-z0-9][A-Za-z0-9._-]*\.(png|jpe?g|svg|gif|webp|ico)$ {
+            types {
+                image/png                 png;
+                image/jpeg                jpg jpeg;
+                image/svg+xml             svg;
+                image/gif                 gif;
+                image/webp                webp;
+                image/vnd.microsoft.icon  ico;
+            }
+            default_type application/octet-stream;
+            try_files $uri =404;
+            include snippets/getbible/headers.conf;
+            add_header Cache-Control "public, max-age=86400" always;
+        }
+        return 404;
+    }
 {{/IF}}{{#IF VERSIONS_JSON}}
     location = /versions.json {
         root {{WWW_DIR}};

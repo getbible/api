@@ -129,6 +129,7 @@ type_static_render_endpoint_docs() {
     if pages_favicon_active "$domain"; then favicon=true; fi
     gb_render "$GB_DOCS_SRC/static-endpoint.html.tmpl" "$output" "DOMAIN=$domain" "PREFIX=$prefix" \
         "LABEL=$label" "IS_ROOT=$is_root" "FAVICON=$favicon" "CSS=$(cat "$GB_DOCS_SRC/base.css")" \
+        "HEAD_ICONS=$(docs_head_icons "$domain")" "LOGO_URL=$(docs_logo_url "$domain")" "ICON_URL=$(docs_icon_url "$domain")" \
         "ACCESS_MODE_LABEL=$(docs_access_label "$EP_ACCESS_MODE")" "EXAMPLE_PATH=$example" \
         "OPENAPI_URL=$openapi_url" "EXTENSIONS_LIST=$(type_static_extensions_html)" \
         "CACHE_TTL=$EP_CACHE_TTL" "SHA_CACHE_TTL=$EP_SHA_CACHE_TTL" "ACCESS_HTML=$(cat "$access")"
@@ -167,7 +168,8 @@ type_static_render_docs() {
         "CSS=$(cat "$GB_DOCS_SRC/base.css")" "ACCESS_MODE_LABEL=$(docs_access_label "$EP_ACCESS_MODE")" \
         "VERSIONS_ROWS=$rows" "NO_VERSIONS=$no_versions" "FIRST_VERSION=${first:-v1}" \
         "EXAMPLE_PATH=$example" "EXTENSIONS_LIST=$(type_static_extensions_html)" "CACHE_TTL=$EP_CACHE_TTL" \
-        "SHA_CACHE_TTL=$EP_SHA_CACHE_TTL" "ACCESS_HTML=$(cat "$access")" "FAVICON=$favicon" "VERSIONS_JSON=$versions_json"
+        "SHA_CACHE_TTL=$EP_SHA_CACHE_TTL" "ACCESS_HTML=$(cat "$access")" "FAVICON=$favicon" "VERSIONS_JSON=$versions_json" \
+        "HEAD_ICONS=$(docs_head_icons "$EP_DOMAIN")" "LOGO_URL=$(docs_logo_url "$EP_DOMAIN")" "ICON_URL=$(docs_icon_url "$EP_DOMAIN")"
 }
 
 # --- deploy ------------------------------------------------------------------

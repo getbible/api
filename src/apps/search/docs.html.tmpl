@@ -4,13 +4,17 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{DOMAIN}}{{PREFIX}} · getBible search API</title>
-{{#IF FAVICON}}<link rel="icon" href="/favicon.ico">
-{{/IF}}<style>{{CSS}}</style>
+{{HEAD_ICONS}}<style>{{CSS}}</style>
 </head>
 <body>
 <main>
+<header class="brand">
+{{#IF LOGO_URL}}<a href="/"><img src="{{LOGO_URL}}" alt="getBible"></a>
+{{/IF}}<div>
 <h1>{{DOMAIN}}{{#UNLESS IS_ROOT}} <code>{{PREFIX}}</code>{{/UNLESS}}</h1>
 <p class="lead">The getBible search endpoint: give it words, get the verses that contain them. <span class="badge">{{ACCESS_MODE_LABEL}}</span> <span class="badge">API {{VERSION}}</span></p>
+</div>
+</header>
 
 <h2>Routes</h2>
 <pre><code>GET  https://{{DOMAIN}}{{PREFIX}}{translation}/{search string}
@@ -71,7 +75,7 @@ curl -X POST -H "Content-Type: application/json" \
 
 <p><a href="/">All endpoints of {{DOMAIN}}</a></p>
 
-<footer>Served by getBible · <a href="https://getbible.net">getbible.net</a> · Requests carry an <code>X-Request-ID</code> header; quote it when reporting a problem.</footer>
+<footer>{{#IF ICON_URL}}<img src="{{ICON_URL}}" alt="">{{/IF}}Served by getBible · <a href="https://getbible.net">getbible.net</a> · Requests carry an <code>X-Request-ID</code> header; quote it when reporting a problem.</footer>
 </main>
 </body>
 </html>

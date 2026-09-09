@@ -47,7 +47,7 @@ ep_load() {
                EXTENSIONS CACHE_TTL SHA_CACHE_TTL SYNC_SCHEDULE SYNC_USER VERSION REPOSITORY \
                WORKERS THREADS WARM_TRANSLATIONS DEFAULT_TRANSLATION DEFAULT_REFERENCE \
                ALLOWED_TRANSLATIONS REQUIRE_CHECKSUMS PYTHON_VERSION CREATED ENABLED LIVE \
-               FAVICON_SOURCE FAVICON_MIME; do
+               FAVICON_SOURCE FAVICON_MIME LOGO_SOURCE LOGO_FILE; do
         printf -v "EP_$key" '%s' ""
     done
     cfg_load "$(ep_conf "$domain")" EP
@@ -79,6 +79,7 @@ ep_create() {
     cfg_set "$conf" CLOUDFLARE_ORIGIN_PULLS false
     cfg_set "$conf" DOCS_SOURCE generated
     cfg_set "$conf" FAVICON_SOURCE default
+    cfg_set "$conf" LOGO_SOURCE default
     cfg_set "$conf" CREATED "$(gb_timestamp)"
     chmod 0640 "$conf" 2>/dev/null || true
     gb_ensure_dir "$(ep_state_dir "$domain")" 0750

@@ -4,13 +4,17 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{DOMAIN}} · getBible API</title>
-{{#IF FAVICON}}<link rel="icon" href="/favicon.ico">
-{{/IF}}<style>{{CSS}}</style>
+{{HEAD_ICONS}}<style>{{CSS}}</style>
 </head>
 <body>
 <main>
+<header class="brand">
+{{#IF LOGO_URL}}<a href="/"><img src="{{LOGO_URL}}" alt="getBible"></a>
+{{/IF}}<div>
 <h1>{{DOMAIN}}</h1>
 <p class="lead">A getBible static API: every resource is a file served exactly as published. <span class="badge">{{ACCESS_MODE_LABEL}}</span></p>
+</div>
+</header>
 
 <h2>Endpoints</h2>
 <p>Every path starts with a version segment. Each endpoint is an independent tree with its own documentation page, changing on its own schedule.</p>
@@ -49,7 +53,7 @@
 <tr><td>503</td><td>unavailable</td><td>Temporary outage; retry after a moment.</td></tr>
 </table>
 
-<footer>Served by getBible · <a href="https://getbible.net">getbible.net</a> · Requests carry an <code>X-Request-ID</code> header; quote it when reporting a problem.</footer>
+<footer>{{#IF ICON_URL}}<img src="{{ICON_URL}}" alt="">{{/IF}}Served by getBible · <a href="https://getbible.net">getbible.net</a> · Requests carry an <code>X-Request-ID</code> header; quote it when reporting a problem.</footer>
 </main>
 </body>
 </html>

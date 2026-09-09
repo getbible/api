@@ -8,3 +8,6 @@ pre{background:var(--code);padding:12px 14px;border-radius:6px;overflow-x:auto}p
 table{border-collapse:collapse;width:100%;margin:12px 0}th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--muted);font-weight:600;font-size:.9em}
 a{color:var(--accent)}.badge{display:inline-block;padding:2px 8px;border:1px solid var(--line);border-radius:999px;font-size:.85em;color:var(--muted)}
 footer{margin-top:60px;color:var(--muted);font-size:.9em;border-top:1px solid var(--line);padding-top:16px}ul{padding-left:22px}li{margin:4px 0}
+.brand{display:flex;align-items:center;gap:22px;margin-bottom:24px}.brand img{flex:none;display:block;height:110px;width:auto}.brand h1{margin:0 0 4px}.brand .lead{margin-bottom:0}
+footer img{width:24px;height:24px;object-fit:contain;vertical-align:-6px;margin-right:6px}
+@media (max-width:560px){.brand{gap:14px}.brand img{height:80px}}

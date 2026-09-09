@@ -36,6 +36,8 @@ installs is rendered from `src/` and recorded, so `git pull` followed by
   its own code. A kind's manifests declare the versions it can serve.
 - `src/docs-site/` - templates of the domain pages and the static endpoint
   pages; the runtime kinds carry their own page and OpenAPI templates.
+- `img/` - the getBible icons every domain serves by default (favicon, page
+  logo, touch icon, link-preview image); `pages.sh` publishes them.
 - `tests/` - lint, unit, CLI and integration tests (`tests/run.sh`).
 - `docs/` - operator documentation.
 

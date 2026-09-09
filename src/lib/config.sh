@@ -96,7 +96,10 @@ GB_GLOBAL_DEFAULTS=(
     "CERTBOT_EMAIL="
     "CERT_METHOD=auto"
     "DEFAULT_DEPLOY_MODE=live"
+    "FAVICON_SOURCE=default"
     "FAVICON_MIME="
+    "LOGO_SOURCE=default"
+    "LOGO_FILE="
     "DEFAULT_ACCESS_MODE=metered"
     "DEFAULT_RATE_PER_SECOND=50"
     "DEFAULT_RATE_BURST=250"
@@ -118,6 +121,11 @@ GB_GLOBAL_DEFAULTS=(
 gb_global_init() {
     gb_ensure_dir "$GB_ETC" 0750
     local entry key
+    # Before the repository shipped its own icons, a favicon under /etc was
+    # the only system favicon: such a file stays the operator's choice.
+    if [[ "$(cfg_get "$GB_GLOBAL_CONF" FAVICON_SOURCE "__unset__")" == "__unset__" && -f "$GB_FAVICON_FILE" ]]; then
+        cfg_set "$GB_GLOBAL_CONF" FAVICON_SOURCE custom
+    fi
     for entry in "${GB_GLOBAL_DEFAULTS[@]}"; do
         key="${entry%%=*}"
         if [[ -z "$(cfg_get "$GB_GLOBAL_CONF" "$key" "__unset__")" || "$(cfg_get "$GB_GLOBAL_CONF" "$key" "__unset__")" == "__unset__" ]]; then

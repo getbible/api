@@ -95,8 +95,9 @@ openssl are present and offers to install them. Details:
 Every domain then has its documentation pages: the domain page at `/`, an
 endpoint page at `/vN/` and an OpenAPI document at `/vN/openapi.json`, all
 public. Domain > Pages and OpenAPI shows where each comes from and lets you
-take one over or point it at the repository; Settings > Favicon sets the
-favicon every domain serves. Details: `PAGES.md`.
+take one over or point it at the repository. Every domain serves the getBible
+icons from the repository's `img/` folder (favicon and page logo); Settings >
+Icons replaces them. Details: `PAGES.md`.
 
 Certificates are validated over HTTP-01 through the challenge directory, or
 over DNS-01 through the stored Cloudflare API token when the
@@ -121,13 +122,13 @@ and reloads nginx. Deploy the new domains first, then migrate.
 
 | Path | Holds |
 | --- | --- |
-| `/etc/getbible/getbible.conf` | global defaults (access mode, limits, caching, schedule, log retention, deploy mode, certificate method and contact email, HSTS, the public addresses used for DNS records, the system favicon's media type) |
-| `/etc/getbible/favicon.ico` | the favicon every domain serves unless it has its own |
+| `/etc/getbible/getbible.conf` | global defaults (access mode, limits, caching, schedule, log retention, deploy mode, certificate method and contact email, HSTS, the public addresses used for DNS records, whether the favicon and logo are the repository's or yours) |
+| `/etc/getbible/favicon.ico`, `logo.EXT` | a favicon or logo of yours that replaces the repository's for every domain |
 | `/etc/getbible/telegram.conf`, `cloudflare.conf` | notification and Cloudflare credentials (root only) |
 | `/etc/getbible/certbot-cloudflare.ini` | the Cloudflare token as certbot's DNS-01 plugin reads it (root only, written from `cloudflare.conf`) |
 | `/etc/getbible/placeholder-certs/<domain>/` | the self-signed certificate of a staged domain (removed at go-live) |
 | `/etc/getbible/endpoints/<domain>/` | `endpoint.conf` (the domain, including `LIVE=true|false`), `versions/<label>.conf` (its endpoints: repository or service settings, page and OpenAPI sources), `tokens.json`, `runtime-<label>.env` |
-| `/var/www/getbible/<domain>/` | the domain page, endpoint pages and OpenAPI documents (generated, or maintained by you), `favicon.ico`, `versions.json` |
+| `/var/www/getbible/<domain>/` | the domain page, endpoint pages and OpenAPI documents (generated, or maintained by you), `favicon.ico`, `img/` (the icons the pages show), `versions.json` |
 | `/etc/nginx/sites-available/<domain>.conf` | the rendered vhost (`conf.d/getbible-*.conf`, `snippets/getbible/`, `getbible/` hold the shared pieces) |
 | `/srv/getbible/<domain>/<label>` | the live tree of a static endpoint (a symlink to a release under `releases/<label>/`) |
 | `/opt/getbible/<kind>/<label>/current` | the live release of a runtime endpoint (a symlink under `releases/`; a domain from before endpoints had records keeps `/opt/getbible/<kind>/`) |

@@ -109,7 +109,8 @@ Pages and documents taken over on the old server live under
 `/var/www/getbible/<domain>/`; copy them across and mark them yours again
 (Domain > Pages and OpenAPI > From a file on this server), or copy the
 `DOCS_SOURCE`, `OPENAPI_SOURCE` and `FAVICON_SOURCE` keys of the old
-records and re-apply. Set the system favicon under Settings > Favicon.
+records and re-apply. The icons come with the repository; a favicon or logo
+of your own is set again under Settings > Icons.
 
 ## 3. Verify the new server
 

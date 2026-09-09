@@ -78,8 +78,8 @@ Domains
   token DOMAIN add LABEL [--expires YYYY-MM-DD] | list | revoke ID
 
 Pages and OpenAPI (every domain page, endpoint page and document is public)
-  pages DOMAIN [show]                    where each page, OpenAPI document and the favicon
-                                         come from, and whether the file is present
+  pages DOMAIN [show]                    where each page, OpenAPI document, the favicon and
+                                         the logo come from, and whether the file is present
   pages DOMAIN docs [ENDPOINT] generated|custom|edit|from FILE|repository [PATH]|none
                                          the domain page (no ENDPOINT) or an endpoint page:
                                          let the tool write it, take it over (custom, edit,
@@ -89,8 +89,13 @@ Pages and OpenAPI (every domain page, endpoint page and document is public)
                                          the endpoint's OpenAPI document (generated: runtime
                                          only; repository: static only)
   pages DOMAIN favicon default|none|FILE this domain's favicon (default: the system favicon)
-  pages DOMAIN publish                   rewrite the generated pages and versions.json
-  favicon [FILE|none]                    show or set the favicon every domain serves by default
+  pages DOMAIN logo default|none|FILE    the logo on this domain's pages (default: the system logo)
+  pages DOMAIN publish                   rewrite the generated pages, icons and versions.json
+  icons                                  show the favicon and logo every domain serves by default
+  favicon [FILE|default|none]            show or set that favicon (default: the repository's
+                                         img/icon-96.png; FILE: .ico, .png, .svg or .gif)
+  logo [FILE|default|none]               show or set that logo (default: the repository's
+                                         img/logo.png; FILE: .png, .jpg, .svg, .gif or .webp)
   docs DOMAIN                            same as pages DOMAIN publish
 
 Observability
@@ -449,9 +454,13 @@ main() {
             # it only rewrites generated files, so it takes no management lock.
             if [[ "${2:-}" == publish ]]; then gb_require_root; else gb_system_init; fi
             pages_cli "$@" ;;
+        icons) gb_system_init; icons_status_text ;;
         favicon)
             gb_system_init
             if [[ -z "${1:-}" ]]; then favicon_status_text; else favicon_set_system "$1" && endpoint_apply_all; fi ;;
+        logo)
+            gb_system_init
+            if [[ -z "${1:-}" ]]; then logo_status_text; else logo_set_system "$1" && endpoint_apply_all; fi ;;
         docs) gb_require_root; pages_cli "${1:?domain}" publish ;;
         logs) cmd_logs "$@" ;;
         analytics) analytics_cli "$@" ;;
