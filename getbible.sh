@@ -4,9 +4,9 @@
 #   sudo ./getbible.sh              interactive menu
 #   sudo ./getbible.sh <command>    non-interactive commands (see --help)
 #
-# Everything this script installs is rendered from src/ and recorded, so a
-# later `git pull` followed by `getbible.sh update` brings every domain to
-# the current templates without touching hand-managed files silently.
+# Everything this script installs is rendered from src/ and recorded, so
+# `getbible.sh self-update` followed by `getbible.sh update` brings every
+# domain to the current templates without touching hand-managed files silently.
 
 set -Eeuo pipefail
 GB_SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"

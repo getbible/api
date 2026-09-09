@@ -40,26 +40,29 @@ vhost and one certificate; its **endpoints** are its version folders
   HTTP-01 or, with the stored Cloudflare token, DNS-01 before any DNS
   change. This is how a replacement server is built without downtime.
 
-Prepare the server's release/deploy key and verify GitHub's SSH host key as
-described in [Installing on a server](docs/INSTALL.md#1-clone). With the key
-at `/root/.ssh/getbible-api`, install from Git over SSH:
+Install as root over SSH with a read-only deploy key, so the same key
+serves every later update (the key and SSH configuration are set up once, see
+[Installing on a server](docs/INSTALL.md#1-clone)):
 
 ```sh
-sudo apt update
-sudo apt install -y git openssh-client
-sudo git clone -c core.sshCommand='ssh -i /root/.ssh/getbible-api -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes' \
-  git@github.com:getbible/api.git /opt/getbible/api
+sudo git clone git@github.com:getbible/api.git /opt/getbible/api
 cd /opt/getbible/api
 sudo ./getbible.sh install-deps
 sudo ./getbible.sh
 ```
 
-Later, run `sudo ./getbible.sh self-update` from the checkout, or choose
-**Update manager script** in the menu. This fetches the branch's configured
-upstream and fast-forwards the manager's source checkout. The next invocation
-loads the updated script and libraries. Hosted domains change only when you
-separately run an action such as `sudo ./getbible.sh update [DOMAIN]`. See
-[Updating and recovery](docs/UPDATING.md) for rollout and migration details.
+When improvements are published, update the manager with one command, or
+choose **Update manager script** in the menu:
+
+```sh
+sudo ./getbible.sh self-update
+```
+
+This fetches the clone's upstream with the same key and fast-forwards the
+checkout; the next invocation runs the updated code. Hosted domains change
+only when you separately apply the checkout, for example with
+`sudo ./getbible.sh update [DOMAIN]`. See
+[Updating and recovery](docs/UPDATING.md).
 
 Ubuntu **24.04 and 26.04** are the deployment targets. The manager detects the
 OS, architecture and capabilities; Debian/Ubuntu prerequisites use `apt`.

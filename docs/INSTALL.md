@@ -12,64 +12,50 @@ and non-Linux hosts are not supported runtime targets.
 
 ## 1. Clone
 
-The manager uses a root-owned Git checkout and an SSH release/deploy key to
-read this repository. Install the tools needed for the first clone before
-running the manager's dependency installer:
+The manager runs as root from a root-owned Git checkout, and reads this
+repository over SSH with a deploy key that only root holds. Set the key up
+once; the first clone and every later `self-update` use it.
+
+As root (`sudo su -`), generate the server's key and show its public half:
 
 ```sh
-sudo apt update
-sudo apt install -y git openssh-client
-sudo install -d -m 0700 -o root -g root /root/.ssh
+ssh-keygen -t ed25519 -f /root/.ssh/id_ed25519
+cat /root/.ssh/id_ed25519.pub
 ```
 
-If a release key already grants read access to `getbible/api`, use that key.
-Keep its private file outside the checkout, owned by root with mode `0600`.
-The examples below use `/root/.ssh/getbible-api`; substitute your existing
-key's absolute path throughout if it is stored elsewhere.
+Add the public key under **getbible/api > Settings > Deploy keys > Add deploy
+key**, leaving **Allow write access** unchecked
+([GitHub: managing deploy keys](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/managing-deploy-keys)).
+A deploy key belongs to one repository; the static domains' data
+repositories get their own keys from the tool.
 
-If you need a new key, generate one at that path (do not overwrite an
-existing key):
+Tell SSH to use that key for GitHub by adding this to `/root/.ssh/config`
+(create the file if it does not exist, mode `0600`):
 
-```sh
-sudo ssh-keygen -t ed25519 -N '' -C 'getbible-api server deploy key' -f /root/.ssh/getbible-api
-sudo cat /root/.ssh/getbible-api.pub
+```
+Host github.com
+        Hostname github.com
+        IdentityFile=/root/.ssh/id_ed25519
 ```
 
-Add only the public key to **getbible/api > Settings > Deploy keys > Add
-deploy key**, leaving **Allow write access** unchecked. This key reads the
-manager repository; static domains have separate deploy keys for their data
-repositories. See [GitHub's deploy-key instructions](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/managing-deploy-keys).
-
-Test the key as root, the same identity that will install and update:
+Then clone:
 
 ```sh
-sudo ssh -i /root/.ssh/getbible-api -o IdentitiesOnly=yes -T git@github.com
-```
-
-On the first connection, compare the displayed host-key fingerprint with
-[GitHub's published SSH fingerprints](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints)
-before accepting it. This records the verified host in root's `known_hosts`.
-GitHub reports successful authentication and no shell access; the SSH test
-returns exit code 1 even on success ([GitHub's connection test](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/testing-your-ssh-connection)).
-
-Clone over SSH and store the identity selection in this checkout's Git
-configuration, so subsequent updates use the same release key:
-
-```sh
-sudo git clone -c core.sshCommand='ssh -i /root/.ssh/getbible-api -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes' \
-  git@github.com:getbible/api.git /opt/getbible/api
+sudo git clone git@github.com:getbible/api.git /opt/getbible/api
 cd /opt/getbible/api
 ```
 
+The first connection shows GitHub's host-key fingerprint; compare it with
+[GitHub's published fingerprints](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints)
+before answering yes. Every `sudo git ...` and `sudo ./getbible.sh ...` runs
+as root and picks up the same key through `/root/.ssh/config`, so nothing
+else needs configuring.
+
 The checkout is owned by root on purpose: code that root executes must not be
-writable by a login user. The clone tracks the repository's default branch;
-updates follow the checked-out branch's configured upstream. Update the
-manager source with `sudo ./getbible.sh self-update`, or the menu's **Update
-manager script** action. This changes the source checkout only; the next
-invocation loads the new code. The separate `update [DOMAIN]` command applies
-the current checkout to hosted domains without fetching. See
-[UPDATING.md](UPDATING.md), including migration
-from an existing HTTPS clone or archive installation.
+writable by a login user. Updating the manager is `sudo ./getbible.sh
+self-update` (or **Update manager script** in the menu); applying the checkout
+to hosted domains is the separate `update [DOMAIN]` action. See
+[UPDATING.md](UPDATING.md).
 
 ## 2. Dependencies and first run
 
@@ -172,8 +158,8 @@ and reloads nginx. Deploy the new domains first, then migrate.
 
 | Path | Holds |
 | --- | --- |
-| `/opt/getbible/api/` | root-owned manager Git checkout; its Git configuration selects the SSH release/deploy key |
-| `/root/.ssh/getbible-api` | example location of the manager's private release/deploy key (root only, outside the checkout) |
+| `/opt/getbible/api/` | root-owned manager Git checkout, updated with `self-update` |
+| `/root/.ssh/id_ed25519`, `/root/.ssh/config` | root's deploy key for this repository and the SSH configuration that selects it |
 | `/etc/getbible/getbible.conf` | global defaults (access mode, limits, caching, schedule, log retention, deploy mode, certificate method and contact email, HSTS, the public addresses used for DNS records, whether the favicon and logo are the repository's or yours) |
 | `/etc/getbible/favicon.ico`, `logo.EXT` | a favicon or logo of yours that replaces the repository's for every domain |
 | `/etc/getbible/telegram.conf`, `cloudflare.conf` | notification and Cloudflare credentials (root only) |
