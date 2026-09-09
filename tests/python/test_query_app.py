@@ -103,7 +103,10 @@ class QueryAppTest(EndpointCase, unittest.TestCase):
              patch.object(bible, "select", side_effect=OSError("chapter unavailable")):
             response = self.client.get("/readyz")
             self.assertEqual(response.status_code, 503)
-            self.assertEqual(response.get_json(), {"status": "unavailable"})
+            self.assertEqual(response.mimetype, "application/problem+json")
+            self.assertEqual(response.get_json()["code"], "readiness_failed")
+            self.assertEqual(response.get_json()["status"], 503)
+            self.assertEqual(response.headers["Retry-After"], "5")
             self.assertEqual(self.client.get("/healthz").status_code, 200)
 
     def test_token_endpoint_never_advertises_shared_caching(self) -> None:

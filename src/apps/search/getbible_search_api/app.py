@@ -6,7 +6,8 @@
                                              parameters or body
     GET|POST /{version}/{search string}      redirects to the default translation
 
-Filters travel as query-string parameters or as a JSON body. Precedence is
+Filters travel as query-string parameters on GET or POST, or as a JSON body
+on POST. GET bodies are not read. Precedence is
 fixed: the path wins, then the query string, then the body, then the
 endpoint's configured defaults. A search string that parses as a scripture
 reference returns that scripture instead of searching.
@@ -54,7 +55,7 @@ class _Gate:
                 for previous in held:
                     previous.release()
                 raise ProblemError(503, "busy", "The search service is at capacity; retry in a moment.",
-                                   retry_after=2)
+                                   headers={"Retry-After": "2"}, retry_after=2)
             held.append(semaphore)
         return tuple(held)
 

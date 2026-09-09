@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 
 from getbible_api_common.settings import LibrarianSettings, ServiceSettings
@@ -105,7 +106,10 @@ class SearchAppTest(EndpointCase, unittest.TestCase):
         with patch.object(bible, "search", side_effect=OSError("corpus unavailable")):
             response = self.client.get("/probez")
             self.assertEqual(response.status_code, 503)
-            self.assertEqual(response.get_json(), {"status": "unavailable"})
+            self.assertEqual(response.mimetype, "application/problem+json")
+            self.assertEqual(response.get_json()["code"], "readiness_failed")
+            self.assertEqual(response.get_json()["status"], 503)
+            self.assertEqual(response.headers["Retry-After"], "5")
 
     def test_unknown_version_and_translation(self) -> None:
         self.assertEqual(self.client.get("/v1/test/beginning").get_json()["code"], "unknown_version")
@@ -139,6 +143,71 @@ class SearchAppTest(EndpointCase, unittest.TestCase):
         for semaphore in held:
             semaphore.release()
         self.assertIsNotNone(gate)
+
+
+    def test_all_filters_work_on_every_get_and_post_search_route(self) -> None:
+        filters = {
+            "words": "all", "match": "whole_word", "case_sensitive": False,
+            "scope": "old_testament", "book": ["Genesis"], "books": "1",
+            "diacritics": "fold", "exclude": ["zzzz"], "proximity": 0,
+            "sort": "relevance", "limit": 2, "offset": 0,
+        }
+        urls = ("/v2/test/beginning", "/v2/test", "/v2")
+        baseline = None
+        for path in urls:
+            values = {"q": "beginning", "translation": "test", **filters}
+            # Query parameters use strings; the JSON form uses native types.
+            query = {key: str(value).lower() if isinstance(value, bool) else value
+                     for key, value in values.items()}
+            for method in ("get", "post_query", "post_body"):
+                with self.subTest(path=path, method=method):
+                    if method == "post_body":
+                        response = self.client.post(path, json=values)
+                    elif method == "post_query":
+                        response = self.client.post(path, query_string=query)
+                    else:
+                        response = self.client.get(path, query_string=query)
+                    self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+                    body = response.get_json()
+                    comparable = (body["query"]["criteria"], body["results"], body["matches"])
+                    if baseline is None:
+                        baseline = comparable
+                    self.assertEqual(comparable, baseline)
+
+    def test_explicit_url_and_body_filters_override_configured_defaults(self) -> None:
+        settings = replace(self.app.extensions["settings"], default_criteria={
+            "words": "any", "case_sensitive": True, "scope": "new_testament", "limit": 1,
+        })
+        app = create_app(settings)
+        self.addCleanup(app.extensions["getbible"].close)
+        client = app.test_client()
+        for method in ("get", "post"):
+            with self.subTest(method=method):
+                values = {"words": "all", "scope": "bible", "case_sensitive": False, "limit": 2, "offset": 0}
+                response = (client.get("/v2/test/beginning", query_string={
+                    **values, "case_sensitive": "false",
+                }) if method == "get" else client.post("/v2/test/beginning", json=values))
+                self.assertEqual(response.status_code, 200)
+                criteria = response.get_json()["query"]["criteria"]
+                for key, value in values.items():
+                    self.assertEqual(criteria[key], value)
+
+    def test_busy_response_has_retry_after_header(self) -> None:
+        from getbible_search_api.app import ProblemError, _Gate
+        busy = _Gate(1, 1)
+        held = busy.acquire(False)
+        try:
+            with self.assertRaises(ProblemError) as raised:
+                busy.acquire(False)
+        finally:
+            for semaphore in held:
+                semaphore.release()
+        with patch.object(self.app.extensions["getbible"], "search", side_effect=raised.exception):
+            response = self.client.get("/v2/test/beginning")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.mimetype, "application/problem+json")
+        self.assertEqual(response.headers["Retry-After"], "2")
+        self.assertEqual(response.get_json()["code"], "busy")
 
 
 if __name__ == "__main__":

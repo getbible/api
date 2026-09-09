@@ -1,6 +1,11 @@
     # Health and everything not claimed above go to the default endpoint's
     # service: the short forms of a domain with version folders, or the whole
     # tree of a domain that serves its endpoint at the root.
+    # Deployment probes may execute a corpus search. They are available only
+    # through the service socket; neither spelling reaches the public proxy.
+    location = /probez { return 404; }
+    location ^~ /probez/ { return 404; }
+
     location = /healthz {
         access_log off;
         include snippets/getbible/proxy.conf;

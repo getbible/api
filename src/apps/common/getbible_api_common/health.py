@@ -8,6 +8,7 @@ from flask import Flask, Response, g
 from getbible import GetBible, SearchBible
 
 from .http import json_response
+from .problems import problem
 
 
 def register_health(app: Flask, bible: GetBible, default_translation: str, logger: logging.Logger,
@@ -32,7 +33,10 @@ def register_health(app: Flask, bible: GetBible, default_translation: str, logge
         except Exception:
             logger.exception("Readiness check failed", extra={"event": "readiness_failure", "request_id": g.get("request_id")})
             ready = False
-        return json_response(app, {"status": "ready" if ready else "unavailable"}, status=200 if ready else 503)
+        if not ready:
+            return problem(app, 503, "readiness_failed", "The Scripture service is temporarily unavailable.",
+                           headers={"Retry-After": "5"})
+        return json_response(app, {"status": "ready"})
 
     @app.get("/readyz")
     def _ready() -> Response:
