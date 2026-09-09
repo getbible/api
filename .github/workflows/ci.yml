@@ -30,6 +30,17 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           cache: pip
+      - name: Keep apt on the Ubuntu archives
+        # The runner image adds Google Chrome and Microsoft package feeds whose
+        # indexes can be inconsistent for a while after a release ("Hash Sum
+        # mismatch"), which fails apt-get update before any test runs. Nothing
+        # installed here comes from them.
+        run: |
+          for list in /etc/apt/sources.list.d/*; do
+            if sudo grep -qsE 'dl\.google\.com|packages\.microsoft\.com' "$list"; then
+              sudo rm -f -- "$list"
+            fi
+          done
       - name: Install nginx, shellcheck and tools
         run: |
           sudo apt-get update
@@ -52,6 +63,17 @@ jobs:
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
+      - name: Keep apt on the Ubuntu archives
+        # The runner image adds Google Chrome and Microsoft package feeds whose
+        # indexes can be inconsistent for a while after a release ("Hash Sum
+        # mismatch"), which fails apt-get update before any test runs. Nothing
+        # installed here comes from them.
+        run: |
+          for list in /etc/apt/sources.list.d/*; do
+            if sudo grep -qsE 'dl\.google\.com|packages\.microsoft\.com' "$list"; then
+              sudo rm -f -- "$list"
+            fi
+          done
       - name: Install the deployment prerequisites using the host's Python
         run: sudo ./getbible.sh install-deps --yes
       - name: Actual systemd deployment, upgrades, permissions and recovery
