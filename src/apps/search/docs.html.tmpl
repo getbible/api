@@ -16,26 +16,28 @@
 <pre><code>GET  https://{{DOMAIN}}{{PREFIX}}{translation}/{search string}
 GET  https://{{DOMAIN}}{{PREFIX}}{translation}?q={search string}
 GET  https://{{DOMAIN}}{{VERSION_PATH}}?q={search string}&amp;translation={translation}
-POST https://{{DOMAIN}}{{PREFIX}}{translation}          (JSON body)
+POST https://{{DOMAIN}}{{PREFIX}}{translation}/{search string} (query parameters and/or JSON)
+POST https://{{DOMAIN}}{{PREFIX}}{translation}          (query parameters and/or JSON)
 POST https://{{DOMAIN}}{{VERSION_PATH}}                        (JSON body with translation)</code></pre>
 {{#IF IS_ROOT}}<p>This domain serves API version {{VERSION}} at its root: there is no version segment in its paths.</p>
-{{/IF}}<p>The search string is the last path segment when present. <code>{{PREFIX}}{search string}</code> without a translation redirects to <code>{{DEFAULT_TRANSLATION}}</code>. Filters travel as query parameters or as a JSON body; both work with GET and POST. When the same value appears in more than one place, the path wins, then the query string, then the body, then the endpoint's defaults.</p>
+{{/IF}}<p>The search string is the last path segment when present. <code>{{PREFIX}}{search string}</code> without a translation redirects to <code>{{DEFAULT_TRANSLATION}}</code>. GET takes filters from the URL query string. POST accepts the same query parameters, a JSON body, or both; a body is optional when the URL contains the search text. GET bodies are not read. When the same value appears in more than one place, the path wins, then the query string, then the body, then the endpoint's defaults.</p>
 <pre><code>curl https://{{DOMAIN}}{{PREFIX}}{{DEFAULT_TRANSLATION}}/faith%20hope
 curl "https://{{DOMAIN}}{{PREFIX}}{{DEFAULT_TRANSLATION}}/faith%20hope?words=all&amp;scope=new_testament&amp;limit=25"
 curl -X POST -H "Content-Type: application/json" \
      -d '{"q":"faith hope","scope":"new_testament","limit":25}' https://{{DOMAIN}}{{PREFIX}}{{DEFAULT_TRANSLATION}}</code></pre>
-<p>A search string that is a scripture reference, such as <code>John 3:16</code>, returns that scripture instead of searching; the <code>query.kind</code> field says which happened.</p>
+<p>A search string that is a scripture reference, such as <code>John 3:16</code>, returns that scripture without applying full-text filters; the <code>query.kind</code> field says which happened.</p>
 
 <h2>Filters</h2>
+<p>Every filter is optional. The defaults below apply to managed deployments; explicit URL or JSON values override defaults, including <code>false</code> and <code>0</code>. The <code>q</code> parameter supplies the search text when absent from the path, and <code>translation</code> defaults to <code>{{DEFAULT_TRANSLATION}}</code> when absent from the path. POST fields set to <code>null</code> leave lower-priority values unchanged.</p>
 <table>
 <tr><th>Parameter</th><th>Values</th><th>Default</th></tr>
 <tr><td><code>words</code></td><td><code>all</code>, <code>any</code>, <code>phrase</code></td><td><code>all</code></td></tr>
 <tr><td><code>match</code></td><td><code>whole_word</code>, <code>substring</code></td><td><code>whole_word</code></td></tr>
 <tr><td><code>case_sensitive</code></td><td><code>true</code>, <code>false</code></td><td><code>false</code></td></tr>
 <tr><td><code>scope</code></td><td><code>bible</code>, <code>old_testament</code>, <code>new_testament</code>, <code>deuterocanon</code></td><td><code>bible</code></td></tr>
-<tr><td><code>book</code> (repeatable) / <code>books</code> (comma list)</td><td>Book names or numbers</td><td>all books</td></tr>
+<tr><td><code>book</code> (repeatable) / <code>books</code> (comma list)</td><td>Book names or numbers; both forms are combined (up to 83 selections)</td><td>all books</td></tr>
 <tr><td><code>diacritics</code></td><td><code>fold</code>, <code>exact</code></td><td><code>fold</code></td></tr>
-<tr><td><code>exclude</code> (repeatable)</td><td>Words that must not occur</td><td>none</td></tr>
+<tr><td><code>exclude</code> (repeatable)</td><td>Up to 32 words that must not occur (100 characters each)</td><td>none</td></tr>
 <tr><td><code>proximity</code></td><td>0 to 100 intervening words (with <code>words=all</code>)</td><td>none</td></tr>
 <tr><td><code>sort</code></td><td><code>canonical</code>, <code>relevance</code></td><td><code>canonical</code></td></tr>
 <tr><td><code>limit</code></td><td>1 to 100</td><td><code>100</code></td></tr>
@@ -44,27 +46,28 @@ curl -X POST -H "Content-Type: application/json" \
 <p>Unknown parameters, repeated non-repeatable parameters, and values out of range answer <code>400</code>. Matching is derived from the writing system of the text and the search string, so a bare search string works in every translation{{#IF OPENAPI_URL}}; the machine-readable description is in <a href="{{OPENAPI_URL}}">openapi.json</a>{{/IF}}.</p>
 
 <h2>Response</h2>
-<p>A JSON envelope with three members: <code>query</code> (normalised criteria, <code>kind</code>, translation, <code>sha</code>, exact <code>total</code>, pagination, cache state and cost), <code>results</code> (the same chapter-keyed scripture object the query endpoint returns) and <code>matches</code> (the ordered verses with score, occurrences and matched terms). Public GET responses carry <code>Cache-Control: public, max-age={{CACHE_SECONDS}}</code> and an <code>ETag</code>. Token-protected endpoints use <code>private, no-store</code>; POST responses are never cached.</p>
+<p>A JSON envelope with three members: <code>query</code> (normalised criteria, <code>kind</code>, translation, <code>sha</code>, exact <code>total</code>, pagination, cache state and cost), <code>results</code> (the same chapter-keyed scripture object the query endpoint returns) and <code>matches</code> (the ordered verses with score, occurrences and matched terms). Reference results omit full-text criteria, pagination, cache/cost details, scores, occurrences and matched terms. Public GET responses carry <code>Cache-Control: public, max-age={{CACHE_SECONDS}}</code> and an <code>ETag</code>. Token-protected endpoints use <code>private, no-store</code>; POST responses are never cached.</p>
 
 <h2>Access</h2>
 {{ACCESS_HTML}}
+<p>Documentation pages, <code>openapi.json</code>, <code>GET /healthz</code> and <code>GET /readyz</code> are available without a token. Token checks apply to API data requests.</p>
 
 <h2>Errors</h2>
 <p>Every error is an <a href="https://www.rfc-editor.org/rfc/rfc9457">RFC 9457 problem document</a> (<code>application/problem+json</code>); the <code>detail</code> field carries the message.</p>
 <table>
 <tr><th>Status</th><th>Code</th><th>Meaning</th></tr>
 <tr><td>400</td><td>missing_search</td><td>No search string in the path, the <code>q</code> parameter or the body.</td></tr>
-<tr><td>400</td><td>invalid_search, unknown_parameter, repeated_parameter, request_limit</td><td>The filters are invalid or over their limits.</td></tr>
+<tr><td>400</td><td>invalid_search, invalid_body, unknown_parameter, repeated_parameter, request_limit</td><td>The filters are invalid or over their limits.</td></tr>
 <tr><td>401</td><td>unauthorized</td><td>A bearer token is required and was missing or invalid.</td></tr>
 <tr><td>404</td><td>translation_not_found</td><td>No such translation.</td></tr>
 {{#UNLESS IS_ROOT}}<tr><td>404</td><td>unknown_version</td><td>Only <code>{{VERSION}}</code> is served here.</td></tr>
 {{/UNLESS}}<tr><td>415</td><td>unsupported_media_type</td><td>A POST body that is not JSON.</td></tr>
 <tr><td>429</td><td>rate_limited</td><td>The public budget for your address is used up.</td></tr>
-<tr><td>503</td><td>busy, search_timeout, repository_unavailable</td><td>Temporary; retry after the <code>Retry-After</code> seconds.</td></tr>
+<tr><td>503</td><td>busy, search_timeout, repository_unavailable, readiness_failed</td><td>Temporary; retry after the <code>Retry-After</code> seconds.</td></tr>
 </table>
 
 <h2>Health</h2>
-<p><code>GET /healthz</code> answers when the service is up; <code>GET /readyz</code> reads a verse from the default translation. Deployment additionally runs <code>GET /probez</code> through the private service socket to verify the search corpus. A failed check answers <code>503</code>. Alias redirects use <code>301</code> for GET and <code>308</code> for POST, preserving JSON bodies and query parameters.</p>
+<p><code>GET /healthz</code> answers when the service is up; <code>GET /readyz</code> reads a verse from the default translation. Deployment additionally runs <code>GET /probez</code> through the private service socket to verify the search corpus. The deployment probe is not exposed through the public web server. A failed readiness or deployment check answers <code>503</code> with a problem document and <code>Retry-After</code>. Alias redirects use <code>301</code> for GET and <code>308</code> for POST, preserving JSON bodies and query parameters.</p>
 
 <p><a href="/">All endpoints of {{DOMAIN}}</a></p>
 

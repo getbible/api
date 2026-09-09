@@ -92,6 +92,8 @@ it_check "versions.json"             '"openapi": "https://'"$Q"'/v2/openapi.json
 it_check "folder with args is the service" '"code":"parameters_not_accepted"' "$(it_body "$Q" '/v2/?x=1')"
 it_check "healthz proxied"           '{"status":"ok"}'           "$(it_body "$Q" /healthz)"
 it_check "readyz proxied"            '{"status":"ready"}'        "$(it_body "$Q" /readyz)"
+it_check "folder private probe denied" "404"                     "$(it_status "$Q" /probez)"
+it_check "folder probe slash denied"   "404"                     "$(it_status "$Q" /probez/)"
 it_check "unknown route problem"     '"code":"not_found"'        "$(it_body "$Q" /a/b/c/d)"
 it_check "app log has reference"     '"reference":"Ge1:1"'       "$(it_wait_log "$IT_SB/var/log/getbible/$Q/app/v2.log" '"reference":"Ge1:1"')"
 it_check "nginx log has uri"         '"uri":"/v2/test/Ge1:1?x=1"' "$(it_wait_log "$IT_SB/var/log/getbible/$Q/access.log" '/v2/test/Ge1:1?x=1')"
@@ -124,7 +126,7 @@ it_check "root page routes"          "https://$S/{translation}/{search string}" 
 it_check "root openapi"              '"openapi":"3.1.0"'         "$(it_body "$S" /openapi.json | tr -d ' \n')"
 it_check "root openapi paths"        '"/{translation}/{search}"' "$(it_body "$S" /openapi.json | tr -d ' \n')"
 it_check "no version folder at root" "404"                       "$(it_status "$S" /v2/test/beginning)"
-it_check "no versions.json at root"  ""                          "$(ls "$IT_SB/var/www/getbible/$S/versions.json" 2>/dev/null)"
+it_check "root version discovery"    'https://'"$S"'/openapi.json' "$(it_body "$S" /versions.json)"
 it_check "internal prefix hidden"    "404"                       "$(it_status "$S" /.gb/v2)"
 it_check "app log has search text"   '"search":"beginning"'      "$(it_wait_log "$IT_SB/var/log/getbible/$S/app/root.log" '"search":"beginning"')"
 it_check "nginx log keeps query"     'q=beginning'               "$(it_wait_log "$IT_SB/var/log/getbible/$S/access.log" 'q=beginning')"
@@ -143,6 +145,11 @@ it_check "root token accepted"       "200"                       "$(it_status "$
 it_check "root token query accepted" '"kind":"search"'           "$(it_body "$S" '/?q=beginning&translation=test' -H "Authorization: Bearer $TOKEN_S")"
 it_check "root page still public"    "200"                       "$(it_status "$S" /)"
 it_check "root openapi still public" "200"                       "$(it_status "$S" /openapi.json)"
+it_check "root health still public"  "200"                       "$(it_status "$S" /healthz)"
+it_check "root ready still public"   "200"                       "$(it_status "$S" /readyz)"
+it_check "root probe denied"         "404"                       "$(it_status "$S" /probez)"
+it_check "root probe slash denied"   "404"                       "$(it_status "$S" /probez/)"
+it_check "root token probe denied"   "404"                       "$(it_status "$S" /probez -H "Authorization: Bearer $TOKEN_S")"
 "$IT_ROOT/getbible.sh" access "$S" metered >/dev/null 2>&1
 start_gunicorn search root
 it_nginx_reload
@@ -160,5 +167,24 @@ BEFORE="$(readlink -f "$IT_SB/opt/getbible/query/v2/current")"
 it_check "same release kept"         "$BEFORE"                   "$(readlink -f "$IT_SB/opt/getbible/query/v2/current")"
 it_check "endpoint recorded"         "LAYOUT=versioned"          "$(cat "$IT_SB/etc/getbible/endpoints/$Q/versions/v2.conf")"
 it_check "status per endpoint"       "Endpoint v2 of $Q (v2, versioned layout)" "$("$IT_ROOT/getbible.sh" status "$Q" 2>/dev/null)"
+
+echo "-- documentation remains public on token-only version folders --"
+"$IT_ROOT/getbible.sh" access "$Q" token >/dev/null 2>&1
+start_gunicorn query v2
+it_nginx_reload
+it_check "folder data needs a token" "401"                       "$(it_status "$Q" /v2/test/Ge1:1)"
+for public_path in / /v2/ /openapi.json /v2/openapi.json /versions.json /healthz /readyz; do
+    it_check "folder public $public_path" "200"                 "$(it_status "$Q" "$public_path")"
+done
+it_check "folder probe stays private" "404"                     "$(it_status "$Q" /probez)"
+
+# The deployment probe is still usable on its private service socket.
+search_env="$(readlink -f "$IT_SB/opt/getbible/search/root/active")/runtime.env"
+search_socket="$(
+    # shellcheck source=/dev/null
+    source "$search_env"
+    printf '%s' "${SEARCH_BIND#unix:}"
+)"
+it_check "private socket probe works" '{"status":"ready"}'      "$(curl --silent --fail --max-time 10 --unix-socket "$search_socket" http://localhost/probez)"
 
 it_summary
