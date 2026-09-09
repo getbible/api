@@ -235,12 +235,80 @@ ui_radiolist() {
     esac
 }
 
+
+# Render health endpoint responses for operators; the API response stays JSON.
+ui_health_text() {
+    "$GB_PYTHON" -c '
+import json, sys
+raw = sys.stdin.read().strip()
+if not raw or raw == "unreachable":
+    print("unreachable")
+    raise SystemExit
+try:
+    data = json.loads(raw)
+except (TypeError, ValueError):
+    print("unexpected health response")
+    raise SystemExit
+if not isinstance(data, dict):
+    print("unexpected health response")
+    raise SystemExit
+status = data.get("status")
+if status == "ok":
+    print("online")
+elif status == "ready":
+    print("ready")
+elif status == "unavailable":
+    print("unavailable")
+elif isinstance(status, int) and status >= 400:
+    title = " ".join(str(data.get("title") or "unavailable").split())
+    detail = " ".join(str(data.get("detail") or "").split())
+    print(f"{title} (HTTP {status})" + (f": {detail[:160]}" if detail else ""))
+else:
+    print("unexpected health response")
+'
+}
+
+# systemctl machine properties become a compact service dashboard.
+ui_service_text() {
+    "$GB_PYTHON" -c '
+import sys
+properties = {}
+for line in sys.stdin:
+    key, separator, value = line.strip().partition("=")
+    if separator:
+        properties[key] = value
+rows = (
+    ("MainPID", "Process"),
+    ("ActiveEnterTimestamp", "Running since"),
+    ("MemoryCurrent", "Memory"),
+    ("TasksCurrent", "Tasks"),
+    ("NRestarts", "Restarts"),
+)
+for key, label in rows:
+    if key not in properties:
+        continue
+    value = properties[key]
+    if key == "MemoryCurrent" and value.isdigit():
+        value = f"{int(value) / 1048576:.1f} MiB"
+    value = value or "-"
+    print(f"    {label:<14}: {value}")
+'
+}
+
+ui_run_result_text() {
+    if (( $1 == 0 )); then
+        printf "\nResult: completed\n"
+    else
+        printf "\nResult: failed (exit %s). Review the details above.\n" "$1"
+    fi
+}
+
 # ui_run TITLE COMMAND...: run a command, capture its output, show it afterwards.
 ui_run() {
     local title="$1"
     shift
     ui_init
-    local out status=0
+    local out status=0 previous_capture="$GB_UI_CAPTURED"
     out="$(gb_tmpdir)/ui-run.$$.$RANDOM.log"
     if [[ "$GB_UI" == whiptail ]]; then
         printf 'Running: %s\n\n' "$title" > "$out"
@@ -248,11 +316,12 @@ ui_run() {
         # log; callers gather their answers first and check GB_UI_CAPTURED.
         GB_UI_CAPTURED=true
         "$@" >> "$out" 2>&1 || status=$?
-        GB_UI_CAPTURED=false
-        printf '\nExit status: %s\n' "$status" >> "$out"
+        GB_UI_CAPTURED="$previous_capture"
+        ui_run_result_text "$status" >> "$out"
         ui_textbox "$title" "$out"
     else
         "$@" 2>&1 | tee "$out" || status=${PIPESTATUS[0]}
+        ui_run_result_text "$status"
     fi
     return "$status"
 }

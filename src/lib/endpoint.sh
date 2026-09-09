@@ -79,12 +79,21 @@ endpoint_apply() {
             nginx_render_global "$stage" && nginx_render_endpoint "$stage" || { endpoint_apply_abort "$domain" "TLS configuration rendering failed"; return 1; }
             nginx_apply_stage "$stage" "$EP_SLUG" || { endpoint_apply_abort "$domain" "nginx rejected the TLS configuration"; return 1; }
         else
-            gb_warn "$domain is reachable over HTTP only until a certificate is issued."
+            if [[ "${GB_DRY_RUN:-false}" != true ]] && { [[ -z "${GB_PREFIX:-}" ]] || certs_can_run; }; then
+                endpoint_apply_abort "$domain" "Certificate issuance failed; the domain update was not completed. Issue the certificate and retry."
+                return 1
+            fi
+            gb_log "Offline render: certificate issuance was skipped for $domain."
         fi
     fi
     "type_${EP_TYPE}_finish" "$domain" || { endpoint_apply_abort "$domain" "Activating the domain failed"; return 1; }
     nginx_transaction_commit "$domain" || return 1
     EP_ENABLE_BACKUP=""
+    # Go-live verifies this origin before changing public DNS. The committed
+    # runtime stays active if this check fails; the caller records the failure.
+    if [[ "${GOLIVE_CHECK_ORIGIN:-false}" == true ]]; then
+        golive_verify "$domain" local || return 1
+    fi
     if [[ "$live" == true && -n "${GB_CLOUDFLARE_LOADED:-}" && "$(ep_get "$domain" CLOUDFLARE_MODE off)" != off ]]; then
         if cloudflare_apply "$domain"; then
             ep_state_set "$domain" CLOUDFLARE_ERROR ""
@@ -134,12 +143,18 @@ endpoint_remove() {
 }
 
 endpoint_status_text() {
-    local domain="$1"
+    local domain="$1" error edge_error verification
     ep_load "$domain"
     endpoint_source_type "$EP_TYPE"
     printf 'Domain      : %s (%s%s)\n' "$domain" "$EP_TYPE" "$([[ -n "$EP_KIND" && "$EP_KIND" != static ]] && printf ' %s' "$EP_KIND")"
     printf 'Endpoints   : %s\n' "$(pages_endpoints "$domain" | sed 's/^root$/(domain root)/' | tr '\n' ' ')"
     printf 'Publication : %s\n' "$(endpoint_publication_text "$domain")"
+    error="$(ep_state_get "$domain" LAST_ERROR)"
+    edge_error="$(ep_state_get "$domain" CLOUDFLARE_ERROR)"
+    verification="$(ep_state_get "$domain" GOLIVE_VERIFICATION)"
+    [[ -z "$error" ]] || printf 'Attention   : %s\n' "$error"
+    [[ -z "$edge_error" ]] || printf 'Cloudflare !: %s\n' "$edge_error"
+    [[ -z "$verification" ]] || printf 'Public check: %s\n' "$verification"
     printf 'Access mode : %s\n' "$EP_ACCESS_MODE"
     if [[ "$EP_ACCESS_MODE" == metered ]]; then
         printf 'Limits      : %s r/s burst %s, %s/hour, %s/day, %s connections\n' "$EP_RATE_PER_SECOND" "$EP_RATE_BURST" "$EP_QUOTA_HOUR" "$EP_QUOTA_DAY" "$EP_CONN_LIMIT"
@@ -214,7 +229,8 @@ endpoint_prompt_deploy_mode() {
         live "Go live now" "$([[ "$default" == live ]] && echo on || echo off)" \
         staged "Stage it; go live later from the domain menu" "$([[ "$default" == staged ]] && echo on || echo off)")" || return 1
     if [[ "$mode" == live ]] && ! certs_email_interactive; then
-        ui_msg "Let's Encrypt" "No contact email was given: the certificate request is skipped and $domain serves HTTP only. Set the email under Settings and use Endpoint > Certificate > Issue."
+        ui_msg "Let's Encrypt" "A contact email is required to make $domain available over HTTPS. Deployment was cancelled. Set the email under Settings, or choose a staged deployment."
+        return 1
     fi
     printf '%s\n' "$mode"
 }

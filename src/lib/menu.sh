@@ -51,17 +51,34 @@ menu_check_tools() {
     ui_msg "Missing tools" "This host lacks:$missing\n\nInstall them before deploying (System > Install dependencies on Debian/Ubuntu, or your package manager:$(printf ' %s' "${GB_APT_PACKAGES[@]}")). Deployments warn about what is missing."
 }
 
+# Keep the main menu narrow and surface saved failures without probing services.
+menu_domain_summary() {
+    local domain="$1" kind endpoints state
+    kind="$(ep_get "$domain" TYPE)"
+    if [[ "$kind" == runtime ]]; then
+        kind="$(ep_get "$domain" KIND)"
+    fi
+    endpoints="$(ep_versions "$domain" | sed 's/^root$/domain root/' | tr '\n' ' ')"
+    state="$(ep_publication "$domain")"
+    if [[ -n "$(ep_state_get "$domain" LAST_ERROR)" || -n "$(ep_state_get "$domain" CLOUDFLARE_ERROR)" ]]; then
+        state="$state; needs attention"
+    elif [[ "$(ep_state_get "$domain" GOLIVE_VERIFICATION)" == pending ]]; then
+        state="$state; public check pending"
+    fi
+    printf '%s | %s | %s | %s\n' "$kind" "$state" "$(ep_get "$domain" ACCESS_MODE)" "$endpoints"
+}
+
 menu_overview() {
     local domain count=0 lines=""
     while read -r domain; do
         [[ -n "$domain" ]] || continue
         count=$((count + 1))
-        lines="$lines$(ep_summary_line "$domain")"$'\n'
+        lines="$lines$domain"$'\n'"  $(menu_domain_summary "$domain")"$'\n'
     done < <(ep_list)
     if (( count == 0 )); then
         printf 'No domains yet. Deploy one to begin.\n'
     else
-        printf '%s' "$lines"
+        printf '%s domain(s)\n%s' "$count" "$lines"
     fi
 }
 
@@ -70,7 +87,7 @@ menu_endpoints() {
     local -a items=()
     while read -r domain; do
         [[ -n "$domain" ]] || continue
-        items+=("$domain" "$(ep_summary_line "$domain" | sed 's/^[^ ]* *//; s/  */ /g')")
+        items+=("$domain" "$(menu_domain_summary "$domain")")
     done < <(ep_list)
     [[ ${#items[@]} -gt 0 ]] || { ui_msg "Domains" "No domains are deployed yet."; return 0; }
     domain="$(ui_menu "Domains" "Choose a domain" "${items[@]}")" || return 0

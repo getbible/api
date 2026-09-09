@@ -340,6 +340,134 @@ check "captured: no email prompt" "No Let's Encrypt contact email is set" "$(GB_
 check "stand-in outside sandbox ignored" "no"                   "$(GB_CERTBOT=/usr/bin/true certs_can_run && echo yes || echo no)"
 check "stand-in inside sandbox runs" "yes"                      "$(GB_CERTBOT="$SB/bin/certbot" certs_can_run && echo yes || echo no)"
 
+echo "-- failed verification never reports successful go-live --"
+(
+    # shellcheck source=../../src/lib/golive.sh
+    source "$ROOT/src/lib/golive.sh"
+    fixture_live=false
+    GB_DRY_RUN=false
+    GOLIVE_PREFLIGHT_DONE=true
+    ep_exists() { return 0; }
+    ep_is_live() { [[ "$fixture_live" == true ]]; }
+    ep_set() { [[ "$2" != LIVE ]] || fixture_live="$3"; }
+    ep_state_get() { :; }
+    ep_state_set() { printf 'state %s=%s\n' "$2" "$3"; }
+    nginx_cert_exists() { return 0; }
+    certs_method() { printf 'http\n'; }
+    certs_obtain() { return 0; }
+    endpoint_apply() { [[ "$GOLIVE_CHECK_ORIGIN" == true ]]; }
+    golive_cloudflare_managed() { return 1; }
+    golive_verify() { printf 'verification failed\n'; return 1; }
+    tg_notify() { printf 'notification %s: %s\n' "$1" "$2"; }
+    status=0
+    golive_run pending.example.test || status=$?
+    printf 'exit=%s live=%s\n' "$status" "$fixture_live"
+    status=0
+    golive_run pending.example.test || status=$?
+    printf 'retry_exit=%s\n' "$status"
+) > "$SB/golive-failed.out" 2>&1
+OUT="$(cat "$SB/golive-failed.out")"
+check "failed verify returns nonzero and preserves active service" "exit=1 live=true" "$OUT"
+check "failure notification is pending" "notification warn: Go-live verification pending" "$OUT"
+check "failure never sends success notification" "" "$(grep '^notification ok:' "$SB/golive-failed.out" || true)"
+check "pending state recorded" "state GOLIVE_VERIFICATION=pending" "$OUT"
+check "already live retry actually verifies" "retry_exit=1" "$OUT"
+
+echo "-- live TLS cannot fall back to an untrusted certificate --"
+: > "$SB/golive-test-site"
+(
+    # shellcheck source=../../src/lib/golive.sh
+    source "$ROOT/src/lib/golive.sh"
+    GB_PREFIX=""
+    GB_NGINX_BIN=true
+    fixture_source=letsencrypt
+    ep_load() { EP_TYPE=static; EP_ACCESS_MODE=open; }
+    endpoint_source_type() { :; }
+    endpoint_publication_text() { printf 'fixture\n'; }
+    tokens_count() { printf '0\n'; }
+    ep_versions() { :; }
+    nginx_site_file() { printf '%s\n' "$SB/golive-test-site"; }
+    nginx_enabled_file() { printf '%s\n' "$SB/golive-test-site"; }
+    nginx_detect() { NG_AVAILABLE=true; }
+    certs_source() { printf '%s\n' "$fixture_source"; }
+    certs_status_line() { printf 'fixture certificate\n'; }
+    ep_is_live() { [[ "$fixture_source" == letsencrypt ]]; }
+    golive_probe() {
+        printf '%s\n' "$3" >> "$SB/probe-trust.log"
+        if [[ "$3" == true ]]; then printf '200'; else printf '000'; fi
+    }
+    status=0
+    golive_verify tls.example.test local || status=$?
+    printf 'live_tls_exit=%s\n' "$status"
+    fixture_source=placeholder
+    status=0
+    golive_verify tls.example.test local || status=$?
+    printf 'staged_tls_exit=%s\n' "$status"
+) > "$SB/golive-tls.out" 2>&1
+OUT="$(cat "$SB/golive-tls.out")"
+check "untrusted live certificate fails verification" "live_tls_exit=1" "$OUT"
+check "staged placeholder remains testable" "staged_tls_exit=0" "$OUT"
+check "live requests never retry insecurely" 
+if command -v nginx >/dev/null; then
+    unset GB_NGINX_FAKE_VERSION GB_NGINX_FAKE_BROTLI
+    export GB_NGINX_FAKE_IPV6=false
+    D6=sixth.example.test
+    "$GB" deploy static --domain "$D6" --version v2 --repo git@github.com:getbible/v2_scripture.git --staged >/dev/null 2>&1
+    mkdir -p "$SB/etc/nginx/logs" "$SB/var/cache/nginx/getbible"
+    sed -i -e 's/listen 80;/listen 127.0.0.1:18280;/' -e 's/listen 443 ssl\(.*\);/listen 127.0.0.1:18643 ssl\1;/' "$SB/etc/nginx/sites-available/$D6.conf"
+    find "$SB/etc/nginx/sites-enabled" -name '*.conf' ! -name "$D6.conf" -delete
+    cat > "$SB/etc/nginx/nginx-test.conf" <<EOF
+pid $SB/nginx.pid;
+error_log stderr warn;
+events { worker_connections 16; }
+http { access_log off; include /etc/nginx/mime.types; include $SB/etc/nginx/conf.d/*.conf; include $SB/etc/nginx/sites-enabled/*.conf; }
+EOF
+    check "nginx -t accepts placeholder" "successful"           "$(nginx -t -c "$SB/etc/nginx/nginx-test.conf" -p "$SB/etc/nginx" 2>&1)"
+else
+    echo "  (nginx not installed; skipped)"
+fi
+
+printf '\n== %d passed, %d failed ==\n' "$PASS" "$FAIL"
+[[ "$FAIL" -eq 0 ]]
+false\nfalse\ntrue\ntrue' "$(cat "$SB/probe-trust.log")"
+
+echo "-- public propagation waits, then verifies HTTPS --"
+(
+    # shellcheck source=../../src/lib/golive.sh
+    source "$ROOT/src/lib/golive.sh"
+    GB_PREFIX=""
+    GB_VERIFY_PUBLIC=true
+    GOLIVE_VERIFY_TIMEOUT=6
+    GOLIVE_VERIFY_INTERVAL=1
+    probe_count=0
+    # Deterministic time and requests: no real DNS, network or sleeps.
+    SECONDS=0
+    sleep() { SECONDS=$((SECONDS + $1)); }
+    certs_http_probe() { probe_count=$((probe_count + 1)); (( probe_count >= 2 )); }
+    curl() { printf '200'; }
+    status=0
+    golive_wait_public propagation.example.test || status=$?
+    printf 'propagation_exit=%s attempts=%s\n' "$status" "$probe_count"
+
+    GOLIVE_VERIFY_TIMEOUT=3
+    certs_http_probe() { return 1; }
+    status=0
+    golive_wait_public old-server.example.test || status=$?
+    printf 'old_origin_exit=%s\n' "$status"
+
+    certs_http_probe() { return 0; }
+    curl() { printf '000'; }
+    status=0
+    golive_wait_public invalid-tls.example.test || status=$?
+    printf 'public_tls_exit=%s\n' "$status"
+) > "$SB/golive-propagation.out" 2>&1
+OUT="$(cat "$SB/golive-propagation.out")"
+check "propagation is retried successfully" "propagation_exit=0 attempts=2" "$OUT"
+check "waiting is visible to the operator" "retry in 1s" "$OUT"
+check "healthy old server cannot satisfy origin identity" "old_origin_exit=1" "$OUT"
+check "public TLS failure stays unsuccessful" "public_tls_exit=1" "$OUT"
+check "timeout provides a retry command" "getbible.sh verify old-server.example.test" "$OUT"
+
 echo "-- nginx -t on a staged vhost --"
 if command -v nginx >/dev/null; then
     unset GB_NGINX_FAKE_VERSION GB_NGINX_FAKE_BROTLI

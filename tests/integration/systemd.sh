@@ -14,6 +14,9 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 }
 unset GB_PREFIX GB_SYSTEMCTL GB_NGINX_BIN GB_NGINX_FAKE_VERSION GB_NGINX_FAKE_IPV6
 export GB_YES=true GB_UI=none NO_PROXY='*' no_proxy='*' GB_VERIFY_PUBLIC=false
+# Live fixtures have an explicit CA trust bundle; production never retries
+# untrusted certificates with --insecure.
+export CURL_CA_BUNDLE=/srv/getbible-ci/ca-bundle.crt
 unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
 GB="$ROOT/getbible.sh"
 Q=query.ci.example.test
@@ -55,7 +58,9 @@ trap cleanup EXIT
 
 request() {
     local domain="$1" path="$2"
-    curl --fail-with-body --silent --show-error --insecure --noproxy '*' --max-time 10 \
+    local -a flags=()
+    [[ -f "/etc/letsencrypt/live/$domain/fullchain.pem" ]] || flags+=(--insecure)
+    curl --fail-with-body --silent --show-error "${flags[@]}" --noproxy '*' --max-time 10 \
         --resolve "$domain:443:127.0.0.1" "https://$domain$path"
 }
 
@@ -99,7 +104,9 @@ preseed_certificate() {
     install -d -m 0700 "/etc/letsencrypt/live/$1"
     openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
         -keyout "/etc/letsencrypt/live/$1/privkey.pem" \
-        -out "/etc/letsencrypt/live/$1/fullchain.pem" -subj "/CN=$1" 2>/dev/null
+        -out "/etc/letsencrypt/live/$1/fullchain.pem" -subj "/CN=$1" \
+        -addext "subjectAltName=DNS:$1" 2>/dev/null
+    cat "/etc/letsencrypt/live/$1/fullchain.pem" >> "$CURL_CA_BUNDLE"
 }
 contains() { [[ "$2" == *"$1"* ]] && echo yes || echo no; }
 
