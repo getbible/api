@@ -15,6 +15,9 @@ GB_GOLIVE_LOADED=1
 
 GOLIVE_ALLOW_UNPUBLISHED="${GOLIVE_ALLOW_UNPUBLISHED:-false}"
 GOLIVE_PREFLIGHT_DONE="${GOLIVE_PREFLIGHT_DONE:-false}"
+# Only deployment verification waits; these settings do not affect API requests.
+GOLIVE_VERIFY_TIMEOUT="${GOLIVE_VERIFY_TIMEOUT:-60}"
+GOLIVE_VERIFY_INTERVAL="${GOLIVE_VERIFY_INTERVAL:-5}"
 
 golive_cloudflare_managed() { [[ -n "${GB_CLOUDFLARE_LOADED:-}" && "$(ep_get "$1" CLOUDFLARE_MODE off)" != off ]]; }
 
@@ -82,7 +85,7 @@ golive_preflight() {
         gb_warn "DNS-01 needs the certbot-dns-cloudflare plugin (System > Install dependencies) and a stored Cloudflare API token (Settings > Cloudflare API token)."
         return 1
     fi
-    if [[ "$method" == http ]] && golive_cloudflare_managed "$domain" && ! certs_http_probe "$domain"; then
+    if [[ "$method" == http ]] && golive_cloudflare_managed "$domain" && ! golive_wait_public "$domain" http; then
         # The Cloudflare records are switched only after the certificate
         # exists, so HTTP-01 can work only if the name already reaches here.
         gb_warn "$domain is managed through Cloudflare here and its DNS is switched at go-live, but HTTP-01 validation needs the name to reach this server first. Use the dns-cloudflare method (System > Install dependencies adds its plugin), or issue the certificate before going live."
@@ -114,21 +117,22 @@ golive_plan() {
             printf '     Apply the API-safe rules and real-IP ranges%s.\n' "$pulls"
         fi
     else
-        printf '  %d. Leave DNS alone: it is not managed by Cloudflare here and must already point at this server.\n' "$step"
+        printf '  %d. Leave DNS alone: it is not managed by Cloudflare here and should be pointed at this server by the operator.\n' "$step"
     fi
     step=$((step + 1))
-    printf '  %d. Verify through the local nginx and report on Telegram.\n\n' "$step"
-    printf 'Nothing changes until step 1 has succeeded; a failed attempt leaves %s staged.\n' "$domain"
+    printf '  %d. Confirm public routing and HTTPS, retrying for up to %s seconds; report the result.\n\n' "$step" "$GOLIVE_VERIFY_TIMEOUT"
+    printf 'Nothing changes until step 1 has succeeded; a failure before the switch leaves %s staged.\n' "$domain"
 }
 
 # golive_run DOMAIN [METHOD]: the switch itself. Prompts nothing: run it
 # through golive_interactive, which gathers every answer first.
 golive_run() {
-    local domain="$1" requested="${2:-}" method cf_note="" cert_note dns_before verify_note=""
+    local domain="$1" requested="${2:-}" method cf_note="" cert_note dns_before verify_note="" cf_failed=false
     ep_exists "$domain" || gb_die "Unknown domain: $domain"
     if ep_is_live "$domain"; then
-        gb_log "$domain is already live."
-        return 0
+        gb_log "$domain is already live; checking its current availability."
+        golive_verify "$domain"
+        return $?
     fi
     method="$(certs_method "$domain" "$requested")" || return 1
     if [[ "$GOLIVE_PREFLIGHT_DONE" != true ]]; then
@@ -147,7 +151,7 @@ golive_run() {
     fi
     dns_before="$(ep_state_get "$domain" CLOUDFLARE_DNS_AT)"
     ep_set "$domain" LIVE true || return 1
-    if ! endpoint_apply "$domain"; then
+    if ! GOLIVE_CHECK_ORIGIN=true endpoint_apply "$domain"; then
         ep_set "$domain" LIVE false || true
         gb_warn "Activation failed; $domain is staged again. The certificate is kept for the next attempt."
         tg_notify fail "Go-live failed: $domain" "The live configuration could not be applied; the domain is staged again."
@@ -159,22 +163,32 @@ golive_run() {
         # so the report says exactly which of the two happened.
         if [[ "$(ep_state_get "$domain" CLOUDFLARE_DNS_AT)" != "$dns_before" ]]; then
             if [[ -n "$(ep_state_get "$domain" CLOUDFLARE_ERROR)" ]]; then
-                cf_note=" Cloudflare DNS now points here, but the rules, address ranges or origin CA were not applied: fix the cause, then Endpoint > Cloudflare > Apply."
+                cf_failed=true
+                cf_note=" Cloudflare DNS now points here, but the rules, address ranges or origin CA were not applied: fix the cause, then Domain > Cloudflare > Apply."
                 gb_warn "Cloudflare DNS for $domain now points here, but the rules were not applied; apply them from Domain > Cloudflare once the cause is fixed."
             else
                 cf_note=" Cloudflare DNS now points here."
             fi
         else
-            cf_note=" Cloudflare DNS was NOT updated (the name still points where it did): fix the cause, then Endpoint > Cloudflare > Apply."
+            cf_failed=true
+            cf_note=" Cloudflare DNS was NOT updated (the name still points where it did): fix the cause, then Domain > Cloudflare > Apply."
             gb_warn "Cloudflare DNS for $domain was not updated; apply it from Domain > Cloudflare once the cause is fixed."
         fi
     fi
-    if golive_verify "$domain"; then
-        verify_note=" Verification passed."
-    else
-        verify_note=" Verification reported problems; see the report on the server."
-        gb_warn "Verification reported problems for $domain; review the report above."
+    if ! golive_verify "$domain"; then
+        ep_state_set "$domain" GOLIVE_VERIFICATION pending
+        gb_warn "$domain remains active; verification is incomplete.$cf_note Run 'getbible.sh verify $domain' to retry. DNS caches may need more time."
+        tg_notify warn "Go-live verification pending: $domain" "$domain remains active with $cert_note.$cf_note Verification did not pass; run getbible.sh verify $domain. No service was stopped."
+        return 1
     fi
+    if [[ "$cf_failed" == true ]]; then
+        ep_state_set "$domain" GOLIVE_VERIFICATION pending
+        tg_notify warn "Go-live incomplete: $domain" "Availability verification passed.$cf_note The active service was kept."
+        gb_warn "$domain is serving, but go-live is incomplete.$cf_note"
+        return 1
+    fi
+    ep_state_set "$domain" GOLIVE_VERIFICATION passed
+    verify_note=" Verification passed."
     tg_notify ok "Live: $domain" "$domain is live on $(hostname -f 2>/dev/null || hostname) with $cert_note.$cf_note$verify_note"
     gb_log "$domain is live.$cf_note$verify_note"
     return 0
@@ -194,6 +208,7 @@ golive_stage_again() {
     fi
     ep_set "$domain" LIVE false || return 1
     ep_state_set "$domain" LIVE_AT "" || return 1
+    ep_state_set "$domain" GOLIVE_VERIFICATION "" || return 1
     if ! endpoint_apply "$domain"; then
         gb_warn "$domain is staged again, but re-rendering failed; re-apply it."
         return 1
@@ -210,14 +225,15 @@ golive_stage_again_interactive() {
 
 # The menu and the command line share this: gather every answer first, then
 # run the switch without prompts (whiptail captures its output). Returns 0
-# when the endpoint went live, was live already, or the operator cancelled;
-# 1 when go-live was refused or failed.
+# when the domain verifies successfully or the operator cancels;
+# 1 when go-live was refused, failed, or still awaits public verification.
 golive_interactive() {
     local domain="$1" requested="${2:-}" method missing out reason status=0 explicit_http=false
     ep_exists "$domain" || gb_die "Unknown domain: $domain"
     if ep_is_live "$domain"; then
-        ui_msg "Go live" "$domain is already live."
-        return 0
+        gb_log "$domain is already live; checking its current availability."
+        ui_run "Verify live domain: $domain" golive_verify "$domain"
+        return $?
     fi
     GOLIVE_ALLOW_UNPUBLISHED=false
     if [[ "$(ep_get "$domain" TYPE)" == static ]]; then
@@ -250,7 +266,7 @@ golive_interactive() {
     # A name not managed here must already reach this server for HTTP-01.
     # Every failed validation counts against Let's Encrypt's hourly limit, so
     # ask before trying (non-interactive runs refuse).
-    if [[ "$method" == http ]] && ! nginx_cert_exists "$domain" && ! golive_cloudflare_managed "$domain" && ! certs_http_probe "$domain"; then
+    if [[ "$method" == http ]] && ! nginx_cert_exists "$domain" && ! golive_cloudflare_managed "$domain" && ! golive_wait_public "$domain" http; then
         if [[ "$explicit_http" == true ]]; then
             gb_warn "http://$domain/ does not seem to reach this server; trying HTTP-01 anyway because it was chosen explicitly."
         else
@@ -297,11 +313,72 @@ golive_probe() {
         --resolve "$domain:443:127.0.0.1" "${flags[@]+"${flags[@]}"}" "https://$domain$path" 2>/dev/null || true
 }
 
+# Confirm the public route reaches this server, not a healthy old server still
+# present in a resolver's cache. The existing ACME directory supplies a fresh
+# random marker; no API requests, tokens or runtime work are involved.
+golive_public_probe() {
+    local domain="$1" timeout="$2" deadline="$3" code remaining
+    certs_http_probe "$domain" "$timeout" || return 1
+    remaining=$((deadline - SECONDS))
+    (( remaining > 0 )) || return 1
+    (( timeout <= remaining )) || timeout="$remaining"
+    code="$(curl --silent --output /dev/null --max-time "$timeout" --write-out '%{http_code}' \
+        "https://$domain/healthz" 2>/dev/null || true)"
+    [[ "$code" == 200 ]]
+}
+
+# A bounded propagation window, shared by pre-certificate HTTP reachability
+# and post-switch HTTPS verification. It observes this server's public route;
+# no single resolver can establish that every client DNS cache has expired.
+golive_wait_public() {
+    local domain="$1" mode="${2:-https}" deadline remaining pause timeout attempt=0
+    if [[ "$mode" == http && -n "$GB_PREFIX" ]]; then
+        certs_http_probe "$domain"
+        return $?
+    fi
+    if [[ -n "$GB_PREFIX" || "${GB_VERIFY_PUBLIC:-true}" == false ]]; then
+        # Prefix fixtures never contact real DNS; disposable-host integration
+        # explicitly disables public checks for its .test hostnames.
+        golive_row "Public route" skip "public verification disabled in this environment"
+        return 0
+    fi
+    if ! gb_have curl; then
+        golive_row "Public route" FAIL "curl is unavailable"
+        return 1
+    fi
+    [[ "$GOLIVE_VERIFY_TIMEOUT" =~ ^[0-9]+$ && "$GOLIVE_VERIFY_INTERVAL" =~ ^[1-9][0-9]*$ ]] || {
+        gb_warn "GOLIVE_VERIFY_TIMEOUT must be seconds >= 0; GOLIVE_VERIFY_INTERVAL must be seconds >= 1."
+        return 1
+    }
+    deadline=$((SECONDS + 10#$GOLIVE_VERIFY_TIMEOUT))
+    while :; do
+        remaining=$((deadline - SECONDS))
+        (( remaining > 0 )) || break
+        timeout="$remaining"
+        (( timeout <= 5 )) || timeout=5
+        attempt=$((attempt + 1))
+        if { [[ "$mode" == http ]] && certs_http_probe "$domain" "$timeout"; } ||
+            { [[ "$mode" != http ]] && golive_public_probe "$domain" "$timeout" "$deadline"; }; then
+            golive_row "Public route" ok "$domain reaches this server ($mode, attempt $attempt)"
+            return 0
+        fi
+        remaining=$((deadline - SECONDS))
+        (( remaining > 0 )) || break
+        pause=$((10#$GOLIVE_VERIFY_INTERVAL))
+        (( pause <= remaining )) || pause="$remaining"
+        golive_row "Public route" WAIT "DNS/routing or $mode not ready; retry in ${pause}s (${remaining}s remaining)"
+        sleep "$pause"
+    done
+    golive_row "Public route" WAIT "not confirmed within ${GOLIVE_VERIFY_TIMEOUT}s; service kept active"
+    gb_warn "Check A/AAAA records, DNS TTL, routing and TLS, then run 'getbible.sh verify $domain'. Other clients may still use cached DNS."
+    return 1
+}
+
 # golive_verify DOMAIN: an end-to-end check of this server for DOMAIN, usable
 # before go-live (through the placeholder certificate) and after. Prints a
 # report and returns 1 when something that must work does not.
 golive_verify() {
-    local domain="$1" failed=0 source kind unit socket label code path insecure=false note=""
+    local domain="$1" scope="${2:-all}" failed=0 source unit socket label code path insecure=false
     local -a paths=(/ /healthz)
     ep_load "$domain"
     endpoint_source_type "$EP_TYPE"
@@ -343,7 +420,13 @@ golive_verify() {
     source="$(certs_source "$domain")"
     case "$source" in
         letsencrypt) golive_row "Certificate" ok "$(certs_status_line "$domain")" ;;
-        placeholder) golive_row "Certificate" WARN "$(certs_status_line "$domain")"; insecure=true ;;
+        placeholder)
+            if ep_is_live "$domain"; then
+                golive_row "Certificate" FAIL "live domain still has a self-signed placeholder"
+                failed=$((failed + 1))
+            else
+                golive_row "Certificate" WARN "$(certs_status_line "$domain")"; insecure=true
+            fi ;;
         *) golive_row "Certificate" FAIL "none; HTTPS is not served"; failed=$((failed + 1)) ;;
     esac
     if [[ "$source" == none ]]; then
@@ -355,24 +438,32 @@ golive_verify() {
     else
         for path in "${paths[@]}"; do
             code="$(golive_probe "$domain" "$path" "$insecure")"
-            note=""
-            if [[ "$code" == 000 && "$insecure" == false ]]; then
-                # A certificate this host does not trust (a preseeded test
-                # certificate, say) is reported rather than hidden.
-                code="$(golive_probe "$domain" "$path" true)"
-                note=" (certificate not trusted by this host)"
+            if [[ "$code" == 200 ]]; then
+                golive_row "GET $path" ok "200"
+            else
+                golive_row "GET $path" FAIL "HTTP $code (check service, certificate trust and hostname)"
+                failed=$((failed + 1))
             fi
-            if [[ "$code" == 200 ]]; then golive_row "GET $path" ok "200$note"; else golive_row "GET $path" FAIL "HTTP $code$note"; failed=$((failed + 1)); fi
         done
     fi
-    # Informational only: this reaches whichever server the public name
-    # resolves to right now. GB_VERIFY_PUBLIC=false skips it (tests).
-    if ep_is_live "$domain" && [[ -z "$GB_PREFIX" && "${GB_VERIFY_PUBLIC:-true}" == true ]] && gb_have curl; then
-        code="$(curl --silent --output /dev/null --max-time 10 --write-out '%{http_code}' "https://$domain/healthz" 2>/dev/null || true)"
-        golive_row "Public https://$domain/healthz" info "HTTP $code (whichever server DNS resolves to right now)"
+    # Local readiness is checked before DNS changes. Only a live domain's
+    # complete verification waits for its public route to reach this server.
+    if [[ "$scope" != local && "$failed" == 0 ]] && ep_is_live "$domain"; then
+        if golive_wait_public "$domain"; then
+            if golive_cloudflare_managed "$domain" && [[ -n "$(ep_state_get "$domain" CLOUDFLARE_ERROR)" ]]; then
+                golive_row "Cloudflare" FAIL "$(ep_state_get "$domain" CLOUDFLARE_ERROR); Domain > Cloudflare > Apply"
+                failed=$((failed + 1))
+            fi
+        else
+            failed=$((failed + 1))
+        fi
     fi
     printf '\n'
     if (( failed == 0 )); then
+        if [[ "$scope" != local ]] && ep_is_live "$domain" && [[ "$(ep_state_get "$domain" GOLIVE_VERIFICATION)" == pending ]]; then
+            ep_state_set "$domain" GOLIVE_VERIFICATION passed
+            tg_notify ok "Verification passed: $domain" "Local readiness, public routing and HTTPS now pass. The active service was kept throughout."
+        fi
         printf 'Result: everything that can be checked here passed.\n'
     else
         printf 'Result: %d check(s) failed.\n' "$failed"

@@ -119,7 +119,10 @@ static endpoints),
 the rendered nginx site, `nginx -t`, the certificate in use, and HTTPS through
 the local nginx with the real host name: `GET /`, `GET /healthz` and, for
 runtime domains, `GET /readyz`. While staged, the placeholder certificate is
-self-signed and the report says so.
+self-signed and the report says so. Live certificates must pass normal TLS
+trust and hostname checks; an insecure retry can never turn a failed live
+certificate into a passing result. For an already-live domain, Verify also
+checks the public route as described below.
 
 From another machine, with the new server's address:
 
@@ -174,15 +177,40 @@ addresses it will write, and confirms. Then, in order:
    nothing has changed and the domain stays staged; fix the cause and
    choose Go live again.
 2. The domain is marked live and applied: nginx renders HTTPS with the real
-   certificate, validates and reloads.
+   certificate, validates and reloads. Local readiness and HTTPS are checked
+   before Cloudflare DNS changes; public DNS can still point to the old server.
 3. Cloudflare-managed domains (mode `dns` or `proxied`; the token must be
    stored): the A and AAAA records are pointed at this server and, when
    proxied, the API-safe rules, real-IP ranges and origin pulls are applied
    (the ranges and origin CA are fetched before the vhost is rendered). For
-   other domains, DNS is left alone: change it yourself before going live.
-4. Verification runs through the local nginx, and Telegram receives
-   "Live: DOMAIN" with the certificate, the DNS outcome and whether the
-   verification passed. The full report is in the dialog.
+   other domains, DNS is left alone: point it here yourself. Cloudflare is
+   optional and is off by default; DNS-only mode serves traffic directly.
+4. Verification checks local HTTPS and confirms that the public name reaches
+   this server, using a fresh marker in its HTTP ACME challenge directory,
+   followed by a trusted HTTPS health request. A healthy response from the
+   old server does not count. Checks retry for up to 60 seconds, with progress
+   shown every 5 seconds. The same wait is used before HTTP-01 certificate
+   validation when the public name has not reached this server yet.
+5. Only successful verification produces the successful "Live: DOMAIN"
+   notification and exit status. A propagation timeout or Cloudflare error
+   returns nonzero, reports the incomplete step and keeps the active service
+   serving. It does not undo DNS, stop workers or discard the certificate.
+   Run `sudo ./getbible.sh verify DOMAIN` or Domain > Verify to check again.
+   For a Cloudflare update error, correct the cause and use Domain >
+   Cloudflare > Apply before verifying again.
+
+The wait can be adjusted per command, for example:
+
+```sh
+sudo env GOLIVE_VERIFY_TIMEOUT=300 GOLIVE_VERIFY_INTERVAL=5 ./getbible.sh go-live api.getbible.net --yes
+```
+
+These values control deployment checks only; they add no limits or work to
+API requests. Verification observes this server\'s resolver and public route;
+it cannot establish that every client\'s DNS cache has expired. Allow at least
+the previous A/AAAA TTL before retiring the old server. Hosts that cannot
+reach their own public address report verification as incomplete so the
+operator can check reachability from another machine.
 
 Do the next domain when the first looks right. The old server keeps
 answering clients whose resolvers still cache the old address until the DNS
@@ -214,9 +242,9 @@ sudo ./getbible.sh settings public-ipv4 203.0.113.10
 sudo ./getbible.sh deploy static --domain api.getbible.net --version v2 --repo git@github.com:getbible/v2_scripture.git --staged --yes
 sudo ./getbible.sh sync api.getbible.net v2
 sudo ./getbible.sh deploy runtime --domain query.getbible.net --kind query --staged --yes
-sudo ./getbible.sh cloudflare mode query.getbible.net proxied
-sudo ./getbible.sh access query.getbible.net metered
-sudo ./getbible.sh limits query.getbible.net --rate 50 --burst 250
+sudo ./getbible.sh access query.getbible.net open
+# Optional DNS management with direct traffic (no Cloudflare proxy):
+# sudo ./getbible.sh cloudflare mode query.getbible.net dns
 sudo ./getbible.sh verify query.getbible.net
 sudo ./getbible.sh cert query.getbible.net issue --method dns-cloudflare   # while staged
 sudo ./getbible.sh go-live query.getbible.net --yes [--cert auto|http|dns-cloudflare]

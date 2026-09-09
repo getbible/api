@@ -133,7 +133,7 @@ certs_cloudflare_credentials_write() {
 # fetched by its public name. Advisory only: some networks cannot reach their
 # own public address, and certbot's validation is what counts.
 certs_http_probe() {
-    local domain="$1" dir token body
+    local domain="$1" timeout="${2:-10}" dir token body
     [[ -z "$GB_PREFIX" ]] || { gb_log "(prefix) reachability probe skipped for $domain"; return "${GB_FAKE_HTTP_PROBE:-0}"; }
     gb_have curl || return 0
     dir="$GB_ACME_ROOT/.well-known/acme-challenge"
@@ -141,7 +141,7 @@ certs_http_probe() {
     token="getbible-probe-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
     printf '%s\n' "$token" > "$dir/$token" || return 1
     chmod 0644 "$dir/$token"
-    body="$(curl --silent --location --insecure --max-time 10 --max-redirs 3 \
+    body="$(curl --silent --location --insecure --max-time "$timeout" --max-redirs 3 \
         "http://$domain/.well-known/acme-challenge/$token" 2>/dev/null || true)"
     rm -f -- "$dir/$token"
     [[ "$body" == "$token" ]]
