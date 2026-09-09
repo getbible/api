@@ -6,7 +6,7 @@ IFS=$'\n\t'
 umask 027
 
 : "${GB_SYNC_DOMAIN:?}" "${GB_SYNC_VERSION:?}" "${GB_SYNC_REPO:?}" "${GB_SYNC_REF:?}"
-: "${GB_SYNC_HOME:?}" "${GB_SYNC_DATA:?}"
+: "${GB_SYNC_HOME:?}" "${GB_SYNC_DATA:?}" "${GB_SYNC_KEY:?}"
 GB_SYNC_SUBPATH="${GB_SYNC_SUBPATH:-.}"
 GB_SYNC_EXTENSIONS="${GB_SYNC_EXTENSIONS:-json,sha,txt}"
 # Files exported by path whatever their type: the endpoint's documentation
@@ -64,7 +64,8 @@ flock -n 9 || { log "another sync for $LABEL is running"; exit 0; }
 [[ ! -e "$FORCE_FILE" ]] || GB_SYNC_FORCE=1
 [[ -x "$GB_EXPORT" ]] || { log "required exporter missing or not executable: $GB_EXPORT"; false; }
 
-export GIT_SSH_COMMAND="ssh -i $GB_SYNC_HOME/.ssh/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=$GB_SYNC_HOME/.ssh/known_hosts -o StrictHostKeyChecking=yes -o BatchMode=yes"
+printf -v GIT_SSH_COMMAND 'ssh -F /dev/null -i %q -o IdentitiesOnly=yes -o IdentityAgent=none -o UserKnownHostsFile=%q -o StrictHostKeyChecking=yes -o BatchMode=yes' "$GB_SYNC_KEY" "$GB_SYNC_HOME/.ssh/known_hosts"
+export GIT_SSH_COMMAND
 export GIT_TERMINAL_PROMPT=0
 export HOME="$GB_SYNC_HOME"
 

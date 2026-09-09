@@ -12,13 +12,14 @@ GB_TYPE_STATIC_LOADED=1
 # Users, directories, tools and sync units for every version.
 type_static_prepare() {
     local domain="$1" label
-    sync_install_tools
+    sync_install_tools || return 1
     tg_install_helper 2>/dev/null || true
-    sync_setup_domain "$domain"
+    sync_setup_domain "$domain" || return 1
     while read -r label; do
         [[ -n "$label" ]] || continue
-        sync_pin_host "$domain" "$(ep_version_get "$domain" "$label" REPO_URL)"
-        sync_install_version "$domain" "$label"
+        sync_setup_version "$domain" "$label" || return 1
+        sync_pin_host "$domain" "$(ep_version_get "$domain" "$label" REPO_URL)" || return 1
+        sync_install_version "$domain" "$label" || return 1
     done < <(ep_versions "$domain")
 }
 
@@ -201,7 +202,7 @@ type_static_deploy_interactive() {
     label="${label// /}"
     [[ -n "$label" ]] || label="$GB_ROOT_LABEL"
     gb_valid_endpoint_label "$label" || { ui_msg "Invalid" "Version labels look like v1, v2, v3; leave the field empty for the domain root."; return 1; }
-    repo="$(ui_input "Repository" "Git repository holding the files, as an SSH URL for private repositories: git@github.com:owner/repo.git. The user before @ is the host's SSH user (always git on GitHub, GitLab and Gitea), not your account; this server's deploy key is the identity. Self-hosted with another user or port: ssh://user@host:port/path/repo.git. Public repositories may use https://." "git@github.com:getbible/")" || return 1
+    repo="$(ui_input "Repository" "Git repository holding the files, as an SSH URL for private repositories: git@github.com:owner/repo.git. The user before @ is the host's SSH user (always git on GitHub, GitLab and Gitea), not your account; this endpoint's deploy key is the identity. Self-hosted with another user or port: ssh://user@host:port/path/repo.git. Public repositories may use https://." "git@github.com:getbible/")" || return 1
     gb_valid_repo_url "$repo" || { ui_msg "Invalid" "That does not look like a git URL."; return 1; }
     ref="$(ui_input "Branch or tag" "Git branch or tag to publish" "master")" || return 1
     subpath="$(ui_input "Source path" "Folder inside the repository that holds this version (. for the repository root)" ".")" || return 1
@@ -256,7 +257,7 @@ type_static_deploy_finish() {
     conflicts="$(nginx_conflicts "$domain")"
     if [[ -n "$conflicts" ]]; then
         gb_warn "$domain is already declared in: $conflicts"
-        if ! ui_yesno "Conflict" "Another nginx file already declares $domain:\n$conflicts\n\nContinue anyway? (Use the migration action to retire the old configuration.)" no; then
+        if ! ui_yesno "Conflict" "Another nginx file already declares $domain:\n$conflicts\n\nContinue anyway? (Resolve the conflicting configuration before applying this domain.)" no; then
             ep_remove_config "$domain"
             return 1
         fi
@@ -271,21 +272,33 @@ type_static_deploy_finish() {
         tg_notify ok "Domain staged: $domain" "Static domain with endpoint $(pages_label_text "$label"), prepared on $(hostname -f 2>/dev/null || hostname). Not live: no certificate or DNS change until 'Go live'."
         ui_msg "Staged" "$domain is staged on this server: synchronisation, nginx, its pages and a placeholder certificate are in place, but no certificate was requested and DNS was not changed.\n\nSync its data, verify it, and choose 'Go live' from the main menu or the domain menu when it should take over."
     fi
-    type_static_show_key "$domain"
+    type_static_show_key "$domain" "$label"
     if ui_yesno "First sync" "Has the deploy key been added to the repository? Run the first sync now?" no; then
         sync_run_now "$domain" "$label"
     fi
 }
 
 type_static_show_key() {
-    local domain="$1" text
-    text="Add this public key to the repository as a read-only deploy key (GitHub: Settings > Deploy keys; Gitea: Settings > Deploy Keys), then run 'Sync now'. The key is the whole identity: no account name or password is used, and the SSH user in the repository URL stays the host's (git).
+    local domain="$1" label="$2" text
+    sync_setup_domain "$domain" || return 1
+    sync_setup_version "$domain" "$label" || return 1
+    text="Endpoint: $domain $(pages_label_text "$label")
+Repository: $(ep_version_get "$domain" "$label" REPO_URL)
 
-$(sync_public_key "$domain")
+Add this endpoint's public key to this repository as a read-only deploy key (GitHub: Settings > Deploy keys; Gitea: Settings > Deploy Keys). Every endpoint has its own key; never register another endpoint's key here. The SSH hostname and user in the repository URL stay unchanged (git@github.com on GitHub).
 
-Sync user: $(sync_user "$domain")
-Key file : $(sync_home "$domain")/.ssh/id_ed25519.pub"
-    ui_msg "Deploy key for $domain" "$text"
+$(sync_public_key "$domain" "$label")
+
+Key file: $(sync_endpoint_key "$domain" "$label").pub
+
+After registration, test access and run 'Sync now' for this endpoint."
+    if [[ "${GB_UI_CAPTURED:-false}" == true ]]; then
+        # Add/change actions run inside ui_run. Include the key in its result
+        # textbox rather than opening a dialog while output is redirected.
+        printf '\n== Deploy key: %s %s ==\n%s\n\n' "$domain" "$label" "$text"
+    else
+        ui_msg "Deploy key: $domain $label" "$text"
+    fi
 }
 
 # --- versions ----------------------------------------------------------------
@@ -296,14 +309,16 @@ type_static_add_version() {
     ep_version_create "$domain" "$label" "$repo" "$ref" "$subpath"
     endpoint_apply "$domain" || return 1
     tg_notify ok "Endpoint added: $domain $label" "Repository $repo ($ref). The timer will publish it on the next check; use 'Sync now' to publish immediately."
+    type_static_show_key "$domain" "$label"
 }
 
 # type_static_change_version DOMAIN LABEL REPO REF SUBPATH: point an existing
 # version at another repository, branch or folder without losing its
 # releases. Empty values keep the current ones; the next sync applies it.
 type_static_change_version() {
-    local domain="$1" label="$2" repo="$3" ref="$4" subpath="$5"
+    local domain="$1" label="$2" repo="$3" ref="$4" subpath="$5" old_repo
     ep_version_exists "$domain" "$label" || gb_die "No version $label on $domain"
+    old_repo="$(ep_version_get "$domain" "$label" REPO_URL)"
     repo="${repo:-$(ep_version_get "$domain" "$label" REPO_URL)}"
     ref="${ref:-$(ep_version_get "$domain" "$label" REPO_REF)}"
     subpath="${subpath:-$(ep_version_get "$domain" "$label" SOURCE_PATH)}"
@@ -315,6 +330,7 @@ type_static_change_version() {
     ep_version_set "$domain" "$label" SOURCE_PATH "$subpath"
     endpoint_apply "$domain" || return 1
     tg_notify info "Endpoint source changed: $domain $label" "Repository $repo ($ref), folder $subpath. The next sync publishes from there; use 'Sync now' to do it at once."
+    if [[ "$repo" != "$old_repo" ]]; then type_static_show_key "$domain" "$label"; fi
 }
 
 type_static_remove_version() {
@@ -333,7 +349,7 @@ type_static_menu_items() {
     printf '%s\n' \
         sync "Sync now (check the repositories and publish updates)" \
         force "Force a full resync of a version" \
-        key "Show the deploy key" \
+        key "Deployment keys: choose an endpoint" \
         versions "Endpoints: add, change or remove version folders" \
         filetypes "File types served (json, sha, txt, html)" \
         repoaccess "Test repository access (deploy key and branch)"
@@ -363,7 +379,10 @@ type_static_menu_action() {
             label="$(type_static_pick_version "$domain")" || return 0
             ui_run "Resync $domain $label" sync_force_now "$domain" "$label"
             ;;
-        key) type_static_show_key "$domain" ;;
+        key)
+            label="$(type_static_pick_version "$domain")" || return 0
+            type_static_key_menu "$domain" "$label"
+            ;;
         versions) type_static_versions_menu "$domain" ;;
         filetypes)
             local selection extensions current
@@ -381,9 +400,29 @@ type_static_menu_action() {
             ;;
         repoaccess)
             label="$(type_static_pick_version "$domain")" || return 0
-            ui_run "Repository access" sync_test_access "$domain" "$(ep_version_get "$domain" "$label" REPO_URL)" "$(ep_version_get "$domain" "$label" REPO_REF)" || true
+            ui_run "Repository access: $domain $label" sync_test_access "$domain" "$label" || true
             ;;
     esac
+}
+
+# Endpoint-specific key actions; choose the endpoint before showing any key
+# or checking access. The menu always names the repository being authorised.
+type_static_key_menu() {
+    local domain="$1" label="$2" choice
+    while true; do
+        choice="$(ui_menu "Deployment key: $domain $label" \
+            "Repository: $(ep_version_get "$domain" "$label" REPO_URL)" \
+            show "Show this endpoint's public key" \
+            test "Test repository access with the active key" \
+            sync "Sync this endpoint now" \
+            back "Back")" || return 0
+        case "$choice" in
+            show) type_static_show_key "$domain" "$label" || true ;;
+            test) ui_run "Repository access: $domain $label" sync_test_access "$domain" "$label" || true ;;
+            sync) ui_run "Sync $domain $label" sync_run_now "$domain" "$label" || true ;;
+            back) return 0 ;;
+        esac
+    done
 }
 
 type_static_pick_version() {
@@ -402,6 +441,7 @@ type_static_versions_menu() {
             change "Change an endpoint's repository, branch or folder (keeps its releases)" \
             remove "Remove an endpoint" \
             status "Show an endpoint's sync status" \
+            key "Manage an endpoint's deployment key and repository access" \
             back "Back")" || return 0
         case "$choice" in
             add)
@@ -412,7 +452,7 @@ type_static_versions_menu() {
                 label="$(ui_input "Version folder" "New version folder (v1, v2, ...), served under https://$domain/<version>/" "")" || continue
                 gb_valid_version "$label" || { ui_msg "Invalid" "Version labels look like v1, v2, v3."; continue; }
                 ep_version_exists "$domain" "$label" && { ui_msg "Exists" "$domain already has $label."; continue; }
-                repo="$(ui_input "Repository" "Git repository" "$(ep_version_get "$domain" "$(ep_versions "$domain" | head -1)" REPO_URL)")" || continue
+                repo="$(ui_input "Repository" "Git repository for this endpoint. It gets its own deploy key, even when other endpoints use the same host." "git@github.com:getbible/")" || continue
                 ref="$(ui_input "Branch or tag" "Git branch or tag" "master")" || continue
                 subpath="$(ui_input "Source path" "Folder inside the repository (. for the root)" ".")" || continue
                 ui_run "Add endpoint" type_static_add_version "$domain" "$label" "$repo" "$ref" "$subpath" || true
@@ -437,6 +477,10 @@ type_static_versions_menu() {
                 label="$(type_static_pick_version "$domain")" || continue
                 sync_status_text "$domain" "$label" > "$(gb_tmpdir)/vstatus"
                 ui_textbox "$domain $label" "$(gb_tmpdir)/vstatus"
+                ;;
+            key)
+                label="$(type_static_pick_version "$domain")" || continue
+                type_static_key_menu "$domain" "$label"
                 ;;
             back) return 0 ;;
         esac

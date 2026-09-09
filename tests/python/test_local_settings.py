@@ -25,18 +25,15 @@ class LocalRepositoryTests(unittest.TestCase):
                                  max_references=10, max_total_verses=100)
                 client.assert_not_called()
 
-    def test_legacy_checksum_requirement_is_disabled(self):
+    def test_local_client_does_not_require_checksum_files(self):
         with tempfile.TemporaryDirectory() as repository:
             Path(repository, "v2").mkdir()
             with patch.dict(os.environ, {
                 "GETBIBLE_REPOSITORY": repository,
                 "GETBIBLE_VERSION": "v2",
-                "GETBIBLE_REQUIRE_CHECKSUMS": "true",
             }, clear=True):
                 settings = LibrarianSettings.from_environment(repository + "/cache")
             self.assertTrue(settings.is_local)
-            self.assertFalse(settings.require_checksums)
-            self.assertFalse(LibrarianSettings(repository=repository, require_checksums=True).require_checksums)
             with patch("getbible_api_common.bible.GetBible") as client:
                 query_client(settings, reference_cache_limit=16, chapter_cache_limit=16,
                              max_references=10, max_total_verses=100)

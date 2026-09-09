@@ -6,8 +6,9 @@ vhost and one certificate; its **endpoints** are its version folders
 (`/v2/`, `/v3/`), or the domain root itself when it has none.
 
 - **Static domains**: each endpoint a tree of JSON, checksum and text files
-  copied faithfully from its trusted git repository by an isolated user with its own
-  deploy key, published as atomic hard-linked releases and served by nginx
+  copied faithfully from its own trusted git repository with its own deploy
+  key. Endpoints share their domain's isolated sync user and nginx vhost;
+  each tree is published as atomic hard-linked releases and served by nginx
   with open CORS, locked security headers, problem-document errors and
   compression.
 - **Runtime domains**: the `query` (references to verses) and `search`
@@ -31,17 +32,20 @@ vhost and one certificate; its **endpoints** are its version folders
 - **Operations**: JSON logs of everything, size-based rotation with
   retention, analytics with total calls and unique callers, Telegram
   notifications for every change, Cloudflare integration, manager updates
-  from the menu or one command, and a guided migration from a legacy setup.
+  from the menu or one command, application updates and generation rollback.
 - **Staged deployments**: a domain can be installed and verified on a
   server its DNS does not point to yet, with a placeholder certificate and
   no automatic public change; **Go live** later takes it over one domain at
-  a time (certificate, Cloudflare DNS, HTTPS), and **Stage again** hands the
-  name back for a rollback. Certificates come from Let's Encrypt over
+  a time (certificate, Cloudflare DNS, HTTPS). **Stage again** suspends
+  automatic public DNS changes while keeping the deployment available.
+  Certificates come from Let's Encrypt over
   HTTP-01 or, with the stored Cloudflare token, DNS-01 before any DNS
-  change. This is how a replacement server is built without downtime.
+  change. New domains can be checked before public launch.
 
-Install as root over SSH with a read-only deploy key, so the same key
-serves every later update (the key and SSH configuration are set up once, see
+Install as root over SSH with a read-only deploy key for **this manager
+repository**, so that key serves every later manager update. Static endpoints
+get separate keys for their data repositories (root's key and SSH
+configuration are set up once, see
 [Installing on a server](docs/INSTALL.md#1-clone)):
 
 ```sh
@@ -58,7 +62,7 @@ choose **Update manager script** in the menu:
 sudo ./getbible.sh self-update
 ```
 
-This fetches the clone's upstream with the same key and fast-forwards the
+This fetches the clone's upstream with root's manager key and fast-forwards the
 checkout; the next invocation runs the updated code. Hosted domains change
 only when you separately apply the checkout, for example with
 `sudo ./getbible.sh update [DOMAIN]`. See
@@ -94,7 +98,7 @@ Documentation:
 | Document | Contents |
 | --- | --- |
 | [docs/INSTALL.md](docs/INSTALL.md) | first setup, where things live |
-| [docs/NEW_SERVER.md](docs/NEW_SERVER.md) | rebuilding on a new server: staged domains, go-live per domain |
+| [docs/NEW_SERVER.md](docs/NEW_SERVER.md) | fresh server setup: endpoint keys, staged domains, go-live and maintenance |
 | [docs/STATIC_ENDPOINTS.md](docs/STATIC_ENDPOINTS.md) | static domains: endpoints, synchronisation, serving |
 | [docs/RUNTIME_ENDPOINTS.md](docs/RUNTIME_ENDPOINTS.md) | runtime domains: the query and search services, one service per version |
 | [docs/PAGES.md](docs/PAGES.md) | documentation pages, OpenAPI documents, icons (favicon, logo), versions.json |
@@ -108,6 +112,6 @@ Documentation:
 
 Every menu action has a command line form: `./getbible.sh --help`. Tests:
 `tests/run.sh` (lint, unit, command line) and `tests/run.sh --all` (plus
-real nginx and gunicorn; needs nginx and root).
+real nginx, gunicorn and SSH authentication; needs nginx, openssh-server and root).
 
 License: Apache 2.0.

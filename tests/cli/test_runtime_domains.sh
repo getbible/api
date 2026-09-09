@@ -2,8 +2,7 @@
 # A runtime domain's endpoints are recorded, rendered and documented without
 # any service being built: version folders with their own services, a second
 # version from its own implementation directory, the default endpoint, a
-# domain serving one version at its root, and the migration of a domain
-# recorded before endpoints had records. Real nginx validates the result.
+# domain serving one version at its root. Real nginx validates the result.
 # shellcheck disable=SC2016 # nginx directives quoted literally
 set -Eeuo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
@@ -101,8 +100,7 @@ ep_remove_config "$STATIC"
 echo "-- a domain with version folders --"
 type_runtime_create "$Q" query v2 "$REPO" metered ''
 mkdir -p "$SB/etc/letsencrypt/live/$Q" && touch "$SB/etc/letsencrypt/live/$Q/fullchain.pem" "$SB/etc/letsencrypt/live/$Q/privkey.pem"
-check "endpoint recorded"            "LAYOUT=versioned"        "$(cat "$SB/etc/getbible/endpoints/$Q/versions/v2.conf")"
-check "trusted data skips checksums"  "REQUIRE_CHECKSUMS=false" "$(cat "$SB/etc/getbible/endpoints/$Q/versions/v2.conf")"
+check "endpoint recorded"            "LABEL=v2"                "$(cat "$SB/etc/getbible/endpoints/$Q/versions/v2.conf")"
 check "app version recorded"         "APP_VERSION=v2"          "$(cat "$SB/etc/getbible/endpoints/$Q/versions/v2.conf")"
 check "settings live with endpoint"  "WORKERS=4"               "$(cat "$SB/etc/getbible/endpoints/$Q/versions/v2.conf")"
 check "default endpoint"             "DEFAULT_ENDPOINT=v2"     "$(cat "$SB/etc/getbible/endpoints/$Q/endpoint.conf")"
@@ -135,7 +133,7 @@ check "v3 accepted"                  ""                        "$(rt_check_new_e
 rt_record_endpoint "$Q" v3 v3 "$REPO" ""
 check "v3 recorded"                  "APP_VERSION=v3"          "$(cat "$SB/etc/getbible/endpoints/$Q/versions/v3.conf")"
 check "endpoints listed"             "v2 v3"                   "$(type_runtime_endpoints "$Q" | tr '\n' ' ' | sed 's/ $//')"
-check "status lists both"            "Endpoint v3 of $Q (v3, versioned layout)" "$(gb status "$Q" 2>/dev/null)"
+check "status lists both"            "Endpoint v3 of $Q (v3)" "$(gb status "$Q" 2>/dev/null)"
 gb pages "$Q" publish >/dev/null 2>&1
 check "v3 page"                      "<code>/v3/</code>"       "$(cat "$SB/var/www/getbible/$Q/v3/index.html")"
 check "v3 openapi paths"             '"/v3/{translation}/{reference}"' "$(cat "$SB/var/www/getbible/$Q/v3/openapi.json")"
@@ -180,45 +178,19 @@ check "root openapi at /"            "location = /openapi.json {" "$SITE"
 check "no version folder location"   ""                        "$(grep -c 'location ^~ /v2/' <<< "$SITE" | sed 's/^0$//')"
 check "no domain-level page block"   ""                        "$(grep -c "The domain page, or the root endpoint's page" <<< "$SITE" | sed 's/^0$//')"
 
-echo "-- a domain recorded before endpoints had records --"
-L=legacy.example.test
-gb remove "$Q" --purge >/dev/null 2>&1
-ep_create "$L" runtime query
-ep_set "$L" ACCESS_MODE open
-ep_set "$L" VERSION v2
-ep_set "$L" REPOSITORY "$REPO"
-ep_set "$L" WORKERS 3
-ep_set "$L" THREADS 2
-ep_set "$L" DEFAULT_TRANSLATION test
-ep_set "$L" DEFAULT_REFERENCE Ge1:1
-ep_set "$L" PYTHON_VERSION 3.12.14
-ep_set "$L" CACHE_TTL 120
-check "endpoint derived from VERSION" "v2"                     "$(type_runtime_endpoints "$L")"
-check "legacy layout"                "LAYOUT=legacy"           "$(cat "$SB/etc/getbible/endpoints/$L/versions/v2.conf")"
-check "settings migrated"            "WORKERS=3"               "$(cat "$SB/etc/getbible/endpoints/$L/versions/v2.conf")"
-check "default recorded"             "DEFAULT_ENDPOINT=v2"     "$(cat "$SB/etc/getbible/endpoints/$L/endpoint.conf")"
-check "legacy root kept"             "$SB/opt/getbible/query"  "$(rt_root "$L" v2)"
-check "legacy units kept"            "getbible-query"          "$(rt_unit_prefix "$L" v2)"
-check "legacy env file kept"         "$SB/etc/getbible/endpoints/$L/runtime.env" "$(rt_env_file "$L" v2)"
-check "legacy app log kept"          "app/app.log"             "$(rt_app_log "$L" v2)"
-check "legacy socket dir kept"       "$SB/run/getbible/query"  "$(rt_socket_dir "$L" v2)"
-check "migration is idempotent"      "1"                       "$(type_runtime_endpoints "$L" >/dev/null; grep -c '^LAYOUT=' "$SB/etc/getbible/endpoints/$L/versions/v2.conf")"
-check "VERSION left endpoint.conf"   ""                        "$(grep -c '^VERSION=\|^WORKERS=\|^REPOSITORY=' "$SB/etc/getbible/endpoints/$L/endpoint.conf" | sed 's/^0$//')"
-check "settings kept in the record"  "REPOSITORY=$REPO"        "$(cat "$SB/etc/getbible/endpoints/$L/versions/v2.conf")"
-
 echo "-- nginx -t on the rendered configuration --"
 if command -v nginx >/dev/null; then
-    mkdir -p "$SB/etc/letsencrypt/live/$L"
-    for domain in "$L" "$S"; do
+    mkdir -p "$SB/etc/letsencrypt/live/$Q"
+    for domain in "$Q" "$S"; do
         openssl req -x509 -newkey rsa:2048 -nodes -days 1 -keyout "$SB/etc/letsencrypt/live/$domain/privkey.pem" -out "$SB/etc/letsencrypt/live/$domain/fullchain.pem" -subj "/CN=$domain" 2>/dev/null
         gb pages "$domain" publish >/dev/null 2>&1
         render "$domain" >/dev/null
         mkdir -p "$SB/etc/nginx" && cp -a "$SB/render-$domain/." "$SB/etc/nginx/"
     done
-    mkdir -p "$SB/etc/nginx/logs" "$SB/etc/nginx/sites-enabled" "$SB/var/cache/nginx/getbible" "$SB/var/log/getbible/$L" "$SB/var/log/getbible/$S"
-    ln -sfn "../sites-available/$L.conf" "$SB/etc/nginx/sites-enabled/$L.conf"
+    mkdir -p "$SB/etc/nginx/logs" "$SB/etc/nginx/sites-enabled" "$SB/var/cache/nginx/getbible" "$SB/var/log/getbible/$Q" "$SB/var/log/getbible/$S"
+    ln -sfn "../sites-available/$Q.conf" "$SB/etc/nginx/sites-enabled/$Q.conf"
     ln -sfn "../sites-available/$S.conf" "$SB/etc/nginx/sites-enabled/$S.conf"
-    sed -i -e 's/listen 80;/listen 127.0.0.1:18182;/' -e 's/listen 443 ssl\(.*\);/listen 127.0.0.1:18545 ssl\1;/' "$SB/etc/nginx/sites-available/$L.conf"
+    sed -i -e 's/listen 80;/listen 127.0.0.1:18182;/' -e 's/listen 443 ssl\(.*\);/listen 127.0.0.1:18545 ssl\1;/' "$SB/etc/nginx/sites-available/$Q.conf"
     sed -i -e 's/listen 80;/listen 127.0.0.1:18183;/' -e 's/listen 443 ssl\(.*\);/listen 127.0.0.1:18546 ssl\1;/' "$SB/etc/nginx/sites-available/$S.conf"
     cat > "$SB/etc/nginx/nginx-test.conf" <<EOF
 pid $SB/nginx.pid;
@@ -232,8 +204,8 @@ else
 fi
 
 echo "-- a removed endpoint stays removed --"
-ep_version_remove_config "$L" v2
-check "no resurrection from VERSION" ""                        "$(type_runtime_endpoints "$L")"
+ep_version_remove_config "$Q" v2
+check "other endpoint retained"      "v3"                      "$(type_runtime_endpoints "$Q")"
 
 printf '\n== %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

@@ -18,7 +18,7 @@ for lib in core platform ui config registry users telegram nginx certs systemd l
     # shellcheck source=/dev/null
     source "$GB_REPO_DIR/src/lib/$lib.sh"
 done
-for extra in analytics cloudflare update migrate doctor golive menu; do
+for extra in analytics cloudflare update doctor golive menu; do
     # shellcheck source=/dev/null
     [[ -f "$GB_REPO_DIR/src/lib/$extra.sh" ]] && source "$GB_REPO_DIR/src/lib/$extra.sh"
 done
@@ -73,6 +73,8 @@ Domains
   version default DOMAIN vN              the runtime endpoint that answers / and the short forms
   version remove DOMAIN vN|root
   sync DOMAIN [vN|root] [--force]        publish the trusted repository's current files
+  deploy-key DOMAIN vN|root             show this endpoint's repository deploy key
+  repo-access DOMAIN vN|root            test this endpoint's active key and repository reference
   access DOMAIN open|metered|token       change the access mode
   limits DOMAIN [--rate N] [--burst N] [--hour N] [--day N] [--conn N]
   token DOMAIN add LABEL [--expires YYYY-MM-DD] | list | revoke ID
@@ -111,7 +113,6 @@ Platform
                                          show or change the defaults used by deploy and go-live
   telegram enable|disable|test
   cloudflare ...                         see: getbible.sh cloudflare help
-  migrate                                retire the legacy nginx/systemd setup
   doctor                                 check this host
   install-deps                           install nginx, certbot, python and tools
   selftest                               run the repository test suite
@@ -199,7 +200,7 @@ cmd_version() {
 
 # The endpoints of a runtime domain: one service per version.
 cmd_runtime_version() {
-    local action="$1" domain="$2" label="$3" repository="" warm="" python="" translation="" reference="" checksums=""
+    local action="$1" domain="$2" label="$3" repository="" warm="" python="" translation="" reference=""
     shift 3
     endpoint_source_type runtime
     case "$action" in
@@ -211,15 +212,40 @@ cmd_runtime_version() {
                     --python) python="${2:?version}"; shift 2 ;;
                     --default-translation) translation="${2:?translation}"; shift 2 ;;
                     --default-reference) reference="${2:?reference}"; shift 2 ;;
-                    --require-checksums) checksums="${2:?true or false}"; shift 2 ;;
                     *) gb_die "Unknown option: $1" ;;
                 esac
             done
-            rt_add_endpoint "$domain" "$label" "$repository" "$warm" "$python" "$translation" "$reference" "$checksums" ;;
+            rt_add_endpoint "$domain" "$label" "$repository" "$warm" "$python" "$translation" "$reference" ;;
         remove) rt_remove_endpoint "$domain" "$label" ;;
         default) rt_set_default "$domain" "$label" ;;
         *) gb_die "version add DOMAIN vN [--repository PATH] [--warm LIST] [--python V] | remove DOMAIN vN | default DOMAIN vN (runtime domains)" ;;
     esac
+}
+
+# Key actions always require an endpoint label; a domain is only a hostname.
+cmd_deploy_key() {
+    local domain label
+    [[ $# == 2 ]] || gb_die "deploy-key DOMAIN vN|root"
+    domain="$1"; label="$2"
+    gb_system_init
+    sync_require_endpoint "$domain" "$label"
+    endpoint_source_type static
+    type_static_show_key "$domain" "$label"
+}
+
+sync_require_endpoint() {
+    gb_valid_domain "$1" || gb_die "Invalid domain: $1"
+    gb_valid_endpoint_label "$2" || gb_die "Invalid endpoint label: $2"
+    ep_exists "$1" || gb_die "Unknown domain: $1"
+    [[ "$(ep_get "$1" TYPE)" == static ]] || gb_die "$1 is not a static domain"
+    ep_version_exists "$1" "$2" || gb_die "Unknown endpoint $2 for $1"
+}
+
+cmd_repo_access() {
+    [[ $# == 2 ]] || gb_die "repo-access DOMAIN vN|root"
+    gb_system_init
+    sync_require_endpoint "$1" "$2"
+    sync_test_access "$1" "$2"
 }
 
 cmd_sync() {
@@ -453,6 +479,8 @@ main() {
             endpoint_source_type static
             type_static_set_extensions "$1" "${2:?file types}" ;;
         sync) cmd_sync "$@" ;;
+        deploy-key) cmd_deploy_key "$@" ;;
+        repo-access) cmd_repo_access "$@" ;;
         access) gb_system_init; endpoint_set_access "${1:?domain}" "${2:?mode}" ;;
         limits) cmd_limits "$@" ;;
         token) cmd_token "$@" ;;
@@ -480,7 +508,6 @@ main() {
                 *) gb_die "telegram enable|disable|test" ;;
             esac ;;
         cloudflare) gb_system_init; cloudflare_cli "$@" ;;
-        migrate) gb_system_init; migrate_legacy ;;
         doctor) doctor_run ;;
         install-deps) gb_require_root; doctor_install_deps ;;
         selftest) "$GB_REPO_DIR/tests/run.sh" ;;

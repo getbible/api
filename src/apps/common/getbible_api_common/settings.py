@@ -73,8 +73,6 @@ class LibrarianSettings:
     cache_ttl_seconds: int = 900
     cache_ttl_jitter: float = 0.1
     strict_freshness: bool = False
-    # Kept as a compatibility input; local mirrors do not require .sha files.
-    require_checksums: bool = False
     request_connect_timeout: int = 3
     request_read_timeout: int = 30
     request_retries: int = 3
@@ -83,7 +81,6 @@ class LibrarianSettings:
     def __post_init__(self) -> None:
         if not isinstance(self.repository, str) or not self.repository.startswith("/"):
             raise ValueError("GETBIBLE_REPOSITORY must be an absolute local path; remote API URLs are not supported.")
-        object.__setattr__(self, "require_checksums", False)
         if not valid_version(self.version):
             raise ValueError("GETBIBLE_VERSION must look like 'v2'.")
         bounds = (
@@ -113,9 +110,6 @@ class LibrarianSettings:
             cache_ttl_seconds=env_int("GETBIBLE_CACHE_TTL_SECONDS", defaults.cache_ttl_seconds, 0, 2_592_000),
             cache_ttl_jitter=env_ratio("GETBIBLE_CACHE_TTL_JITTER", defaults.cache_ttl_jitter),
             strict_freshness=env_bool("GETBIBLE_STRICT_FRESHNESS", defaults.strict_freshness),
-            # Older installations wrote true automatically. Ignore that flag
-            # so an ordinary update no longer requires local checksum files.
-            require_checksums=False,
             request_connect_timeout=env_int("GETBIBLE_CONNECT_TIMEOUT", defaults.request_connect_timeout, 1, 60),
             request_read_timeout=env_int("GETBIBLE_READ_TIMEOUT", defaults.request_read_timeout, 1, 300),
             request_retries=env_int("GETBIBLE_REQUEST_RETRIES", defaults.request_retries, 0, 10),

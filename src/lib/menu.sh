@@ -18,7 +18,7 @@ menu_main() {
             analytics "Traffic analytics: calls and unique callers" \
             logs "Logs: view, archives, rotate" \
             settings "Settings: Telegram, Cloudflare, icons, defaults, retention" \
-            system "System: host check, dependencies, migration, self-test" \
+            system "System: host check, dependencies, self-test" \
             exit "Exit")" || return 0
         case "$choice" in
             domains) menu_endpoints ;;
@@ -412,7 +412,6 @@ menu_system() {
         choice="$(ui_menu "System" "$(hostname -f 2>/dev/null || hostname)" \
             doctor "Check this host" \
             deps "Install dependencies (apt)" \
-            migrate "Retire the legacy nginx/systemd setup" \
             cloudflare "Cloudflare origin tools (IP ranges, origin pulls)" \
             selftest "Run the test suite" \
             back "Back")" || return 0
@@ -420,7 +419,6 @@ menu_system() {
         case "$choice" in
             doctor) doctor_run > "$out" 2>&1 || true; ui_textbox "Host check" "$out" ;;
             deps) ui_run "Install dependencies" doctor_install_deps ;;
-            migrate) migrate_interactive ;;
             cloudflare) cloudflare_system_menu ;;
             selftest) ui_run "Self-test" "$GB_REPO_DIR/tests/run.sh" ;;
             back) return 0 ;;

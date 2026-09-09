@@ -13,6 +13,9 @@ each per server:
 Both read the Bible files from an existing local folder, normally the data
 root of the static domain that serves `api.getbible.net`. Remote repository
 URLs are refused; no runtime scripture request calls the public API.
+The static endpoint that publishes each version uses its own repository and
+deploy key. Runtime services read the resulting local files and do not use
+those SSH credentials; see [STATIC_ENDPOINTS.md](STATIC_ENDPOINTS.md).
 
 Sync the matching static endpoint before creating a runtime endpoint. For
 v2, choose `/srv/getbible/api.getbible.net` when its scripture is published
@@ -27,10 +30,7 @@ syncs remain visible; it never pins the runtime to one retained release.
 
 The upstream repositories are trusted. Setup checks only that the selected
 version directory is available. It does not scan scripture content or
-revalidate checksums. Runtime checksum files are no longer required,
-including when an older installation recorded `REQUIRE_CHECKSUMS=true`.
-The legacy CLI flag and setting are accepted for compatibility and stay
-false; the setting is no longer offered in the menu. The pinned librarian
+revalidate checksums. Runtime checksum files are optional. The pinned librarian
 still checks any published checksums it encounters while loading data and
 uses content hashes for its cache; removing that library behavior requires
 a public librarian option.
@@ -69,14 +69,6 @@ and nginx prepends the version the service speaks to every request on its
 way to the service and strips it from the service's redirects again; the
 access rules apply as on any other domain. Such a domain cannot add other
 versions later; a domain with version folders can.
-
-Installations from before endpoints had their own records (a `VERSION` key
-and the settings in `endpoint.conf`, one service under
-`/opt/getbible/<kind>` with units `getbible-<kind>-<generation>`) are
-migrated on first use: the tool records the endpoint with `LAYOUT=legacy`,
-copies the settings into its record and keeps every path, unit and socket
-where it is. Nothing running is moved or restarted by the migration. New
-endpoints added to such a domain use the versioned layout.
 
 ## The query endpoint
 
@@ -194,11 +186,11 @@ endpoint when there is more than one, and has an Endpoints screen to add or
 remove a version and choose the default. Supported `set` keys: `WORKERS`,
 `THREADS`, `WARM_TRANSLATIONS`, `DEFAULT_TRANSLATION`, `DEFAULT_REFERENCE`,
 `ALLOWED_TRANSLATIONS`, `REPOSITORY`, `CACHE_TTL`. Values are checked before
-activation. `REQUIRE_CHECKSUMS` is a compatibility setting fixed to `false`.
+activation.
 
 `update DOMAIN` preserves each endpoint's selected exact Python patch while
 applying checked-out code and dependency changes. Explicit `runtime DOMAIN
 update` adopts the reviewed latest patch in each endpoint's current family;
 `--python` selects a family or exact catalog patch. See
-[UPDATING.md](UPDATING.md) for migration, failure recovery and operational
+[UPDATING.md](UPDATING.md) for updates, failure recovery and operational
 validation.

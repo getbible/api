@@ -180,8 +180,10 @@ check "doctor accepts renewals"   ""                            "$("$GB" doctor 
 mv "$SB/etc/getbible/certbot-cloudflare.ini" "$SB/certbot-cloudflare.ini.away"
 check "doctor warns missing ini"  "WARN   missing credentials file or plugin for: $D" "$("$GB" doctor 2>/dev/null)"
 mv "$SB/certbot-cloudflare.ini.away" "$SB/etc/getbible/certbot-cloudflare.ini"
-printf '[renewalparams]\nauthenticator = nginx\n' > "$SB/etc/letsencrypt/renewal/$D.conf"
-check "doctor warns foreign lineage" "WARN   not issued by this tool: $D" "$("$GB" doctor 2>/dev/null)"
+printf '[renewalparams]\nauthenticator = unsupported\n' > "$SB/etc/letsencrypt/renewal/$D.conf"
+check "doctor warns authenticator drift" "WARN   unexpected or missing authenticator for: $D" "$("$GB" doctor 2>/dev/null)"
+printf '[renewalparams]\nauthenticator = webroot\nwebroot_path = %s-unserved,\n' "$CERTBOT_WEBROOT" > "$SB/etc/letsencrypt/renewal/$D.conf"
+check "doctor warns changed challenge root" "is missing or changed for: $D" "$("$GB" doctor 2>/dev/null)"
 printf '[renewalparams]\nauthenticator = dns-cloudflare\ndns_cloudflare_credentials = %s\n' "$CERTBOT_INI" > "$SB/etc/letsencrypt/renewal/$D.conf"
 
 echo "-- stage again, for rolling back --"
@@ -208,13 +210,6 @@ check "live deploy no placeholder" ""                           "$(placeholder "
 check "invalid deploy mode"       "live or staged"              "$("$GB" settings deploy-mode maybe 2>&1 || true)"
 check "invalid cert method"       "auto, http or dns-cloudflare" "$("$GB" settings cert-method carrier-pigeon 2>&1 || true)"
 
-echo "-- endpoints without a LIVE key are live --"
-sed -i '/^LIVE=/d' "$SB/etc/getbible/endpoints/$D2/endpoint.conf"
-check "missing key means live"    "Publication : live"          "$("$GB" status "$D2" 2>/dev/null)"
-"$GB" apply "$D2" >/dev/null 2>&1 || true
-check "live apply drops placeholder" ""                         "$(placeholder "$D2")"
-check "live apply used certbot"   "-d $D2"                      "$(cat "$CERTBOT_LOG")"
-
 echo "-- certificate issued while staged --"
 D4=fourth.example.test
 "$GB" deploy static --domain "$D4" --version v1 --repo git@github.com:getbible/v1_scripture.git --staged >/dev/null 2>&1
@@ -232,6 +227,41 @@ check "go-live keeps certificate" "Keep the existing Let's Encrypt certificate" 
 check "no new certbot run"        "0"                           "$(certonly_runs)"
 check "fourth is live"            "LIVE=true"                   "$(conf "$D4")"
 check "placeholder cleaned"       ""                            "$(placeholder "$D4")"
+
+echo "-- renewal hook failures block success and retry reuses the certificate --"
+DH=hook-failure.example.test
+"$GB" deploy static --domain "$DH" --version v1 --repo git@github.com:getbible/v1_scripture.git --staged >/dev/null 2>&1
+HOOK_DIR="$SB/etc/letsencrypt/renewal-hooks/deploy"
+HOOK="$HOOK_DIR/getbible-reload-nginx.sh"
+mv "$HOOK_DIR" "$SB/renewal-hooks.saved"
+printf 'blocked directory\n' > "$HOOK_DIR"
+: > "$CERTBOT_LOG"
+HOOK_STATUS=0
+"$GB" cert "$DH" issue --method http > "$SB/hook-failure.out" 2>&1 || HOOK_STATUS=$?
+check "new certificate requires renewal hook" "1" "$HOOK_STATUS"
+check "hook failure identifies renewal setup" "certificate renewal hook" "$(cat "$SB/hook-failure.out")"
+check "issued certificate retained after hook failure" "certificate" "$(cat "$CERTBOT_LIVE/$DH/fullchain.pem")"
+check "failed issuance keeps staged vhost" "placeholder-certs/$DH" "$(site "$DH")"
+HOOK_STATUS=0
+"$GB" cert "$DH" issue --method http > "$SB/hook-reuse-failure.out" 2>&1 || HOOK_STATUS=$?
+check "certificate reuse also requires renewal hook" "1" "$HOOK_STATUS"
+check "reuse failure does not request another certificate" "1" "$(certonly_runs)"
+HOOK_STATUS=0
+"$GB" cert "$DH" renew > "$SB/hook-renew-failure.out" 2>&1 || HOOK_STATUS=$?
+check "manual renewal requires its hook" "1" "$HOOK_STATUS"
+check "blocked hook prevents certbot renewal" "" "$(grep '^renew ' "$CERTBOT_LOG" || true)"
+HOOK_STATUS=0
+"$GB" apply "$DH" > "$SB/hook-apply-failure.out" 2>&1 || HOOK_STATUS=$?
+check "ordinary apply reports hook failure" "1" "$HOOK_STATUS"
+check "failed apply keeps staged vhost" "placeholder-certs/$DH" "$(site "$DH")"
+rm -f "$HOOK_DIR"
+mv "$SB/renewal-hooks.saved" "$HOOK_DIR"
+"$GB" cert "$DH" issue --method http >/dev/null 2>&1
+check "retry adopts the saved certificate" "letsencrypt/live/$DH" "$(site "$DH")"
+check "retry avoids duplicate issuance" "1" "$(certonly_runs)"
+rm -f "$HOOK"
+"$GB" apply "$DH" >/dev/null 2>&1
+check "ordinary apply repairs missing renewal hook" "755" "$(stat -c %a "$HOOK")"
 
 echo "-- activation failure after the certificate returns to staged --"
 D7=seventh.example.test
@@ -335,11 +365,50 @@ check "dns argv"                  "--dns-cloudflare-credentials $GB_CERTBOT_CLOU
 check "argv keeps email"          "--email a@b.c --keep-until-expiring" "$(certs_certbot_args a.example.test http a@b.c | tr '\n' ' ')"
 check "unknown method rejected"   ""                            "$(certs_certbot_args a.example.test carrier-pigeon a@b.c 2>/dev/null || true)"
 check "method validation"         "no"                          "$(certs_valid_method magic && echo yes || echo no)"
+
+echo "-- plugin detection consumes all output under pipefail --"
+(
+    # More than a pipe buffer makes early-reader exit deterministic.
+    certs_plugins() { printf '* dns-cloudflare\n%65536s\n' ""; }
+    status=0
+    certs_dns_cloudflare_installed || status=$?
+    printf 'available_exit=%s\n' "$status"
+    certs_plugins() { printf '* webroot\n'; }
+    status=0
+    certs_dns_cloudflare_installed || status=$?
+    printf 'absent_exit=%s\n' "$status"
+    certs_plugins() { printf '* dns-cloudflare\n'; return 1; }
+    status=0
+    certs_dns_cloudflare_installed || status=$?
+    printf 'failed_query_exit=%s\n' "$status"
+) > "$SB/plugin-detection.out" 2>&1
+check "large plugin list does not cause a false negative" "available_exit=0" "$(cat "$SB/plugin-detection.out")"
+check "missing DNS plugin remains unavailable" "absent_exit=1" "$(cat "$SB/plugin-detection.out")"
+check "failed plugin query remains unavailable" "failed_query_exit=1" "$(cat "$SB/plugin-detection.out")"
 # shellcheck source=../../src/lib/ui.sh
 source "$ROOT/src/lib/ui.sh"
 # shellcheck source=../../src/lib/nginx.sh
 source "$ROOT/src/lib/nginx.sh"
 check "captured: no overwrite dialog" "refusing to overwrite it without a dialog" "$(GB_YES=false GB_UI=whiptail GB_UI_CAPTURED=true nginx_confirm_overwrite /x/target /x/candidate 2>&1 || true)"
+
+echo "-- token rotation reports broken renewal credentials --"
+# shellcheck disable=SC2030
+(
+    # shellcheck source=../../src/lib/cloudflare.sh
+    source "$ROOT/src/lib/cloudflare.sh"
+    GB_CLOUDFLARE_CONF="$SB/token-rotation.conf"
+    ui_password() { printf 'rotated-fixture-token\n'; }
+    ui_msg() { printf '%s\n' "$2"; }
+    tg_notify() { :; }
+    certs_cloudflare_credentials_write() { return 1; }
+    cf_human() { printf 'verification reached\n' > "$SB/token-rotation-verified"; }
+    status=0
+    cloudflare_configure || status=$?
+    printf 'rotation_exit=%s\n' "$status"
+) > "$SB/token-rotation.out" 2>&1
+check "token rotation propagates renewal credential failure" "rotation_exit=1" "$(cat "$SB/token-rotation.out")"
+check "token rotation failure offers recovery" "save the token again before certificate renewal" "$(cat "$SB/token-rotation.out")"
+check "incomplete credentials never report verified" "" "$(cat "$SB/token-rotation-verified" 2>/dev/null || true)"
 check "captured: refuses"         "1"                           "$(GB_YES=false GB_UI=whiptail GB_UI_CAPTURED=true nginx_confirm_overwrite /x/target /x/candidate >/dev/null 2>&1; echo $?)"
 check "confirmed edits pass"      "0"                           "$(GB_OVERWRITE_HAND_EDITS=true nginx_confirm_overwrite /x/target /x/candidate >/dev/null 2>&1; echo $?)"
 check "captured: no email prompt" "No Let's Encrypt contact email is set" "$(GB_UI_CAPTURED=true GB_GLOBAL_CONF=/nonexistent certs_email 2>&1 || true)"
@@ -419,6 +488,60 @@ check "untrusted live certificate fails verification" "live_tls_exit=1" "$OUT"
 check "staged placeholder remains testable" "staged_tls_exit=0" "$OUT"
 check "live requests never retry insecurely" $'false\nfalse\ntrue\ntrue' "$(cat "$SB/probe-trust.log")"
 
+echo "-- local TLS waits for reloaded nginx within one deadline --"
+# Overrides are deliberately local to this isolated regression fixture.
+# shellcheck disable=SC2030
+(
+    # shellcheck source=../../src/lib/golive.sh
+    source "$ROOT/src/lib/golive.sh"
+    # The clock advances only between attempts: no network or real sleeps.
+    SECONDS=0
+    sleep() { SECONDS=$((SECONDS + $1)); }
+    : > "$SB/local-probe-attempts"
+    curl() {
+        local timeout="" insecure=false
+        while (($#)); do
+            case "$1" in
+                --max-time) timeout="$2"; shift ;;
+                --insecure) insecure=true ;;
+            esac
+            shift
+        done
+        printf '%s %s\n' "$timeout" "$insecure" >> "$SB/local-probe-attempts"
+        if [[ "$(wc -l < "$SB/local-probe-attempts")" -lt 3 ]]; then
+            printf '000'; return 60
+        fi
+        printf '200'
+    }
+    golive_probe tls.example.test /readyz false > "$SB/local-probe-status"
+    printf 'delayed_status=%s elapsed=%s attempts=%s;\n' "$(cat "$SB/local-probe-status")" "$SECONDS" "$(wc -l < "$SB/local-probe-attempts")"
+    printf 'delayed_limits=%s\n' "$(cut -d' ' -f1 "$SB/local-probe-attempts" | tr '\n' ',')"
+    printf 'insecure_attempts=%s\n' "$(grep -c ' true$' "$SB/local-probe-attempts" || true)"
+
+    SECONDS=0
+    : > "$SB/local-probe-attempts"
+    curl() {
+        { printf '%q ' "$@"; printf '\n'; } >> "$SB/local-probe-attempts"
+        printf '000'; return 60
+    }
+    golive_probe invalid-tls.example.test /readyz false > "$SB/local-probe-status"
+    printf 'permanent_status=%s elapsed=%s attempts=%s;\n' "$(cat "$SB/local-probe-status")" "$SECONDS" "$(wc -l < "$SB/local-probe-attempts")"
+    printf 'last_attempt=%s\n' "$(tail -1 "$SB/local-probe-attempts")"
+    printf 'insecure_attempts=%s\n' "$(grep -c -- --insecure "$SB/local-probe-attempts" || true)"
+
+    SECONDS=0
+    curl() { printf '404'; }
+    golive_probe missing.example.test /readyz false > "$SB/local-probe-status"
+    printf 'http_status=%s elapsed=%s\n' "$(cat "$SB/local-probe-status")" "$SECONDS"
+) > "$SB/golive-local-retry.out" 2>&1
+OUT="$(cat "$SB/golive-local-retry.out")"
+check "local TLS succeeds after nginx finishes reloading" "delayed_status=200 elapsed=2 attempts=3;" "$OUT"
+check "each connection uses the remaining deadline" "delayed_limits=10,9,8," "$OUT"
+check "permanent TLS failure stops at the deadline" "permanent_status=000 elapsed=10 attempts=10;" "$OUT"
+check "last connection cannot exceed the remaining second" "--max-time 1 --write-out" "$OUT"
+check "local retries keep full TLS validation" "" "$(grep -E '^insecure_attempts=[1-9]' "$SB/golive-local-retry.out" || true)"
+check "an actual HTTP failure is reported immediately" "http_status=404 elapsed=0" "$OUT"
+
 echo "-- public propagation waits, then verifies HTTPS --"
 # Overrides are deliberately local to this isolated regression fixture.
 # shellcheck disable=SC2030
@@ -442,8 +565,8 @@ echo "-- public propagation waits, then verifies HTTPS --"
     GOLIVE_VERIFY_TIMEOUT=3
     certs_http_probe() { return 1; }
     status=0
-    golive_wait_public old-server.example.test || status=$?
-    printf 'old_origin_exit=%s\n' "$status"
+    golive_wait_public wrong-origin.example.test || status=$?
+    printf 'wrong_origin_exit=%s\n' "$status"
 
     certs_http_probe() { return 0; }
     curl() { printf '000'; }
@@ -454,13 +577,15 @@ echo "-- public propagation waits, then verifies HTTPS --"
 OUT="$(cat "$SB/golive-propagation.out")"
 check "propagation is retried successfully" "propagation_exit=0 attempts=2" "$OUT"
 check "waiting is visible to the operator" "retry in 1s" "$OUT"
-check "healthy old server cannot satisfy origin identity" "old_origin_exit=1" "$OUT"
+check "wrong origin cannot satisfy server identity" "wrong_origin_exit=1" "$OUT"
 check "public TLS failure stays unsuccessful" "public_tls_exit=1" "$OUT"
-check "timeout provides a retry command" "getbible.sh verify old-server.example.test" "$OUT"
+check "timeout provides a retry command" "getbible.sh verify wrong-origin.example.test" "$OUT"
 
 echo "-- nginx -t on a staged vhost --"
 if command -v nginx >/dev/null; then
-    unset GB_NGINX_FAKE_VERSION GB_NGINX_FAKE_BROTLI
+    unset GB_NGINX_FAKE_VERSION
+    # This isolated config does not load optional distro modules.
+    export GB_NGINX_FAKE_BROTLI=false
     export GB_NGINX_FAKE_IPV6=false
     D6=sixth.example.test
     "$GB" deploy static --domain "$D6" --version v2 --repo git@github.com:getbible/v2_scripture.git --staged >/dev/null 2>&1

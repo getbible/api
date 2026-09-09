@@ -25,7 +25,7 @@ def _common_kwargs(settings: LibrarianSettings) -> dict:
         strict_freshness=settings.strict_freshness,
         books_cache_limit=settings.books_cache_limit,
         cache_ttl_jitter=settings.cache_ttl_jitter,
-        require_checksums=settings.require_checksums,
+        require_checksums=False,
     )
 
 

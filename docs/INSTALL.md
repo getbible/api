@@ -1,8 +1,8 @@
 # Installing on a server
 
-Start with Ubuntu 24.04 or 26.04 and sudo. DNS for each endpoint domain may
-already point at this server or still at another one: an endpoint can be
-deployed staged and go live later (see `NEW_SERVER.md`).
+Start with a fresh Ubuntu 24.04 or 26.04 host and sudo. Each domain can be
+deployed staged and checked before public DNS points here, then go live later
+(see `NEW_SERVER.md`).
 The manager detects `/etc/os-release`, architecture, glibc, nginx capabilities
 and available tools. `install-deps` uses `apt` on Debian/Ubuntu; on other Linux
 distributions it reports the required packages for manual installation.
@@ -16,7 +16,7 @@ The manager runs as root from a root-owned Git checkout, and reads this
 repository over SSH with a deploy key that only root holds. Set the key up
 once; the first clone and every later `self-update` use it.
 
-As root (`sudo su -`), generate the server's key and show its public half:
+As root (`sudo su -`), generate the manager repository's key and show its public half:
 
 ```sh
 ssh-keygen -t ed25519 -f /root/.ssh/id_ed25519
@@ -26,8 +26,9 @@ cat /root/.ssh/id_ed25519.pub
 Add the public key under **getbible/api > Settings > Deploy keys > Add deploy
 key**, leaving **Allow write access** unchecked
 ([GitHub: managing deploy keys](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/managing-deploy-keys)).
-A deploy key belongs to one repository; the static domains' data
-repositories get their own keys from the tool.
+A deploy key belongs to one repository. Every static endpoint gets a
+separate key for its data repository from the tool, including endpoints
+sharing the same domain. Never reuse root's manager key for these endpoints.
 
 Tell SSH to use that key for GitHub by adding this to `/root/.ssh/config`
 (create the file if it does not exist, mode `0600`):
@@ -69,6 +70,7 @@ sudo ./getbible.sh                  # the menu
 The first run creates `/etc/getbible` with the global configuration, the
 `getbible-readers` and `getbible-notify` groups, the log rotation timer and the
 helper programs under `/usr/local/lib/getbible`.
+`install-deps` enables and starts `certbot.timer` for automatic renewal checks.
 
 The rendered configuration adapts to the release. Ubuntu 26.04 ships the Rust
 coreutils, whose `install -d` and `mv -T` differ from GNU's, so the tool creates
@@ -113,12 +115,14 @@ and what happens afterwards, then ask for the domain and **Go live now?**
   requested and DNS is not changed, so whatever serves the name today keeps
   serving. Main menu > Go live, or Domain > Go live, switches it later.
   Settings > New domains chooses the default answer; `NEW_SERVER.md`
-  walks through rebuilding a whole server this way.
+  walks through setting up a fresh server this way.
 
 The static walk-through then asks for the first endpoint (a version folder
 such as `v2`, or nothing for the domain root), the git repository, branch,
 source folder, file types, access mode and check schedule, and prints the
-deploy key to add to the repository. The runtime walk-through asks for the
+endpoint's deploy key to add to that repository as read-only. Adding another
+endpoint creates its own key, even when it shares this domain; show it later
+with `deploy-key DOMAIN ENDPOINT`. The runtime walk-through asks for the
 kind (query or search), the version (from those the kind's implementations
 declare) and whether it lives under `/v2/` or at the domain root, and the
 folder that holds the Bible files, and warns when that folder does not hold
@@ -135,24 +139,24 @@ take one over or point it at the repository. Every domain serves the getBible
 icons from the repository's `img/` folder (favicon and page logo); Settings >
 Icons replaces them. Details: `PAGES.md`.
 
-Certificates are validated over HTTP-01 through the challenge directory, or
-over DNS-01 through the stored Cloudflare API token when the
-`certbot-dns-cloudflare` plugin is installed (Settings > Certificate
-validation; automatic uses DNS-01 for Cloudflare-managed domains). DNS-01
-works before DNS points here,
-so a staged domain can already hold its real certificate: Domain >
+Each domain has **one certificate shared by all its endpoints**. The default
+is Certbot HTTP-01 through nginx's port-80 challenge directory; it requires
+public DNS to reach this server and needs no Cloudflare account or token.
+Cloudflare DNS-01 is optional: select it explicitly, or automatic validation
+selects it for a domain managed through Cloudflare when its token and the
+`certbot-dns-cloudflare` plugin are available. DNS-01 works before DNS points
+here, so a staged domain can already hold its real certificate: Domain >
 Certificate > Issue. When a live deploy's certificate request fails (DNS not
 yet here, port 80 blocked), the domain serves HTTP only: ACME challenges
 are answered and normal requests redirect to HTTPS. Fix the cause and use
 Domain > Certificate > Issue.
 
-## 5. Migrating an existing server
-
-If the domains are already declared in another nginx file (for example
-`sites-available/default`) or an old query service exists, System > Retire
-the legacy setup shows what it found and, after confirmation, removes those
-server blocks (backed up under `/var/backups/getbible`), retires the old unit
-and reloads nginx. Deploy the new domains first, then migrate.
+Certbot stores the certificate under `/etc/letsencrypt/live/<domain>/` and
+renews it automatically with the method recorded when it was issued. The
+installed deploy hook validates nginx and reloads it after a successful
+renewal. Adding endpoints reuses the domain certificate; it does not request
+another one. Staged domains use a temporary self-signed certificate until a
+Let's Encrypt certificate is issued.
 
 ## Where things live
 
@@ -165,15 +169,18 @@ and reloads nginx. Deploy the new domains first, then migrate.
 | `/etc/getbible/telegram.conf`, `cloudflare.conf` | notification and Cloudflare credentials (root only) |
 | `/etc/getbible/certbot-cloudflare.ini` | the Cloudflare token as certbot's DNS-01 plugin reads it (root only, written from `cloudflare.conf`) |
 | `/etc/getbible/placeholder-certs/<domain>/` | the self-signed certificate of a staged domain (removed at go-live) |
+| `/etc/letsencrypt/live/<domain>/` | the Let's Encrypt certificate and private key shared by every endpoint on the domain |
+| `/etc/letsencrypt/renewal-hooks/deploy/getbible-reload-nginx.sh` | validates and reloads nginx after certificate renewal |
 | `/etc/getbible/endpoints/<domain>/` | `endpoint.conf` (the domain, including `LIVE=true|false`), `versions/<label>.conf` (its endpoints: repository or service settings, page and OpenAPI sources), `tokens.json`, `runtime-<label>.env` |
 | `/var/www/getbible/<domain>/` | the domain page, endpoint pages and OpenAPI documents (generated, or maintained by you), `favicon.ico`, `img/` (the icons the pages show), `versions.json` |
 | `/etc/nginx/sites-available/<domain>.conf` | the rendered vhost (`conf.d/getbible-*.conf`, `snippets/getbible/`, `getbible/` hold the shared pieces) |
 | `/srv/getbible/<domain>/<label>` | the live tree of a static endpoint (a symlink to a release under `releases/<label>/`) |
-| `/opt/getbible/<kind>/<label>/current` | the live release of a runtime endpoint (a symlink under `releases/`; a domain from before endpoints had records keeps `/opt/getbible/<kind>/`) |
+| `/opt/getbible/<kind>/<label>/current` | the live release of a runtime endpoint (a symlink under `releases/`) |
 | `/opt/getbible/<kind>/<label>/active`, `previous`, `deployments/` | active and previous generations, each with its own environment, service configuration and release reference |
 | `/opt/getbible/python/` | managed CPython distributions with verified provenance; never upgraded in place |
-| `/var/log/getbible/<domain>/` | `access.log`, `error.log`, `app/<label>.log` (runtime; `app/app.log` for a legacy endpoint), `archive/` |
+| `/var/log/getbible/<domain>/` | `access.log`, `error.log`, `app/<label>.log` (runtime), `archive/` |
 | `/var/lib/getbible/` | state, the ledger of installed files, sync users' homes |
+| `/var/lib/getbible/sync/<user>/.ssh/` | separate deploy keys for each static endpoint and repository URL, plus the domain sync user's pinned repository host keys |
 | `/var/backups/getbible/` | backup sets taken before every configuration change |
 
 Every menu action has a command line equivalent (`./getbible.sh --help`), so

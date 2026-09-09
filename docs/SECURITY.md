@@ -5,9 +5,16 @@ process that faces the network; everything behind it is isolated.
 
 ## Static domains
 
-- One system user per domain synchronises files with a read-only deploy key
-  and a pinned host key; it can write only its own home and data root, runs
-  under a hardened oneshot unit, and never touches nginx.
+- Each static endpoint has its own read-only deploy key for its repository
+  URL, selected explicitly for syncs and access tests. SSH agents and ambient
+  SSH configuration are disabled; pinned host keys and strict host checking
+  remain enabled. Changing repositories selects a different key; changing
+  only a branch or source folder preserves it. Private keys have mode `0600`.
+- One system user per domain synchronises its endpoints. The domain is the
+  operating-system isolation boundary: its endpoints share that user's home
+  and data permissions, while their repository identities are separate. The
+  user can write only its own home and data root, runs under a hardened
+  oneshot unit, and never touches nginx. Root's manager-update key is separate.
 - Only allowed extensions are exported from a repository and only those are
   served, plus the page and OpenAPI document an endpoint takes from the
   repository by explicit path (no dot segments, never a symlink); dotfiles
@@ -51,8 +58,7 @@ process that faces the network; everything behind it is isolated.
   root-owned, and is never rewritten by the tool. The sync units' post-run
   refresh of generated files runs as root outside the sync sandbox and only
   writes generated files under that directory.
-- Token map files are root-owned mode 0600 in mode 0700 directories; updates
-  also repair unchanged maps from older installations. Token lifetime is
+- Token map files are root-owned mode 0600 in mode 0700 directories. Token lifetime is
   checked against nginx's current epoch time on every request. An expiry date
   includes that whole UTC day; no timer or reload is required for expiration.
 - Token-only data responses use `private, no-store` and bypass nginx caching.

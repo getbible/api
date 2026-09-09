@@ -141,7 +141,7 @@ def replace_rule(zone_id: str, phase: str, description: str, rule: dict | None) 
 
     Keep an existing rule in its current position. The single-rule endpoints
     also preserve unrelated rules changed after our GET. Exact descriptions
-    identify the rules created by this tool, including older installations.
+    identify the rules created by this tool across subsequent updates.
     """
     current = entrypoint(zone_id, phase)
     wanted = dict(rule, description=description) if rule is not None else None

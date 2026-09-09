@@ -100,6 +100,7 @@ nginx_render_endpoint() { :; }
 nginx_enable_site() { :; }
 nginx_apply_stage() { :; }
 nginx_cert_exists() { [[ "$HAS_CERT" == true ]]; }
+certs_install_hook() { :; }
 certs_obtain() { return 1; }
 certs_can_run() { return 1; }
 type_fixture_finish() { printf 'finish\n' >> "$EVENTS"; }

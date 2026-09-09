@@ -15,7 +15,7 @@ from tests.python.support import FIXTURE_REPOSITORY, EndpointCase
 class QueryAppTest(EndpointCase, unittest.TestCase):
     def make_app(self):
         settings = Settings(
-            librarian=LibrarianSettings(repository=FIXTURE_REPOSITORY, cache_dir=self.cache_dir, require_checksums=False),
+            librarian=LibrarianSettings(repository=FIXTURE_REPOSITORY, cache_dir=self.cache_dir),
             service=ServiceSettings(prefix="QUERY", default_translation="test", trust_proxy=False, app_log=self.app_log),
             default_reference="Ge1:1",
         )

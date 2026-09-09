@@ -44,9 +44,7 @@ ep_load() {
     ep_exists "$domain" || gb_die "Unknown domain: $domain"
     for key in DOMAIN SLUG TYPE KIND ACCESS_MODE RATE_PER_SECOND RATE_BURST QUOTA_HOUR QUOTA_DAY \
                CONN_LIMIT CLOUDFLARE_MODE CLOUDFLARE_CACHE CLOUDFLARE_ORIGIN_PULLS DOCS_SOURCE \
-               EXTENSIONS CACHE_TTL SHA_CACHE_TTL SYNC_SCHEDULE SYNC_USER VERSION REPOSITORY \
-               WORKERS THREADS WARM_TRANSLATIONS DEFAULT_TRANSLATION DEFAULT_REFERENCE \
-               ALLOWED_TRANSLATIONS REQUIRE_CHECKSUMS PYTHON_VERSION CREATED ENABLED LIVE \
+               EXTENSIONS CACHE_TTL SHA_CACHE_TTL SYNC_SCHEDULE SYNC_USER DEFAULT_ENDPOINT CREATED ENABLED LIVE \
                FAVICON_SOURCE FAVICON_MIME LOGO_SOURCE LOGO_FILE; do
         printf -v "EP_$key" '%s' ""
     done
@@ -92,9 +90,9 @@ ep_remove_config() {
 
 # --- publication ------------------------------------------------------------
 # A staged endpoint has everything installed but has not taken over its public
-# name: no certificate was requested and DNS was not changed. Endpoints from
-# before staged deployments carry no LIVE key and are live.
-ep_is_live() { [[ "$(ep_get "$1" LIVE true)" != false ]]; }
+# name: no certificate was requested and DNS was not changed. Domains
+# must explicitly record their publication state.
+ep_is_live() { [[ "$(ep_get "$1" LIVE false)" != false ]]; }
 ep_publication() { if ep_is_live "$1"; then printf 'live\n'; else printf 'staged\n'; fi; }
 
 # The mode for a new endpoint: the deploy walkthrough or --staged/--live sets
@@ -129,8 +127,8 @@ ep_version_load() {
     local key
     for key in LABEL ENABLED CREATED DOCS_SOURCE DOCS_REPO_PATH OPENAPI_SOURCE OPENAPI_REPO_PATH \
                REPO_URL REPO_REF SOURCE_PATH \
-               LAYOUT APP_VERSION REPOSITORY WORKERS THREADS WARM_TRANSLATIONS DEFAULT_TRANSLATION DEFAULT_REFERENCE \
-               ALLOWED_TRANSLATIONS REQUIRE_CHECKSUMS PYTHON_VERSION CACHE_TTL; do
+               APP_VERSION REPOSITORY WORKERS THREADS WARM_TRANSLATIONS DEFAULT_TRANSLATION DEFAULT_REFERENCE \
+               ALLOWED_TRANSLATIONS PYTHON_VERSION CACHE_TTL; do
         printf -v "EV_$key" '%s' ""
     done
     ep_version_exists "$1" "$2" || gb_die "Unknown endpoint $2 for $1"
@@ -169,7 +167,7 @@ ep_summary_line() {
     if [[ "$EP_TYPE" == static ]]; then
         extra="endpoints: ${endpoints:-none}"
     else
-        extra="kind: $EP_KIND · endpoints: ${endpoints:-$EP_VERSION }"
+        extra="kind: $EP_KIND · endpoints: ${endpoints:-none}"
     fi
     printf '%-32s %-8s %-8s %s · %s\n' "$domain" "$EP_TYPE" "$EP_ACCESS_MODE" "$extra" "$(ep_publication "$domain")"
 }

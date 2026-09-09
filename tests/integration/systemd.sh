@@ -42,7 +42,7 @@ cleanup() {
     [[ -z "$PROBE_PID" ]] || { touch "$PROBE_STOP"; wait "$PROBE_PID" || true; }
     if (( result != 0 )); then
         journalctl -u 'getbible-*' --no-pager -n 200 || true
-        for diagnostic in /var/log/nginx/error.log /var/log/getbible/*/error.log /var/log/getbible/*/app/app.log; do
+        for diagnostic in /var/log/nginx/error.log /var/log/getbible/*/error.log /var/log/getbible/*/app/*.log; do
             [[ -f "$diagnostic" ]] || continue
             printf '\nFailure diagnostic: %s\n' "$diagnostic"
             tail -80 "$diagnostic" || true
@@ -51,7 +51,9 @@ cleanup() {
     fi
     "$GB" remove "$Q" --purge >/dev/null 2>&1 || true
     "$GB" remove "$S" --purge >/dev/null 2>&1 || true
-    rm -rf /srv/getbible-ci "/etc/getbible/placeholder-certs/$S"
+    rm -rf /srv/getbible-ci "/etc/getbible/placeholder-certs/$S" \
+        "/etc/letsencrypt/live/$Q" "/etc/letsencrypt/live/$S"
+    rmdir /etc/getbible/endpoints 2>/dev/null || true
     exit "$result"
 }
 trap cleanup EXIT
@@ -119,10 +121,10 @@ for kind in query search; do
     if [[ "$kind" == query ]]; then
         preseed_certificate "$domain"
         "$GB" deploy runtime --domain "$domain" --kind "$kind" --repository /srv/getbible-ci/repository \
-            --require-checksums false --default-translation test --default-reference Ge1:1 --warm test --access open
+            --default-translation test --default-reference Ge1:1 --warm test --access open
     else
         "$GB" deploy runtime --domain "$domain" --kind "$kind" --repository /srv/getbible-ci/repository \
-            --require-checksums false --default-translation test --default-reference Ge1:1 --warm test --access open --staged
+            --default-translation test --default-reference Ge1:1 --warm test --access open --staged
         check "$kind recorded staged" LIVE=false "$(grep '^LIVE=' "/etc/getbible/endpoints/$domain/endpoint.conf")"
         check "$kind serves its placeholder certificate" yes "$(contains "$domain" "$(openssl s_client -connect 127.0.0.1:443 -servername "$domain" </dev/null 2>/dev/null | openssl x509 -noout -subject)")"
         check "$kind staged ready through nginx" '{"status":"ready"}' "$(request "$domain" /readyz | tr -d '\n')"
@@ -193,4 +195,36 @@ stop_probe
 check 'rollback restores original configuration' QUERY_DEFAULT_REFERENCE=Ge1:1 "$(tr '\0' '\n' < "/proc/$(main_pid query)/environ" | grep '^QUERY_DEFAULT_REFERENCE=')"
 check 'all deployments preserve nginx master' "$NGINX_PID" "$(systemctl show --property=MainPID --value nginx)"
 check 'query ready after rollback' '{"status":"ready"}' "$(request "$Q" /readyz | tr -d '\n')"
+
+# Exercise certbot's installed deploy hook with a newly issued fixture
+# certificate. No ACME request or public DNS is needed; nginx must serve the
+# replacement through its existing master while both applications stay healthy.
+check 'automatic certificate renewal timer enabled' enabled "$(systemctl is-enabled certbot.timer)"
+check 'automatic certificate renewal timer active' active "$(systemctl is-active certbot.timer)"
+RENEWAL_HOOK=/etc/letsencrypt/renewal-hooks/deploy/getbible-reload-nginx.sh
+check 'certificate renewal deploy hook executable' yes "$([[ -x "$RENEWAL_HOOK" ]] && echo yes || echo no)"
+served_certificate_serial() {
+    timeout 3 openssl s_client -connect 127.0.0.1:443 -servername "$1" \
+        -verify_hostname "$1" -verify_return_error -CAfile "$CURL_CA_BUNDLE" \
+        </dev/null 2>/dev/null | openssl x509 -noout -serial
+}
+OLD_CERT_SERIAL="$(openssl x509 -in "/etc/letsencrypt/live/$Q/fullchain.pem" -noout -serial)"
+check 'query serves original verified certificate' "$OLD_CERT_SERIAL" "$(served_certificate_serial "$Q")"
+preseed_certificate "$Q"
+NEW_CERT_SERIAL="$(openssl x509 -in "/etc/letsencrypt/live/$Q/fullchain.pem" -noout -serial)"
+[[ "$NEW_CERT_SERIAL" != "$OLD_CERT_SERIAL" ]] || { echo 'Renewal fixture reused the original certificate.' >&2; exit 1; }
+start_probe
+RENEWED_DOMAINS="$Q" RENEWED_LINEAGE="/etc/letsencrypt/live/$Q" "$RENEWAL_HOOK"
+RENEWAL_DEADLINE=$((SECONDS + 15))
+SERVED_CERT_SERIAL=""
+while (( SECONDS < RENEWAL_DEADLINE )); do
+    SERVED_CERT_SERIAL="$(served_certificate_serial "$Q" 2>/dev/null)" || SERVED_CERT_SERIAL=""
+    [[ "$SERVED_CERT_SERIAL" == "$NEW_CERT_SERIAL" ]] && break
+    sleep 0.2
+done
+check 'nginx serves renewed verified certificate' "$NEW_CERT_SERIAL" "$SERVED_CERT_SERIAL"
+stop_probe
+check 'certificate renewal preserves nginx master' "$NGINX_PID" "$(systemctl show --property=MainPID --value nginx)"
+check 'query ready after certificate renewal' '{"status":"ready"}' "$(request "$Q" /readyz | tr -d '\n')"
+check 'search ready after certificate renewal' '{"status":"ready"}' "$(request "$S" /readyz | tr -d '\n')"
 printf '\n== %d production deployment checks passed ==\n' "$PASS"

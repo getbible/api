@@ -305,16 +305,29 @@ golive_row() { printf '  %-30s %-5s %s\n' "$1" "$2" "$3"; }
 # golive_probe DOMAIN PATH INSECURE -> HTTP status through 127.0.0.1:443 with
 # the real host name, so DNS plays no part.
 golive_probe() {
-    local domain="$1" path="$2" insecure="$3"
+    local domain="$1" path="$2" insecure="$3" code=000 deadline remaining
     local -a flags=()
     [[ "$insecure" == true ]] && flags+=(--insecure)
-    # curl prints 000 itself when no response arrived.
-    curl --silent --output /dev/null --max-time 10 --write-out '%{http_code}' \
-        --resolve "$domain:443:127.0.0.1" "${flags[@]+"${flags[@]}"}" "https://$domain$path" 2>/dev/null || true
+    # nginx reload signals its master before new workers accept connections.
+    # An immediate TLS handshake can still see the staged placeholder. Retry
+    # connection/TLS failures within one deadline, with the same trust policy
+    # on every attempt. A live certificate is never retried with --insecure.
+    deadline=$((SECONDS + 10))
+    while :; do
+        remaining=$((deadline - SECONDS))
+        (( remaining > 0 )) || break
+        code="$(curl --silent --output /dev/null --max-time "$remaining" --write-out '%{http_code}' \
+            --resolve "$domain:443:127.0.0.1" "${flags[@]+"${flags[@]}"}" "https://$domain$path" 2>/dev/null || true)"
+        code="${code:-000}"
+        [[ "$code" == 000 ]] || break
+        (( SECONDS < deadline )) || break
+        sleep 1
+    done
+    printf '%s' "$code"
 }
 
-# Confirm the public route reaches this server, not a healthy old server still
-# present in a resolver's cache. The existing ACME directory supplies a fresh
+# Confirm the public route reaches this server despite resolver caches or
+# incorrect DNS records. The existing ACME directory supplies a fresh
 # random marker; no API requests, tokens or runtime work are involved.
 golive_public_probe() {
     local domain="$1" timeout="$2" deadline="$3" code remaining

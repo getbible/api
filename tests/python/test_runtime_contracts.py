@@ -116,7 +116,7 @@ class ContractTest(unittest.TestCase):
 class ResponseContractTest(EndpointCase, unittest.TestCase):
     def make_app(self):
         return search_app(SearchSettings(
-            librarian=LibrarianSettings(repository=FIXTURE_REPOSITORY, cache_dir=self.cache_dir, require_checksums=False),
+            librarian=LibrarianSettings(repository=FIXTURE_REPOSITORY, cache_dir=self.cache_dir),
             service=ServiceSettings(prefix="SEARCH", default_translation="test",
                                     app_log=self.app_log, trust_proxy=False),
         ))
@@ -145,7 +145,7 @@ class ResponseContractTest(EndpointCase, unittest.TestCase):
     def test_query_scripture_members_are_described(self) -> None:
         doc = contract("query")
         app = query_app(QuerySettings(
-            librarian=LibrarianSettings(repository=FIXTURE_REPOSITORY, cache_dir=self.cache_dir, require_checksums=False),
+            librarian=LibrarianSettings(repository=FIXTURE_REPOSITORY, cache_dir=self.cache_dir),
             service=ServiceSettings(prefix="QUERY", default_translation="test",
                                     app_log=self.app_log, trust_proxy=False),
             default_reference="Ge1:1",

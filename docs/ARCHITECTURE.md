@@ -15,11 +15,26 @@ version directories and trust those same upstream-validated files.
 
 A **domain** is a host name: one vhost, one certificate, one go-live. Its
 **endpoints** are its version folders (`/v2/`), or the domain root itself
-when it was set up without version folders (the label `root`). The registry
-directory, the pipeline's function names and the `endpoint.conf` file name
-predate this vocabulary and were kept so existing installations keep working:
+when it was set up without version folders (the label `root`). In the registry,
 `/etc/getbible/endpoints/<domain>/endpoint.conf` describes the domain and
 `versions/<label>.conf` its endpoints.
+
+Static repository credentials are **per endpoint**, while the sync system
+user, nginx vhost and certificate are per domain. Each endpoint selects a
+dedicated SSH key for its repository URL; changing only a reference or source
+folder preserves the key, while changing the URL selects another key. Both
+scheduled syncs and access tests pass that key directly to SSH with ambient
+configuration and agents disabled. URLs keep their real hostnames. This
+allows `/v1/` and `/v2/` to use unrelated private repositories on the same
+Git host without sharing a deploy key. Root's manager-update key is separate.
+
+The key path is derived from the endpoint label and repository URL and passed
+to its service as `GB_SYNC_KEY`. The sync helper requires this explicit key;
+there is no domain-wide fallback identity. `deploy-key DOMAIN ENDPOINT`
+prepares a missing key and shows its public half; `repo-access DOMAIN ENDPOINT`
+tests it against the configured repository and reference. See
+[STATIC_ENDPOINTS.md](STATIC_ENDPOINTS.md) for the operator workflow and the
+shared user's security boundary.
 
 ## The tool
 
@@ -33,11 +48,11 @@ the menu. The libraries:
 | `config`, `registry` | `KEY=value` files; the endpoint registry under `/etc/getbible/endpoints` |
 | `users`, `systemd`, `certs`, `nginx` | system users and groups; units and timers; certbot over HTTP-01 or DNS-01 through Cloudflare, placeholder certificates for staged endpoints; render, stage, test, install, reload, drift |
 | `access` | access modes, limits, tokens and their nginx snippets |
-| `sync` | sync users, deploy keys, sync units |
+| `sync` | domain sync users; endpoint/repository deploy keys and access tests; per-endpoint sync units |
 | `pages` | the files a domain publishes besides its data: pages, OpenAPI documents, favicon and icons, versions.json, and where each comes from (`PAGES.md`) |
 | `platform`, `python` | host capability detection, reviewed standalone CPython distributions and immutable runtime releases |
 | `logs`, `analytics`, `telegram`, `cloudflare` | rotation, reports, notifications, Cloudflare |
-| `docs`, `endpoint`, `update`, `migrate`, `doctor`, `menu` | shared pieces of the documentation pages, the domain pipeline, update, legacy migration, host checks, the menu tree |
+| `docs`, `endpoint`, `update`, `doctor`, `menu` | shared pieces of the documentation pages, the domain pipeline, update, host checks, the menu tree |
 | `golive` | staged endpoints going live: preflight, certificate first, then the switch, Cloudflare DNS, verification |
 
 Domain types live in `src/types/<type>/type.sh` and implement
@@ -57,9 +72,7 @@ holds its releases and generations, `getbible-<kind>-<label>-<generation>`
 are its units, `/run/getbible/<kind>/<label>/` its sockets. The endpoint's
 record (`versions/<label>.conf`) carries its settings, `APP_VERSION` (the
 version the implementation speaks; differs from the label only for a root
-endpoint) and `LAYOUT`: `versioned` for these paths, `legacy` for a domain
-recorded before endpoints had records, which keeps `/opt/getbible/<kind>`
-and `getbible-<kind>-<generation>` so nothing running is moved.
+endpoint). Every endpoint uses the paths above.
 
 An endpoint carries `LIVE=true|false` in its `endpoint.conf` (absent means
 live). A staged endpoint runs the same pipeline without the steps that touch
@@ -74,7 +87,7 @@ Helper programs in `src/bin/` are installed to `/usr/local/lib/getbible`
 for timers and hooks that run as other users: `getbible-sync`,
 `getbible-export-tree`, `getbible-notify`, `getbible-logrotate-hook`. The
 rest (`getbible-render`, `getbible-tokens`, `getbible-analytics`,
-`getbible-cloudflare`, `getbible-nginx-strip`) run from the checkout.
+`getbible-cloudflare`) run from the checkout.
 
 ## nginx layout
 
@@ -87,7 +100,7 @@ rest (`getbible-render`, `getbible-tokens`, `getbible-analytics`,
 - `getbible/<domain>/`: `server.conf` (tuning), `limits.conf`, `auth.conf`;
   `getbible/tokens/<slug>.map` and `getbible/token-validity/<slug>.map` enforce
   endpoint identity and per-request UTC token expiry. Map directories are
-  root-only; all hosts' maps migrate together with the shared configuration.
+  root-only; maps are updated with the shared configuration.
 - `sites-available/<domain>.conf`: the vhost, port 80 with the ACME
   location and a redirect, port 443 with everything above, the exact
   locations of the domain page, favicon, `/img/`, `versions.json` and `/openapi.json`,

@@ -37,22 +37,38 @@ for where these come from and how to take them over.
 
 ## Synchronisation
 
-Every domain gets its own system user (`gb-sync-<name>`) with an ed25519
-deploy key under `/var/lib/getbible/sync/<user>/.ssh/`. Add the public key
-(shown after deployment, or Domain > Show the deploy key) to the repository
-as a read-only deploy key on GitHub or Gitea. The repository host's SSH key is
-pinned in the user's `known_hosts` at deployment.
+Every **endpoint gets its own ed25519 deploy key** for its repository URL.
+For example, `/v1/` and `/v2/` on the same domain can use different GitHub
+repositories with different read-only deploy keys. The endpoints share one
+domain system user (`gb-sync-<name>`) and nginx vhost. Their keys live under
+`/var/lib/getbible/sync/<user>/.ssh/`; private keys have mode `0600`.
 
-There is no account name or password anywhere: the deploy key is the whole
-identity, and git runs as the sync user with that key only. The SSH user in
-the repository URL is the host's, not yours: `git@github.com:owner/repo.git`
-on GitHub, GitLab and Gitea (they accept nothing but `git`). A self-hosted
-server with another SSH user or port is written `ssh://user@host:port/path`
-or `user@host:path`. Public repositories may use `https://`; private ones
-need SSH. Domain > Test repository access proves the key and URL work
-before the first sync. An endpoint's repository, branch or folder can be
-changed later under Domain > Endpoints > Change (or `version change`)
-without losing its releases; the next sync publishes from the new source.
+After deploying or adding an endpoint, add its displayed public key to that
+endpoint's repository as a **read-only deploy key** (GitHub: Settings > Deploy
+keys, with Allow write access unchecked; Gitea: Settings > Deploy Keys).
+Use the domain's deploy-key menu and choose the endpoint, or run
+`getbible.sh deploy-key DOMAIN ENDPOINT`, to show its key again. Register each
+key on its own repository; GitHub does not allow one deploy key to be added
+to multiple repositories. The repository host's SSH key is pinned in the
+sync user's `known_hosts` at deployment.
+
+Each sync and repository-access test selects the endpoint's key explicitly.
+SSH configuration files and SSH agents cannot select another identity, and
+strict host-key checking stays enabled. Keep the ordinary repository URL:
+`git@github.com:owner/repo.git`; no host aliases or URL rewriting are needed.
+The SSH user before `@` belongs to the host, not your account. A self-hosted
+server with another SSH user or port uses `ssh://user@host:port/path` or
+`user@host:path`. Public repositories may use `https://`; private ones need
+SSH. Root's key for updating the manager repository is separate.
+
+Domain > Test repository access (or `repo-access DOMAIN ENDPOINT`) checks
+the endpoint's currently selected key and reference before the first sync.
+Change the repository, branch or folder under Domain > Endpoints > Change
+(or `version change`) without losing published releases. A different
+repository URL selects a different key: add its public key to the new
+repository before syncing. Changing only the branch or source folder keeps
+the same key. Keys are retained when changing repositories, so switching
+back to the same URL reuses that endpoint's earlier key.
 
 A timer per endpoint (`getbible-sync-<slug>-<label>.timer`, weekly by
 default, daily or monthly on request, "Sync now" any time) runs
@@ -95,6 +111,32 @@ candidate. Responses already streaming keep their open file descriptors across r
 independent HTTP requests can span different releases; the symlink switch is
 not a client-wide snapshot transaction.
 
+## Different repositories on one domain
+
+Deploy the domain with its first endpoint, then add other endpoints with
+their own repository URLs. Register each endpoint's public key on its
+corresponding repository as read-only before testing access and syncing:
+
+```sh
+sudo ./getbible.sh deploy static --domain api.getbible.net --version v1 --repo git@github.com:org/bible-v1.git --ref main --staged
+sudo ./getbible.sh deploy-key api.getbible.net v1
+# Add the displayed public key to org/bible-v1 as a read-only deploy key.
+sudo ./getbible.sh repo-access api.getbible.net v1
+sudo ./getbible.sh sync api.getbible.net v1
+
+sudo ./getbible.sh version add api.getbible.net v2 --repo git@github.com:org/bible-v2.git --ref main
+sudo ./getbible.sh deploy-key api.getbible.net v2
+# Add this different public key to org/bible-v2 as a read-only deploy key.
+sudo ./getbible.sh repo-access api.getbible.net v2
+sudo ./getbible.sh sync api.getbible.net v2
+```
+
+The domain's deploy-key menu offers the same show-key, test-access and sync
+actions after selecting an endpoint. Showing a key again preserves its
+identity, and adding `v2` preserves `v1`'s key and releases. Use `root` as the
+endpoint label for a domain without version folders. Once the staged domain
+is ready, use the normal go-live workflow to publish its shared hostname.
+
 ## Serving
 
 - Only the allowed extensions are served (`json`, `sha`, `txt` by default,
@@ -125,6 +167,8 @@ getbible.sh deploy static --domain D --version root --repo git@github.com:org/re
 getbible.sh version change D v2 [--repo URL] [--ref REF] [--path P]
 getbible.sh version add D v1 --repo URL [--ref main] [--path v1]
 getbible.sh version remove D v1
+getbible.sh deploy-key D v2
+getbible.sh repo-access D v2
 getbible.sh sync D [v2|root] [--force]
 getbible.sh pages D docs v2 repository docs/index.html
 getbible.sh pages D openapi v2 repository openapi.json

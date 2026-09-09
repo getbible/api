@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # The domain pipeline shared by every type: services, pages, nginx,
-# certificate, and removal. Type modules supply the pieces. (Functions and
-# files keep the "endpoint" name they had before domains and endpoints were
-# told apart; the registry directory is still /etc/getbible/endpoints.)
+# certificate, and removal. Type modules supply the pieces. Domain records
+# live in /etc/getbible/endpoints; their versions are individual endpoints.
 
 [[ -n "${GB_ENDPOINT_LOADED:-}" ]] && return 0
 GB_ENDPOINT_LOADED=1
@@ -49,6 +48,12 @@ endpoint_apply() {
     ep_is_live "$domain" || live=false
     gb_ensure_base_dirs || return 1
     logs_ensure_endpoint_dir "$domain" || return 1
+    if nginx_cert_exists "$domain" && ! certs_install_hook; then
+        gb_warn "Could not install the certificate renewal hook for $domain."
+        ep_state_set "$domain" LAST_ERROR "Certificate renewal hook installation failed" || true
+        tg_notify fail "Domain update failed: $domain" "Certificate renewal hook installation failed; services and routing were not changed."
+        return 1
+    fi
     EP_ENABLE_BACKUP="$(gb_new_backup_set "site-enable-$EP_SLUG")" || return 1
     gb_backup_file "$(nginx_enabled_file "$domain")" "$EP_ENABLE_BACKUP" || return 1
     nginx_transaction_begin "$domain" || return 1
