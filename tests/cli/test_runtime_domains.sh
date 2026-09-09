@@ -40,7 +40,10 @@ done
 # shellcheck source=../../src/types/runtime/type.sh
 source "$COPY/src/types/runtime/type.sh"
 gb_global_init
-REPO="$ROOT/tests/python/fixtures/repository"
+REPO="$SB/scripture"
+mkdir -p "$REPO"
+cp -a "$ROOT/tests/python/fixtures/repository/." "$REPO/"
+cp -a "$REPO/v2" "$REPO/v3"
 Q=query.example.test; S=search.example.test
 
 render() {
@@ -59,10 +62,47 @@ check "v2 from the base directory"   "query"                   "$(rt_implementat
 check "search knows v2 only"         "v2"                      "$(rt_kind_versions search | tr '\n' ' ' | sed 's/ $//')"
 check "unknown version refused"      ""                        "$(rt_implementation query v9 || true)"
 
+echo "-- local scripture setup --"
+MISSING=missing.example.test
+if type_runtime_create "$MISSING" query v2 "$SB/no-scripture" open '' >/dev/null 2>&1; then
+    echo "Missing local scripture was accepted" >&2; exit 1
+fi
+check "missing data leaves no domain" "" "$(ep_exists "$MISSING" && printf exists || true)"
+if type_runtime_create "$MISSING" query v2 https://api.example.test open '' >/dev/null 2>&1; then
+    echo "Remote scripture URL was accepted" >&2; exit 1
+fi
+check "remote URL leaves no domain" "" "$(ep_exists "$MISSING" && printf exists || true)"
+
+STATIC=local.example.test
+ep_create "$STATIC" static static
+ep_version_create "$STATIC" v2 https://example.test/bible.git main .
+check "unsynced roots are not offered" "" "$(rt_default_repository v2)"
+mkdir -p "$(ep_data_dir "$STATIC")/releases/v2/current"
+ln -s releases/v2/current "$(ep_version_path "$STATIC" v2)"
+check "published root is discoverable" "$(ep_data_dir "$STATIC")" "$(rt_default_repository v2)"
+check "candidate uses stable root" "$(ep_data_dir "$STATIC")" "$(rt_repository_candidates v2)"
+ep_version_set "$STATIC" v2 ENABLED false
+check "disabled endpoint is not offered" "" "$(rt_default_repository v2)"
+ep_version_set "$STATIC" v2 ENABLED true
+
+# Picker labels show the actual version path; it returns the librarian root.
+# shellcheck disable=SC2317,SC2329
+ui_menu() {
+    [[ "$*" == *"$(ep_data_dir "$STATIC")/v2"* ]] || return 1
+    printf '%s\n' "$(ep_data_dir "$STATIC")"
+}
+check "menu selects published local root" "$(ep_data_dir "$STATIC")" "$(rt_select_repository v2)"
+unset -f ui_menu
+unset GB_UI_LOADED
+# shellcheck source=../../src/lib/ui.sh
+source "$COPY/src/lib/ui.sh"
+ep_remove_config "$STATIC"
+
 echo "-- a domain with version folders --"
 type_runtime_create "$Q" query v2 "$REPO" metered ''
 mkdir -p "$SB/etc/letsencrypt/live/$Q" && touch "$SB/etc/letsencrypt/live/$Q/fullchain.pem" "$SB/etc/letsencrypt/live/$Q/privkey.pem"
 check "endpoint recorded"            "LAYOUT=versioned"        "$(cat "$SB/etc/getbible/endpoints/$Q/versions/v2.conf")"
+check "trusted data skips checksums"  "REQUIRE_CHECKSUMS=false" "$(cat "$SB/etc/getbible/endpoints/$Q/versions/v2.conf")"
 check "app version recorded"         "APP_VERSION=v2"          "$(cat "$SB/etc/getbible/endpoints/$Q/versions/v2.conf")"
 check "settings live with endpoint"  "WORKERS=4"               "$(cat "$SB/etc/getbible/endpoints/$Q/versions/v2.conf")"
 check "default endpoint"             "DEFAULT_ENDPOINT=v2"     "$(cat "$SB/etc/getbible/endpoints/$Q/endpoint.conf")"
@@ -124,7 +164,9 @@ check "root page q form"             "GET  https://$S/?q={search string}" "$(cat
 check "root openapi paths"           '"/{translation}/{search}"' "$(cat "$SB/var/www/getbible/$S/openapi.json")"
 check "root openapi version path"    '"/": {'                  "$(cat "$SB/var/www/getbible/$S/openapi.json")"
 check "root openapi valid"           "ok"                      "$(python3 -c 'import json,sys; json.load(open(sys.argv[1])); print("ok")' "$SB/var/www/getbible/$S/openapi.json")"
-check "no versions.json for root"    ""                        "$(ls "$SB/var/www/getbible/$S/versions.json" 2>/dev/null)"
+check "root discovery lists v2"      '"version": "v2"'         "$(cat "$SB/var/www/getbible/$S/versions.json")"
+check "root discovery points at /"   '"url": "https://'"$S"'/"' "$(cat "$SB/var/www/getbible/$S/versions.json")"
+check "root discovery OpenAPI"       '"openapi": "https://'"$S"'/openapi.json"' "$(cat "$SB/var/www/getbible/$S/versions.json")"
 check "no folders next to root"      "remove that endpoint"    "$(rt_check_new_endpoint "$S" v2 v2 2>&1 || true)"
 check "cannot remove the last"       "only endpoint"           "$(rt_remove_endpoint "$S" root 2>&1 || true)"
 SITE="$(render "$S")" || exit 1

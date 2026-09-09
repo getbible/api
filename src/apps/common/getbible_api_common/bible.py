@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from pathlib import Path
 
 from getbible import GetBible, RequestLimits, SearchLimits
 
@@ -10,6 +11,10 @@ from .settings import LibrarianSettings
 
 
 def _common_kwargs(settings: LibrarianSettings) -> dict:
+    # Availability only: source repositories already validate their own data.
+    # Refuse unavailable local data before constructing the librarian client.
+    if not (Path(settings.repository) / settings.version).is_dir():
+        raise ValueError(f"Local scripture folder {settings.repository}/{settings.version} is unavailable; sync the static endpoint first.")
     return dict(
         repo_path=settings.repository,
         version=settings.version,

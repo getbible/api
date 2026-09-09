@@ -268,10 +268,8 @@ rt_validate_settings() {
     done
     value="$(ep_version_get "$domain" "$label" DEFAULT_TRANSLATION kjv)"
     gb_valid_translation "$value" || { gb_warn "Invalid default translation of $domain $label"; return 1; }
-    value="$(ep_version_get "$domain" "$label" REQUIRE_CHECKSUMS true)"
-    [[ "$value" == true || "$value" == false ]] || { gb_warn "REQUIRE_CHECKSUMS of $domain $label must be true or false"; return 1; }
     value="$(ep_version_get "$domain" "$label" REPOSITORY)"
-    [[ "$value" == /* || "$value" == https://* || "$value" == http://* ]] || { gb_warn "The repository of $domain $label must be an absolute path or URL"; return 1; }
+    rt_validate_repository "$value" "$(rt_app_version "$domain" "$label")" || return 1
     value="$(ep_version_get "$domain" "$label" CACHE_TTL 300)"
     [[ "$value" =~ ^[0-9]{1,7}$ ]] || { gb_warn "CACHE_TTL of $domain $label must be a nonnegative integer"; return 1; }
     gb_valid_version "$(rt_app_version "$domain" "$label")" || { gb_warn "APP_VERSION of $domain $label must be v1, v2, ..."; return 1; }
@@ -358,7 +356,6 @@ rt_prepare_endpoint() {
     gb_ensure_dir "$(rt_cache_root "$domain" "$label")/releases" 0750 "$user:$user" || return 1
     gb_ensure_dir "$root" 0755 || return 1
     gb_ensure_dir "$(rt_deployments_dir "$domain" "$label")" 0755 || return 1
-    rt_check_repository "$domain" "$label"
     current="$(py_current_release "$root")"
     [[ -d "$current" ]] || current=""
     if [[ -z "$EV_PYTHON_VERSION" ]]; then
@@ -417,12 +414,20 @@ rt_prepare_endpoint() {
     rt_activate "$domain" "$label" "$generation"
 }
 
+# A cheap setup check: the published version directory must already exist.
+# Repository content is trusted; do not scan, parse or hash the scripture tree.
+rt_validate_repository() {
+    local root="$1" version="$2"
+    [[ "$root" == /* ]] || { gb_warn "Scripture repository must be an absolute local path; remote API URLs are not supported: $root"; return 1; }
+    [[ -d "$root/$version" && -r "$root/$version" && -x "$root/$version" ]] || {
+        gb_warn "Local scripture folder $root/$version is unavailable. Sync the static endpoint first, then choose its data root."
+        return 1
+    }
+}
+
+# Retain the old helper for callers; validation happens before release work.
 rt_check_repository() {
-    local domain="$1" label="$2" root version
-    root="$(ep_version_get "$domain" "$label" REPOSITORY)"
-    version="$(rt_app_version "$domain" "$label")"
-    [[ "$root" == /* ]] || return 0
-    [[ -d "$root/$version" ]] || gb_warn "Scripture mirror $root/$version is missing; readiness will prevent this deployment from replacing a healthy service."
+    rt_validate_repository "$(ep_version_get "$1" "$2" REPOSITORY)" "$(rt_app_version "$1" "$2")"
 }
 
 # The render functions take DOMAIN LABEL GENERATION and rely on EP_* (the
@@ -437,7 +442,7 @@ rt_render_env() {
     expensive=$(( threads / 2 )); (( expensive < 1 )) && expensive=1
     gb_render "$GB_TYPES/runtime/templates/env.tmpl" "$stage" \
         "KIND=$EP_KIND" "DOMAIN=$domain" "LABEL=$label" "REPOSITORY=$EV_REPOSITORY" "VERSION=$(rt_app_version "$domain" "$label")" \
-        "CACHE_DIR=$(rt_cache_dir "$domain" "$label" "$release")" "CACHE_TTL_SECONDS=900" "REQUIRE_CHECKSUMS=${EV_REQUIRE_CHECKSUMS:-true}" \
+        "CACHE_DIR=$(rt_cache_dir "$domain" "$label" "$release")" "CACHE_TTL_SECONDS=900" "REQUIRE_CHECKSUMS=false" \
         "APP_LOG=$(rt_app_log "$domain" "$label")" "ENV_PREFIX=$RM_ENV_PREFIX" "ACCESS_MODE=$EP_ACCESS_MODE" \
         "DEFAULT_TRANSLATION=${EV_DEFAULT_TRANSLATION:-kjv}" "ALLOWED_TRANSLATIONS=$EV_ALLOWED_TRANSLATIONS" \
         "CACHE_SECONDS=${EV_CACHE_TTL:-$RM_CACHE_SECONDS}" "WORKERS=${EV_WORKERS:-$RM_WORKERS}" \
@@ -749,10 +754,10 @@ type_runtime_status() {
         printf '  Workers   : %s x %s threads; warm: %s\n' "$(ep_version_get "$domain" "$label" WORKERS)" "$(ep_version_get "$domain" "$label" THREADS)" "$(ep_version_get "$domain" "$label" WARM_TRANSLATIONS "-")"
         printf '  App log   : %s\n' "$(rt_app_log "$domain" "$label")"
         if [[ -S "$socket" ]]; then
-            printf '  Liveness  : %s\n' "$(curl --silent --max-time 5 --unix-socket "$socket" http://localhost/healthz 2>/dev/null || echo unreachable)"
-            printf '  Readiness : %s\n' "$(curl --silent --max-time 5 --unix-socket "$socket" http://localhost/readyz 2>/dev/null || echo unreachable)"
+            printf '  Liveness  : %s\n' "$(curl --silent --max-time 5 --unix-socket "$socket" http://localhost/healthz 2>/dev/null | ui_health_text || echo unreachable)"
+            printf '  Readiness : %s\n' "$(curl --silent --max-time 5 --unix-socket "$socket" http://localhost/readyz 2>/dev/null | ui_health_text || echo unreachable)"
         fi
-        if sd_available; then "$GB_SYSTEMCTL" show "$unit.service" --no-pager --property=MainPID,ActiveEnterTimestamp,MemoryCurrent,TasksCurrent,NRestarts 2>/dev/null | sed 's/^/    /'; fi
+        if sd_available; then "$GB_SYSTEMCTL" show "$unit.service" --no-pager --property=MainPID,ActiveEnterTimestamp,MemoryCurrent,TasksCurrent,NRestarts 2>/dev/null | ui_service_text; fi
     done < <(type_runtime_endpoints "$domain")
 }
 
@@ -840,6 +845,7 @@ type_runtime_render_docs() {
 rt_record_endpoint() {
     local domain="$1" label="$2" version="$3" repository="$4" warm="$5" python="${6:-}" conf
     rt_manifest_load "$(ep_get "$domain" KIND)" "$version"
+    rt_validate_repository "$repository" "$version" || return 1
     conf="$(ep_version_conf "$domain" "$label")"
     gb_ensure_dir "$(ep_versions_dir "$domain")" 0750 || return 1
     cfg_set "$conf" LABEL "$label"
@@ -854,7 +860,7 @@ rt_record_endpoint() {
     cfg_set "$conf" DEFAULT_TRANSLATION kjv
     cfg_set "$conf" DEFAULT_REFERENCE "Mat7:7"
     cfg_set "$conf" ALLOWED_TRANSLATIONS ""
-    cfg_set "$conf" REQUIRE_CHECKSUMS true
+    cfg_set "$conf" REQUIRE_CHECKSUMS false
     cfg_set "$conf" CACHE_TTL "$RM_CACHE_SECONDS"
     cfg_set "$conf" PYTHON_VERSION "$(py_resolve_version "${python:-auto}")"
     chmod 0640 "$conf" 2>/dev/null || true
@@ -888,7 +894,7 @@ type_runtime_create() {
     gb_valid_endpoint_label "$label" || gb_die "Invalid endpoint label: $label"
     existing="$(rt_kind_deployed_on "$kind")"
     [[ -z "$existing" ]] || gb_die "The $kind service is already deployed on $existing (one domain per kind; add versions to it instead)."
-    [[ "$repository" == /* || "$repository" == http://* || "$repository" == https://* ]] || gb_die "Repository must be an absolute path or a URL: $repository"
+    rt_validate_repository "$repository" "$version" || return 1
     if [[ -n "$warm" ]]; then
         [[ "$warm" =~ ^[a-z0-9_-]+(,[a-z0-9_-]+)*$ ]] || gb_die "Invalid warm-up translation list: $warm"
     fi
@@ -904,7 +910,7 @@ rt_add_endpoint() {
     rt_check_new_endpoint "$domain" "$version" "$version" || return 1
     [[ -n "$repository" ]] || repository="$(rt_default_repository "$version")"
     [[ -n "$repository" ]] || repository="$(ep_version_get "$domain" "$(type_runtime_default_endpoint "$domain")" REPOSITORY)"
-    [[ "$repository" == /* || "$repository" == http://* || "$repository" == https://* ]] || { gb_warn "Repository must be an absolute path or a URL: $repository"; return 1; }
+    rt_validate_repository "$repository" "$version" || return 1
     [[ -z "$warm" || "$warm" =~ ^[a-z0-9_-]+(,[a-z0-9_-]+)*$ ]] || { gb_warn "Invalid warm-up translation list: $warm"; return 1; }
     [[ -z "$translation" ]] || gb_valid_translation "$translation" || { gb_warn "Invalid default translation: $translation"; return 1; }
     [[ -z "$checksums" || "$checksums" == true || "$checksums" == false ]] || { gb_warn "REQUIRE_CHECKSUMS is true or false"; return 1; }
@@ -913,7 +919,7 @@ rt_add_endpoint() {
     rt_record_endpoint "$domain" "$version" "$version" "$repository" "$warm" "$python" || return 1
     [[ -z "$translation" ]] || ep_version_set "$domain" "$version" DEFAULT_TRANSLATION "$translation"
     [[ -z "$reference" ]] || ep_version_set "$domain" "$version" DEFAULT_REFERENCE "$reference"
-    [[ -z "$checksums" ]] || ep_version_set "$domain" "$version" REQUIRE_CHECKSUMS "$checksums"
+    [[ "$checksums" != true ]] || gb_warn "Local scripture does not require checksum files; --require-checksums is retained for compatibility."
     if ! endpoint_apply "$domain"; then
         gb_warn "The new endpoint could not be deployed; its record stays so you can fix the cause and re-apply, or remove it."
         return 1
@@ -981,7 +987,7 @@ rt_resolve_label() {
 
 # --- deploy ------------------------------------------------------------------
 type_runtime_deploy_cli() {
-    local domain="" kind="" version="" repository="" mode="" warm="" checksums=true default_translation="" default_reference="" python="" label=""
+    local domain="" kind="" version="" repository="" mode="" warm="" checksums=false default_translation="" default_reference="" python="" label=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --domain) domain="$2"; shift 2 ;;
@@ -1008,10 +1014,11 @@ type_runtime_deploy_cli() {
     mode="${mode:-$(gb_global DEFAULT_ACCESS_MODE metered)}"
     [[ -n "$warm" ]] || warm="$RM_WARM_TRANSLATIONS"
     [[ -n "$repository" ]] || repository="$(rt_default_repository "$version")"
-    [[ -n "$repository" ]] || gb_die "No static domain provides version $version; pass --repository PATH"
+    [[ -n "$repository" ]] || gb_die "No synced local static endpoint provides $version; sync it first or pass --repository PATH containing $version/"
+    [[ "$checksums" == true || "$checksums" == false ]] || gb_die "--require-checksums must be true or false"
+    [[ "$checksums" != true ]] || gb_warn "Local scripture does not require checksum files; --require-checksums is retained for compatibility."
     [[ -z "$python" ]] || python="$(py_resolve_version "$python")"
-    type_runtime_create "$domain" "$kind" "$version" "$repository" "$mode" "$warm" "$label" "$python"
-    [[ "$checksums" == false ]] && ep_version_set "$domain" "$label" REQUIRE_CHECKSUMS false
+    type_runtime_create "$domain" "$kind" "$version" "$repository" "$mode" "$warm" "$label" "$python" || return 1
     if [[ -n "$default_translation" ]]; then
         gb_valid_translation "$default_translation" || gb_die "Invalid default translation: $default_translation"
         ep_version_set "$domain" "$label" DEFAULT_TRANSLATION "$default_translation"
@@ -1020,17 +1027,63 @@ type_runtime_deploy_cli() {
     type_runtime_deploy_finish "$domain"
 }
 
-# The data root of the first static domain that serves VERSION.
-rt_default_repository() {
-    local version="$1" domain
-    while read -r domain; do
+# Available local roots from the registry. Follow the published path, not a
+# release directory, so the librarian sees each successful static sync.
+# Root endpoints qualify when their published tree contains VERSION/.
+rt_repository_candidates() {
+    local version="$1" domain label root
+    while IFS= read -r domain; do
         [[ -n "$domain" ]] || continue
-        if ep_version_exists "$domain" "$version"; then
-            ep_data_dir "$domain"
-            return 0
-        fi
+        [[ "$(ep_get "$domain" ENABLED true)" == true ]] || continue
+        for label in "$version" "$GB_ROOT_LABEL"; do
+            ep_version_exists "$domain" "$label" || continue
+            [[ "$(ep_version_get "$domain" "$label" ENABLED true)" == true ]] || continue
+            if [[ "$label" == "$GB_ROOT_LABEL" ]]; then
+                root="$(ep_version_path "$domain" "$label")"
+            else
+                root="$(ep_data_dir "$domain")"
+            fi
+            if rt_validate_repository "$root" "$version" 2>/dev/null; then
+                printf '%s\t%s (%s)\n' "$root" "$domain" "$(pages_label_text "$label")"
+            fi
+        done
     done < <(ep_list_by_type static)
+}
+
+rt_default_repository() {
+    local root description
+    while IFS=$'\t' read -r root description; do
+        [[ -n "$root" ]] || continue
+        printf '%s\n' "$root"
+        return 0
+    done < <(rt_repository_candidates "$1")
     return 0
+}
+
+# All menu entry points use the same picker and availability check.
+rt_select_repository() {
+    local version="$1" current="${2:-}" root description choice current_listed=false
+    local -a items=()
+    while IFS=$'\t' read -r root description; do
+        [[ -n "$root" ]] || continue
+        items+=("$root" "$description · reads $root/$version")
+        [[ "$root" != "$current" ]] || current_listed=true
+    done < <(rt_repository_candidates "$version")
+    if [[ -n "$current" && "$current_listed" == false ]] && rt_validate_repository "$current" "$version" 2>/dev/null; then
+        items=("$current" "Current folder · reads $current/$version" "${items[@]}")
+    fi
+    items+=(manual "Choose another existing local folder")
+    choice="$(ui_menu "Local scripture for $version" "Select the root containing $version/. Only synced, available local folders can be used. If none are listed, sync a static endpoint first or enter an existing local root." "${items[@]}")" || return 1
+    if [[ "$choice" == manual ]]; then
+        root="$(ui_input "Local scripture folder" "Absolute local root containing $version/. The folder must already exist; remote API URLs cannot be used." "$current")" || return 1
+    else
+        root="$choice"
+    fi
+    if ! rt_validate_repository "$root" "$version"; then
+        ui_msg "Local scripture unavailable" "Cannot set up this runtime endpoint until $version/ exists below the selected local root. Sync the static endpoint first, then try again."
+        return 1
+    fi
+    printf '%s\n' "$root"
 }
 
 type_runtime_deploy_interactive() {
@@ -1055,18 +1108,14 @@ type_runtime_deploy_interactive() {
     if ui_yesno "Domain root" "Serve $version at the domain root, https://$domain/{translation}/..., instead of under https://$domain/$version/?\n\nA domain serving its root cannot add other versions later; version folders can." no; then
         label="$GB_ROOT_LABEL"
     fi
-    repository="$(rt_default_repository "$version")"
-    repository="$(ui_input "Scripture files" "Folder holding the Bible files (must contain $version/), usually a static domain's data root" "${repository:-$GB_SRV/api.getbible.net}")" || return 1
-    if [[ "$repository" == /* && ! -d "$repository/$version" ]]; then
-        ui_yesno "Scripture files" "$repository does not contain $version/ yet. The $kind service reads its files from there and cannot pass readiness until they exist: deploy the static domain that provides them and run its first sync first.\n\nContinue anyway? (The deployment will fail readiness and can be completed later with Re-apply configuration.)" no || return 1
-    fi
+    repository="$(rt_select_repository "$version")" || return 1
     mode="$(endpoint_prompt_access_mode)" || return 1
     warm="$RM_WARM_TRANSLATIONS"
     if [[ "$kind" == search ]]; then
         warm="$(ui_input "Warm-up" "Translations to index at start (comma separated)" "$warm")" || return 1
     fi
     cfmode="$(endpoint_prompt_cloudflare_mode "$domain")" || return 1
-    type_runtime_create "$domain" "$kind" "$version" "$repository" "$mode" "$warm" "$label"
+    type_runtime_create "$domain" "$kind" "$version" "$repository" "$mode" "$warm" "$label" || return 1
     ep_set "$domain" CLOUDFLARE_MODE "$cfmode"
     type_runtime_deploy_finish "$domain"
 }
@@ -1154,6 +1203,11 @@ rt_setting_allowed() {
 rt_set_setting() {
     local domain="$1" label="$2" key="$3" value="$4" backup status=0 conf
     rt_setting_allowed "$key" || return 1
+    if [[ "$key" == REQUIRE_CHECKSUMS ]]; then
+        [[ "$value" == true || "$value" == false ]] || { gb_warn "REQUIRE_CHECKSUMS must be true or false"; return 1; }
+        [[ "$value" != true ]] || gb_warn "Local scripture does not require checksum files; this legacy setting stays false."
+        value=false
+    fi
     ep_version_exists "$domain" "$label" || { gb_warn "$domain has no endpoint $label"; return 1; }
     conf="$(ep_version_conf "$domain" "$label")"
     backup="$(mktemp "$(gb_tmpdir)/runtime-settings.XXXXXX")" || return 1
@@ -1249,12 +1303,14 @@ rt_settings_menu() {
     cp -p -- "$backup" "$stage" || return 1
     for key in WORKERS:"Gunicorn workers" THREADS:"Threads per worker" WARM_TRANSLATIONS:"Translations to warm at start (comma separated, search only)" \
                DEFAULT_TRANSLATION:"Default translation" DEFAULT_REFERENCE:"Default reference (query only)" \
-               ALLOWED_TRANSLATIONS:"Allowed translations (comma separated, empty for all)" REPOSITORY:"Scripture files folder" \
-               REQUIRE_CHECKSUMS:"Require .sha checksums for every file (true/false)"; do
+               ALLOWED_TRANSLATIONS:"Allowed translations (comma separated, empty for all)"; do
         text="${key#*:}"; key="${key%%:*}"
         value="$(ui_input "$domain $label" "$text" "$(cfg_get "$stage" "$key")")" || { rm -f -- "$backup" "$stage"; return 0; }
         cfg_set "$stage" "$key" "$value" || return 1
     done
+    value="$(rt_select_repository "$(rt_app_version "$domain" "$label")" "$(cfg_get "$stage" REPOSITORY)")" || { rm -f -- "$backup" "$stage"; return 0; }
+    cfg_set "$stage" REPOSITORY "$value" || return 1
+    cfg_set "$stage" REQUIRE_CHECKSUMS false || return 1
     gb_install_file "$stage" "$conf" 0640 || return 1
     if ! rt_validate_settings "$domain" "$label"; then
         gb_install_file "$backup" "$conf" 0640 || return 1
@@ -1288,8 +1344,7 @@ rt_versions_menu() {
                     ui_msg "Invalid" "$version cannot be added: it is not a version the $kind service implements, or $domain already serves it."
                     continue
                 fi
-                repository="$(rt_default_repository "$version")"
-                repository="$(ui_input "Scripture files" "Folder holding the Bible files (must contain $version/)" "${repository:-$(ep_version_get "$domain" "$default" REPOSITORY)}")" || continue
+                repository="$(rt_select_repository "$version" "$(ep_version_get "$domain" "$default" REPOSITORY)")" || continue
                 warm=""
                 if [[ "$kind" == search ]]; then
                     rt_manifest_load "$kind" "$version"

@@ -10,9 +10,30 @@ each per server:
 | `query` | `query.getbible.net` | `GET /v2/{translation}/{reference}` | `select()` |
 | `search` | `search.getbible.net` | `GET|POST /v2/{translation}/{search string}` | `search()` (and `select()` when the string is a reference) |
 
-Both read the Bible files from a local folder, normally the data root of the
-static domain that serves `api.getbible.net`, so nothing calls the public
-API over the network.
+Both read the Bible files from an existing local folder, normally the data
+root of the static domain that serves `api.getbible.net`. Remote repository
+URLs are refused; no runtime scripture request calls the public API.
+
+Sync the matching static endpoint before creating a runtime endpoint. For
+v2, choose `/srv/getbible/api.getbible.net` when its scripture is published
+at `/srv/getbible/api.getbible.net/v2/`. The menu lists available, enabled
+static endpoints and shows the actual version folder each choice reads.
+You can also enter an existing absolute local root containing `v2/`.
+Creating a domain, adding a version or changing its repository is refused
+while that version directory is missing. Future versions use the version
+declared by their implementation, with the same local-folder requirement.
+The selected path stays on the static endpoint's published symlink so new
+syncs remain visible; it never pins the runtime to one retained release.
+
+The upstream repositories are trusted. Setup checks only that the selected
+version directory is available. It does not scan scripture content or
+revalidate checksums. Runtime checksum files are no longer required,
+including when an older installation recorded `REQUIRE_CHECKSUMS=true`.
+The legacy CLI flag and setting are accepted for compatibility and stay
+false; the setting is no longer offered in the menu. The pinned librarian
+still checks any published checksums it encounters while loading data and
+uses content hashes for its cache; removing that library behavior requires
+a public librarian option.
 
 ## Endpoints: one service per version
 
@@ -76,9 +97,11 @@ endpoints added to such a domain use the versioned layout.
 
 - The search string is the last path segment; `/v2/{search string}` without
   a translation redirects to the default translation.
-- Filters travel as query parameters or as a JSON body; GET and POST both
-  work (`Content-Type: application/json` for bodies). Precedence: path, then
-  query string, then body, then the endpoint's configured defaults.
+- GET accepts filters in the URL query string. POST accepts the same query
+  parameters and/or a JSON body (`Content-Type: application/json`). Both
+  methods use the same search implementation. Precedence: path, then query
+  string, then POST body, then the endpoint's configured defaults. GET does
+  not require a body; omit filters to use their defaults.
 - `q` and `translation` may travel in the query string or body when they are
   not in the path. A request without a search string answers `400
   missing_search`. Unknown or repeated parameters answer `400`.
@@ -96,10 +119,12 @@ translation's actual scripture can be read). Every endpoint publishes its
 documentation page at `/vN/` and its OpenAPI document at `/vN/openapi.json`;
 the domain page at `/` lists the endpoints and `/versions.json` maps them to
 their documents (see [PAGES.md](PAGES.md)). Search additionally exposes
-`/probez`, which opens the search corpus and executes a bounded search
-through the librarian; deployment checks it before activation. Use it for
-deliberate monitoring, rather than repeatedly invoking the more expensive
-check as liveness.
+`/probez` on its private Unix socket, which opens the search corpus and
+executes a bounded search through the librarian; deployment checks it before
+activation. nginx does not publish this probe. Public `/healthz` and
+`/readyz` remain available, as do documentation and OpenAPI files, without
+an API token. Readiness failures use an `application/problem+json` response
+with status 503 and `Retry-After: 5`.
 
 ## How an endpoint is deployed
 
@@ -168,8 +193,8 @@ updates, Python selection, rollback, logs and settings, each asking which
 endpoint when there is more than one, and has an Endpoints screen to add or
 remove a version and choose the default. Supported `set` keys: `WORKERS`,
 `THREADS`, `WARM_TRANSLATIONS`, `DEFAULT_TRANSLATION`, `DEFAULT_REFERENCE`,
-`ALLOWED_TRANSLATIONS`, `REPOSITORY`, `REQUIRE_CHECKSUMS`, `CACHE_TTL`. Values
-are validated before activation.
+`ALLOWED_TRANSLATIONS`, `REPOSITORY`, `CACHE_TTL`. Values are checked before
+activation. `REQUIRE_CHECKSUMS` is a compatibility setting fixed to `false`.
 
 `update DOMAIN` preserves each endpoint's selected exact Python patch while
 applying checked-out code and dependency changes. Explicit `runtime DOMAIN
