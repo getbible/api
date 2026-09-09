@@ -2,32 +2,32 @@
 
 ## Update the manager script
 
-Update the manager's source checkout with one command:
+When improvements are published, update the manager's checkout with one
+command:
 
 ```sh
 cd /opt/getbible/api
 sudo ./getbible.sh self-update
 ```
 
-The menu offers the same operation as **Update manager script** and exits
-after a successful update. `self-update` fetches the checked-out branch's
-configured upstream and advances the checkout by fast-forward only. It updates
-the whole manager repository, including its script, libraries and templates;
-the next invocation loads the updated code. It does not apply configuration,
-install helpers, restart services or redeploy hosted domains, and accepts no
-domain argument. Git uses the SSH release/deploy key configured during
-[installation](INSTALL.md#1-clone). A manager lock prevents concurrent manager
-commands during the source update.
+The menu offers the same as **Update manager script** and exits after a
+successful update. `self-update` fetches the checked-out branch's upstream
+over the clone's own remote, using root's deploy key from `/root/.ssh/config`
+(see [INSTALL.md](INSTALL.md#1-clone)), and advances the checkout by
+fast-forward only. It updates the whole repository (script, libraries,
+templates); the next invocation runs the updated code. It does not apply
+configuration, install helpers, restart services or redeploy hosted domains,
+and takes no domain argument. The management lock keeps other manager
+commands out while it runs.
 
-The source update stops if Git is unavailable, the installation is not
-a Git checkout, the checkout has local modifications (including untracked
-files), HEAD is detached, the branch has no remote upstream, or a fast-forward
-is not possible. Authentication and network failures also stop the operation.
-Resolve the reported problem and retry; the updater does not discard local
-changes or merge divergent history. `--yes` does not bypass these checks.
-
-Use `sudo ./getbible.sh self-update --dry-run` to report the planned source
-update without fetching or changing the checkout.
+The update stops, changing nothing, if git is missing, the installation is
+not a Git checkout, the checkout has local modifications or untracked files,
+HEAD is detached, the branch has no upstream, or a fast-forward is not
+possible; so do authentication and network failures. Resolve the reported
+problem and run it again: the updater never discards local changes or merges
+divergent history, and `--yes` does not bypass these checks. `sudo
+./getbible.sh self-update --dry-run` reports what would be fetched without
+contacting the remote.
 
 ## Apply changes to hosted domains
 
@@ -104,44 +104,29 @@ under `/var/backups/getbible/`.
 
 ### Existing HTTPS Git checkout
 
-Prepare and verify the root-owned release/deploy key as described in
-[INSTALL.md](INSTALL.md#1-clone), then change the repository URL and persist
-the key selection. These commands assume the remote is named `origin`:
+Set up root's deploy key and `/root/.ssh/config` as in
+[INSTALL.md](INSTALL.md#1-clone), then point the clone at the SSH address and
+pull once by hand; that first pull brings in the `self-update` command:
 
 ```sh
 cd /opt/getbible/api
 sudo git remote set-url origin git@github.com:getbible/api.git
-sudo git config core.sshCommand 'ssh -i /root/.ssh/getbible-api -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes'
-sudo git status --short
-sudo git branch -vv
 sudo git pull --ff-only
 ```
 
-The first manual pull installs the new `self-update` command on older
-checkouts. Afterwards, use that command or **Update manager script** in the
-menu. This migration updates only the source checkout. Keep local source
-changes out of the production checkout; reconcile any edits before pulling. If the
-branch has no upstream, configure it to track the intended remote branch
-before updating (for example, `sudo git branch --set-upstream-to=origin/main
-main` when `main` is your deployment branch). Existing clones with a
-different remote name should configure that remote instead.
+From then on use `sudo ./getbible.sh self-update`. A checkout with local
+edits must be reconciled first; if the branch has no upstream, set one
+(`sudo git branch --set-upstream-to=origin/main main`).
 
-### Archive or copied installation without `.git`
+### Copied installation without `.git`
 
-Keep the existing directory as a backup and clone into a separate empty
-directory, for example `/opt/getbible/api-git`, using the SSH clone command in
-[INSTALL.md](INSTALL.md#1-clone) with that destination. Use `self-update` from
-the new checkout for future manager updates. Use this new path for other
-commands and any operator-created shortcuts or scheduled commands. Do not
-copy the old source tree over the new
-clone, or store private keys in it.
-
-The manager's registered domains and credentials remain in `/etc/getbible`,
-state remains in `/var/lib/getbible`, and static/runtime data and releases stay
-in their existing paths. Preserve these directories and any custom external
-data paths; cloning the manager does not replace them. If you kept custom
-assets or data inside the old source directory, keep that directory until
-those files and any configuration references have been migrated separately.
+Keep the old directory as a backup and clone afresh into an empty directory
+(for example `/opt/getbible/api-git`) with the clone command in
+[INSTALL.md](INSTALL.md#1-clone); use the new path from then on, including in
+any shortcuts or scheduled commands, and do not copy the old tree over it.
+Registered domains and credentials stay in `/etc/getbible`, state in
+`/var/lib/getbible`, and data and releases in their existing paths; cloning
+the manager touches none of them.
 
 ### Managed domains
 

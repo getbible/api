@@ -45,7 +45,7 @@ update_pull() {
         return 0
     fi
     gb_step "Fetching manager changes from $remote $ref (fast-forward only)"
-    # Use Git's saved remote and SSH configuration, including the release key.
+    # Use Git's saved remote and root's SSH configuration (the deploy key).
     # Explicit fetch/merge also avoids an operator's pull.rebase preference.
     git -C "$GB_REPO_DIR" fetch -- "$remote" "$ref" || return 1
     git -C "$GB_REPO_DIR" merge --ff-only FETCH_HEAD
