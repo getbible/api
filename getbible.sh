@@ -104,6 +104,8 @@ Observability
   analytics [--window today|24h|7d|30d|all] [--domain D] [--json]
 
 Platform
+  self-update                            pull the manager script and supporting files
+                                         from this checkout's Git upstream (no domain apply)
   settings [deploy-mode live|staged | cert-method auto|http|dns-cloudflare | certbot-email ADDRESS
            | public-ipv4 [ADDRESS] | public-ipv6 [ADDRESS]]
                                          show or change the defaults used by deploy and go-live
@@ -433,6 +435,11 @@ main() {
         settings) gb_system_init; cmd_settings "$@" ;;
         apply) gb_system_init; endpoint_apply "${1:?domain}" ;;
         update) gb_system_init; if [[ -n "${1:-}" ]]; then endpoint_apply "$1"; else update_all; fi ;;
+        self-update)
+            [[ $# == 0 ]] || gb_die "self-update takes no arguments (use --dry-run to preview)."
+            gb_require_root
+            if [[ "$GB_DRY_RUN" != true ]]; then gb_management_lock || return 1; fi
+            update_manager ;;
         runtime) cmd_runtime "$@" ;;
         remove)
             gb_system_init

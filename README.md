@@ -30,8 +30,8 @@ vhost and one certificate; its **endpoints** are its version folders
   the menu.
 - **Operations**: JSON logs of everything, size-based rotation with
   retention, analytics with total calls and unique callers, Telegram
-  notifications for every change, Cloudflare integration, one-command
-  updates after `git pull`, and a guided migration from a legacy setup.
+  notifications for every change, Cloudflare integration, manager updates
+  from the menu or one command, and a guided migration from a legacy setup.
 - **Staged deployments**: a domain can be installed and verified on a
   server its DNS does not point to yet, with a placeholder certificate and
   no automatic public change; **Go live** later takes it over one domain at
@@ -40,12 +40,26 @@ vhost and one certificate; its **endpoints** are its version folders
   HTTP-01 or, with the stored Cloudflare token, DNS-01 before any DNS
   change. This is how a replacement server is built without downtime.
 
+Prepare the server's release/deploy key and verify GitHub's SSH host key as
+described in [Installing on a server](docs/INSTALL.md#1-clone). With the key
+at `/root/.ssh/getbible-api`, install from Git over SSH:
+
 ```sh
-sudo git clone https://github.com/getbible/api.git /opt/getbible/api
+sudo apt update
+sudo apt install -y git openssh-client
+sudo git clone -c core.sshCommand='ssh -i /root/.ssh/getbible-api -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes' \
+  git@github.com:getbible/api.git /opt/getbible/api
 cd /opt/getbible/api
 sudo ./getbible.sh install-deps
 sudo ./getbible.sh
 ```
+
+Later, run `sudo ./getbible.sh self-update` from the checkout, or choose
+**Update manager script** in the menu. This fetches the branch's configured
+upstream and fast-forwards the manager's source checkout. The next invocation
+loads the updated script and libraries. Hosted domains change only when you
+separately run an action such as `sudo ./getbible.sh update [DOMAIN]`. See
+[Updating and recovery](docs/UPDATING.md) for rollout and migration details.
 
 Ubuntu **24.04 and 26.04** are the deployment targets. The manager detects the
 OS, architecture and capabilities; Debian/Ubuntu prerequisites use `apt`.

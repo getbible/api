@@ -8,8 +8,10 @@ Read this before changing anything. It applies to the whole repository.
 server: static domains (file trees synced from git repositories and served
 by nginx) and runtime domains (the `query` and `search` services built on
 the getBible librarian, run by gunicorn behind nginx). Everything the tool
-installs is rendered from `src/` and recorded, so `git pull` followed by
-`getbible.sh update` brings every domain to the current templates.
+installs is rendered from `src/` and recorded. `getbible.sh self-update`
+fetches the tracked upstream into the manager's source checkout only;
+the next invocation loads the new code. Separately, `getbible.sh update`
+applies the current checkout to hosted domains without fetching.
 
 ## Vocabulary
 

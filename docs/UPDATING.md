@@ -1,19 +1,51 @@
 # Updating and recovery
 
-Pull reviewed repository changes, then apply them to one domain first:
+## Update the manager script
+
+Update the manager's source checkout with one command:
 
 ```sh
 cd /opt/getbible/api
-sudo git pull --ff-only
+sudo ./getbible.sh self-update
+```
+
+The menu offers the same operation as **Update manager script** and exits
+after a successful update. `self-update` fetches the checked-out branch's
+configured upstream and advances the checkout by fast-forward only. It updates
+the whole manager repository, including its script, libraries and templates;
+the next invocation loads the updated code. It does not apply configuration,
+install helpers, restart services or redeploy hosted domains, and accepts no
+domain argument. Git uses the SSH release/deploy key configured during
+[installation](INSTALL.md#1-clone). A manager lock prevents concurrent manager
+commands during the source update.
+
+The source update stops if Git is unavailable, the installation is not
+a Git checkout, the checkout has local modifications (including untracked
+files), HEAD is detached, the branch has no remote upstream, or a fast-forward
+is not possible. Authentication and network failures also stop the operation.
+Resolve the reported problem and retry; the updater does not discard local
+changes or merge divergent history. `--yes` does not bypass these checks.
+
+Use `sudo ./getbible.sh self-update --dry-run` to report the planned source
+update without fetching or changing the checkout.
+
+## Apply changes to hosted domains
+
+When you choose to apply the checked-out templates and application changes,
+run the separate domain update operation. To roll out to one domain first:
+
+```sh
+cd /opt/getbible/api
 sudo ./getbible.sh doctor
 sudo ./getbible.sh update query.getbible.net
 sudo ./getbible.sh status query.getbible.net
 sudo ./getbible.sh update
 ```
 
-The menu also offers "git pull first, then update" and refuses to pull a dirty
-checkout. `update DOMAIN` applies that domain (every endpoint of it); `update`
-processes all registered domains and reports failures. Manager mutations are
+Plain `update DOMAIN` applies that domain (every endpoint of it) from the
+current checkout without fetching; `update` processes all registered domains
+and reports failures. After trying one domain, plain `update` applies the same
+checkout to the rest without fetching newer commits. Manager mutations are
 locked to prevent concurrent commands from interleaving configuration changes.
 Staged domains (see `NEW_SERVER.md`) are updated like the others and stay
 staged: an update never requests a certificate or changes DNS for them. An
@@ -24,6 +56,7 @@ operator has taken over are left alone (`PAGES.md`).
 
 | Operation | Result |
 | --- | --- |
+| `self-update` | Fetches the current branch's upstream and fast-forwards the clean manager checkout. The next invocation loads the updated code; hosted domains are not applied. |
 | `update [DOMAIN]` | Applies checked-out templates, helpers, configuration, documentation and changed runtime code/dependency pins. Retains the selected exact Python patch. |
 | `runtime DOMAIN update` | Rebuilds application dependencies and adopts the latest reviewed patch of each endpoint's selected Python family. `runtime DOMAIN v3 update` does it for one endpoint. |
 | `runtime DOMAIN [vN] update --python 3.14` | Explicitly selects the catalog's current 3.14 patch and creates a new runtime release. An exact catalog patch is also accepted. |
@@ -69,7 +102,51 @@ under `/var/backups/getbible/`.
 
 ## Migrate an existing installation
 
-Run the same pull, `doctor`, and per-domain `update` commands above. Existing
+### Existing HTTPS Git checkout
+
+Prepare and verify the root-owned release/deploy key as described in
+[INSTALL.md](INSTALL.md#1-clone), then change the repository URL and persist
+the key selection. These commands assume the remote is named `origin`:
+
+```sh
+cd /opt/getbible/api
+sudo git remote set-url origin git@github.com:getbible/api.git
+sudo git config core.sshCommand 'ssh -i /root/.ssh/getbible-api -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes'
+sudo git status --short
+sudo git branch -vv
+sudo git pull --ff-only
+```
+
+The first manual pull installs the new `self-update` command on older
+checkouts. Afterwards, use that command or **Update manager script** in the
+menu. This migration updates only the source checkout. Keep local source
+changes out of the production checkout; reconcile any edits before pulling. If the
+branch has no upstream, configure it to track the intended remote branch
+before updating (for example, `sudo git branch --set-upstream-to=origin/main
+main` when `main` is your deployment branch). Existing clones with a
+different remote name should configure that remote instead.
+
+### Archive or copied installation without `.git`
+
+Keep the existing directory as a backup and clone into a separate empty
+directory, for example `/opt/getbible/api-git`, using the SSH clone command in
+[INSTALL.md](INSTALL.md#1-clone) with that destination. Use `self-update` from
+the new checkout for future manager updates. Use this new path for other
+commands and any operator-created shortcuts or scheduled commands. Do not
+copy the old source tree over the new
+clone, or store private keys in it.
+
+The manager's registered domains and credentials remain in `/etc/getbible`,
+state remains in `/var/lib/getbible`, and static/runtime data and releases stay
+in their existing paths. Preserve these directories and any custom external
+data paths; cloning the manager does not replace them. If you kept custom
+assets or data inside the old source directory, keep that directory until
+those files and any configuration references have been migrated separately.
+
+### Managed domains
+
+To apply changes to hosted domains after updating the manager, separately run
+`doctor` and the per-domain `update` commands above. Existing
 single-service runtime installations are captured as rollback generations;
 the first successful update moves them to owned Python and isolated deployment
 generations. An existing exact managed Python version remains selected on
