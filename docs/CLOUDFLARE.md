@@ -96,8 +96,23 @@ Origin side, for proxied hosts:
 - `real_ip` restoration from Cloudflare's published ranges, refreshed daily
   by `getbible-cloudflare-ips.timer`, so budgets and unique-caller counts see
   real clients;
-- optional authenticated origin pulls: the origin verifies Cloudflare's
-  client certificate and nobody else can talk to it directly.
+- optional authenticated origin pulls (off by default): the selected nginx
+  domain verifies Cloudflare's client certificate on HTTPS.
+
+The origin-pulls option uses Cloudflare's shared global AOP certificate and
+its matching CA at nginx. Explicitly enabling a domain enables the
+zone-wide `tls_client_auth` prerequisite. Applying a domain with this option
+enabled also reapplies that prerequisite, including when upgrading an older
+installation. A failed API call prevents enabling the domain setting; a
+failed prerequisite or CA download during apply is reported as a failure.
+
+Disabling origin pulls in the domain menu removes only that domain's nginx
+requirement on the next apply. It leaves Cloudflare's shared feature enabled
+for other hosts. The separate CLI command
+`getbible.sh cloudflare origin-pulls DOMAIN on|off` explicitly changes the
+zone-wide shared feature, so its `off` action affects other hosts using it.
+The helper does not change custom zone-level or per-hostname certificates.
+See [Cloudflare's global AOP setup](https://developers.cloudflare.com/ssl/origin-configuration/authenticated-origin-pull/set-up/global/).
 
 Zone-wide toggles that cannot be scoped to a host (Bot Fight Mode off;
 HTTP/3, brotli, TLS 1.2 minimum, always HTTPS) are under System > Cloudflare

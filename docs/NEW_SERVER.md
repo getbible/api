@@ -206,8 +206,8 @@ sudo env GOLIVE_VERIFY_TIMEOUT=300 GOLIVE_VERIFY_INTERVAL=5 ./getbible.sh go-liv
 ```
 
 These values control deployment checks only; they add no limits or work to
-API requests. Verification observes this server\'s resolver and public route;
-it cannot establish that every client\'s DNS cache has expired. Allow at least
+API requests. Verification observes this server's resolver and public route;
+it cannot establish that every client's DNS cache has expired. Allow at least
 the previous A/AAAA TTL before retiring the old server. Hosts that cannot
 reach their own public address report verification as incomplete so the
 operator can check reachability from another machine.

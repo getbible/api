@@ -8,6 +8,7 @@ import importlib.machinery
 import importlib.util
 import io
 import json
+import subprocess
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -142,6 +143,96 @@ class CloudflareRulesTest(unittest.TestCase):
                 ]) as replace, self.assertRaisesRegex(self.helper.CloudflareError, "permission denied"):
             self.helper.cmd_host_rules_remove("api.example.test")
         self.assertEqual(replace.call_count, 3)
+
+
+class CloudflareOriginPullsTest(unittest.TestCase):
+    def test_explicit_zone_toggle_matches_the_installed_shared_ca(self):
+        helper = load_helper()
+        for state, enabled in (("on", True), ("off", False)):
+            with self.subTest(state=state), \
+                    patch.object(helper, "find_zone", return_value={"id": "zone", "name": "example.test"}), \
+                    patch.object(helper, "request", return_value={"result": {}}) as request:
+                result = helper.cmd_origin_pulls("api.example.test", state)
+            request.assert_called_once_with(
+                "PATCH", "/zones/zone/settings/tls_client_auth", {"value": state}
+            )
+            self.assertEqual(result["authenticated_origin_pulls"], enabled)
+
+    def domain_setting(self, enabled, failure="0"):
+        script = """
+set -eu
+source "$1"
+test_result="$3"
+cf_human() { printf 'remote:%s\\n' "$*"; return "$test_result"; }
+ep_set() { printf 'local:%s\\n' "$*"; }
+ep_state_set() { printf 'state:%s\\n' "$*"; }
+tg_notify() { printf 'notify:%s\\n' "$*"; }
+cloudflare_endpoint_origin_pulls api.example.test "$2"
+"""
+        return subprocess.run(
+            ["bash", "-c", script, "aop-test", str(ROOT / "src/lib/cloudflare.sh"), enabled, failure],
+            text=True, capture_output=True, timeout=10,
+        )
+
+    def test_domain_disable_changes_only_local_requirement(self):
+        result = self.domain_setting("false")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("local:api.example.test CLOUDFLARE_ORIGIN_PULLS false", result.stdout)
+        self.assertNotIn("remote:", result.stdout)
+
+    def test_domain_enable_saves_only_after_remote_success(self):
+        result = self.domain_setting("true")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertLess(
+            result.stdout.index("remote:origin-pulls api.example.test on"),
+            result.stdout.index("local:api.example.test CLOUDFLARE_ORIGIN_PULLS true"),
+        )
+        failed = self.domain_setting("true", "1")
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("state:api.example.test CLOUDFLARE_ERROR", failed.stdout)
+        self.assertNotIn("local:", failed.stdout)
+        self.assertNotIn("notify:", failed.stdout)
+
+    def test_apply_does_not_report_success_after_aop_or_ca_failure(self):
+        script = """
+set -eu
+source "$1"
+test_failure="$2"
+ep_is_live() { return 0; }
+ep_get() {
+    case "$2" in
+        CLOUDFLARE_MODE) printf 'proxied';;
+        ACCESS_MODE) printf 'open';;
+        CLOUDFLARE_ORIGIN_PULLS) printf 'true';;
+        *) printf '%s' "$3";;
+    esac
+}
+cf_enabled() { return 0; }
+cf_public_ipv4() { printf '192.0.2.1'; }
+cf_public_ipv6() { :; }
+cf_human() {
+    if [[ "$1" == origin-pulls && "$test_failure" == api ]]; then return 1; fi
+    return 0
+}
+gb_step() { :; }
+gb_timestamp() { printf '2026-09-09'; }
+ep_state_set() { :; }
+cloudflare_refresh_ips() { return 0; }
+cloudflare_install_origin_ca() {
+    if [[ "$test_failure" == ca ]]; then return 1; fi
+    printf 'unexpected CA download after API failure';
+}
+tg_notify() { printf 'unexpected success notification'; }
+cloudflare_apply api.example.test
+"""
+        for failure in ("api", "ca"):
+            with self.subTest(failure=failure):
+                result = subprocess.run(
+                    ["bash", "-c", script, "aop-test", str(ROOT / "src/lib/cloudflare.sh"), failure],
+                    text=True, capture_output=True, timeout=10,
+                )
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertNotIn("unexpected", result.stdout + result.stderr)
 
 
 class CloudflareOutputTest(unittest.TestCase):
