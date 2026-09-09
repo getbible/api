@@ -14,7 +14,7 @@ sync_state_get() { cfg_get "$(sync_state_file "$1" "$2")" "$3" "${4:-}"; }
 sync_install_tools() {
     gb_ensure_dir "$GB_LIBEXEC" 0755
     gb_install_file "$GB_TOOLS/getbible-sync" "$GB_LIBEXEC/getbible-sync" 0755
-    gb_install_file "$GB_TOOLS/getbible-verify-tree" "$GB_LIBEXEC/getbible-verify-tree" 0755
+    gb_install_file "$GB_TOOLS/getbible-export-tree" "$GB_LIBEXEC/getbible-export-tree" 0755
     gb_install_file "$GB_TOOLS/getbible-notify" "$GB_LIBEXEC/getbible-notify" 0755
 }
 

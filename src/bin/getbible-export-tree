@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+"""Export trusted Git blobs to a fresh static release without revalidating data.
+
+Usage: getbible-export-tree CHECKOUT REVISION SUBPATH RELEASE PREVIOUS EXTENSIONS EXTRA_FILES
+
+Only Git tree metadata is compared with the previous export index. Unchanged
+blobs keep their existing inodes; changed blobs are streamed from Git once.
+The caller owns atomic publication and removal of failed candidates.
+"""
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+
+def export(argv: list[str]) -> tuple[int, int]:
+    checkout, revision, subpath, destination, previous, extensions, extra_files = argv
+    release = Path(destination)
+    if not release.is_dir() or release.is_symlink() or any(release.iterdir()):
+        raise ValueError("export destination must be a fresh, empty directory")
+    parts = Path(subpath).parts
+    if Path(subpath).is_absolute() or ".." in parts:
+        raise ValueError("unsafe source path")
+    subpath = "/".join(part for part in parts if part != ".")
+    tree = revision + (":" + subpath if subpath else "^{tree}")
+    # A missing subdirectory or a symlink used as the source fails here.
+    entries = subprocess.check_output(
+        ["git", "-C", checkout, "ls-tree", "-rz", tree]
+    ).split(b"\0")
+    allowed = {extension.replace(" ", "") for extension in extensions.split(",")}
+    if not allowed or any(re.fullmatch(r"[a-z0-9]+", ext) is None for ext in allowed):
+        raise ValueError("invalid extension")
+    extras = {name.replace(" ", "") for name in extra_files.split(",") if name.strip()}
+    for name in extras:
+        if (re.fullmatch(r"[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*", name) is None
+                or name.startswith(".") or ".." in name or "/." in name):
+            raise ValueError("invalid extra file path")
+
+    old_root = Path(previous) if previous else None
+    old_index = {}
+    if old_root is not None:
+        try:
+            with (old_root / ".export-index.json").open(encoding="utf-8") as handle:
+                old_index = json.load(handle)
+            if not isinstance(old_index, dict):
+                old_index = {}
+        except (OSError, ValueError):
+            # This is an optional reuse cache, not an upstream data validator.
+            old_index = {}
+
+    index = {}
+    changed = 0
+    reader = None
+    try:
+        for entry in entries:
+            if not entry:
+                continue
+            metadata, raw_name = entry.split(b"\t", 1)
+            mode, kind, raw_oid = metadata.split(b" ")
+            name = os.fsdecode(raw_name)
+            path_parts = Path(name).parts
+            if Path(name).is_absolute() or ".." in path_parts:
+                raise ValueError("unsafe repository path")
+            if mode == b"120000":
+                raise ValueError("repository symlinks are forbidden in static exports")
+            if kind != b"blob" or any(part.startswith(".") for part in path_parts):
+                continue
+            if name not in extras and name.rsplit(".", 1)[-1] not in allowed:
+                continue
+            # A suffix must include the dot: a plain file called "json" is not JSON.
+            if name not in extras and "." not in Path(name).name:
+                continue
+            oid = raw_oid.decode("ascii")
+            target = release / name
+            target.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+            old = old_root / name if old_root is not None else None
+            if (old is not None and old_index.get(name) == oid
+                    and old.is_file() and not old.is_symlink()):
+                os.link(old, target)
+            else:
+                if reader is None:
+                    reader = subprocess.Popen(
+                        ["git", "-C", checkout, "cat-file", "--batch"],
+                        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    )
+                reader.stdin.write(raw_oid + b"\n")
+                reader.stdin.flush()
+                header = reader.stdout.readline().rstrip(b"\n").split(b" ")
+                if len(header) != 3 or header[0] != raw_oid or header[1] != b"blob":
+                    raise OSError("Git could not read a requested blob")
+                size = remaining = int(header[2])
+                with target.open("xb") as handle:
+                    while remaining:
+                        block = reader.stdout.read(min(remaining, 1024 * 1024))
+                        if not block:
+                            raise OSError("incomplete Git blob during export")
+                        handle.write(block)
+                        remaining -= len(block)
+                if reader.stdout.read(1) != b"\n":
+                    raise OSError("incomplete Git response during export")
+                target.chmod(0o640)
+                # nginx's ETag uses second-resolution mtime and file size.
+                # Same-size changes in one second must still get a new ETag.
+                if old is not None and old.is_file():
+                    old_stat, new_stat = old.stat(), target.stat()
+                    if old_stat.st_size == size and new_stat.st_mtime_ns // 1_000_000_000 <= old_stat.st_mtime_ns // 1_000_000_000:
+                        os.utime(target, ns=(new_stat.st_atime_ns, old_stat.st_mtime_ns + 1_000_000_000))
+                changed += 1
+            index[name] = oid
+    finally:
+        if reader is not None:
+            reader.stdin.close()
+            reader.stdout.close()
+            result = reader.wait()
+            if result and sys.exc_info()[0] is None:
+                raise OSError(f"Git blob export failed with exit {result}")
+    # Only our reuse metadata is serialized. Repository files remain untouched.
+    with (release / ".export-index.json").open("x", encoding="utf-8") as handle:
+        json.dump(index, handle, ensure_ascii=True, separators=(",", ":"))
+        handle.write("\n")
+    return len(index), changed
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) != 8:
+        sys.stderr.write(__doc__ or "")
+        return 2
+    try:
+        files, changed = export(argv[1:])
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        sys.stderr.write(f"export failed: {error}\n")
+        return 1
+    print(f"{files}\t{changed}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

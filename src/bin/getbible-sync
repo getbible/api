@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Prepare and validate a unique static release while the old release remains
+# Export a trusted repository to a unique release while the old release remains
 # live, then publish through one atomic rename. No nginx reload is required.
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -15,7 +15,7 @@ GB_SYNC_EXTRA_FILES="${GB_SYNC_EXTRA_FILES:-}"
 GB_SYNC_KEEP="${GB_SYNC_KEEP:-2}"
 GB_SYNC_FORCE="${GB_SYNC_FORCE:-0}"
 GB_NOTIFY="${GB_NOTIFY:-/usr/local/lib/getbible/getbible-notify}"
-GB_VERIFY="${GB_VERIFY:-/usr/local/lib/getbible/getbible-verify-tree}"
+GB_EXPORT="${GB_EXPORT:-/usr/local/lib/getbible/getbible-export-tree}"
 
 # "root" is the tree of a domain served without version folders.
 [[ "$GB_SYNC_VERSION" =~ ^(v[1-9][0-9]*|root)$ ]] || { echo 'Invalid version label' >&2; exit 2; }
@@ -62,7 +62,7 @@ mkdir -p "$GB_SYNC_HOME/repos" "$STATE_DIR" "$RELEASES"
 exec 9>"$LOCK"
 flock -n 9 || { log "another sync for $LABEL is running"; exit 0; }
 [[ ! -e "$FORCE_FILE" ]] || GB_SYNC_FORCE=1
-[[ -x "$GB_VERIFY" ]] || { log "required verifier missing or not executable: $GB_VERIFY"; false; }
+[[ -x "$GB_EXPORT" ]] || { log "required exporter missing or not executable: $GB_EXPORT"; false; }
 
 export GIT_SSH_COMMAND="ssh -i $GB_SYNC_HOME/.ssh/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=$GB_SYNC_HOME/.ssh/known_hosts -o StrictHostKeyChecking=yes -o BatchMode=yes"
 export GIT_TERMINAL_PROMPT=0
@@ -109,50 +109,18 @@ else
 fi
 git -C "$CHECKOUT" fetch --quiet --depth 1 origin "$FETCH_REF"
 HEAD_SHA="$(git -C "$CHECKOUT" rev-parse 'FETCH_HEAD^{commit}')"
-# If the branch changed during fetch, retry on the next sync rather than
-# publish a different revision from the one reviewed/resolved above.
-[[ "$HEAD_SHA" == "$REMOTE_SHA" ]] || { log 'remote reference changed while fetching; retry sync'; false; }
-git -C "$CHECKOUT" reset --quiet --hard "$HEAD_SHA"
-git -C "$CHECKOUT" clean -ffdxq
-SOURCE="$(realpath -e -- "$CHECKOUT/$GB_SYNC_SUBPATH")"
-[[ -d "$SOURCE" && ( "$SOURCE" == "$CHECKOUT" || "$SOURCE" == "$CHECKOUT/"* ) ]] || { log 'source path escapes checkout or is not a directory'; false; }
-# Never serve repository symlinks, including source-directory aliases.
-[[ -z "$(git -C "$CHECKOUT" ls-files --stage | awk '$1 == "120000" {print; exit}')" ]] || { log 'repository symlinks are forbidden in static exports'; false; }
+# The fetch is authoritative if the branch advanced after ls-remote.
+# Export Git's committed blobs directly: no checkout rewrite, JSON parsing,
+# checksum verification or full-content comparison with the live release.
 
 STEP="export"
 RELEASE="$(mktemp -d "$RELEASES/$(date -u +%Y%m%dT%H%M%SZ)-${HEAD_SHA:0:12}-XXXXXXXX")"
 chmod 0750 "$RELEASE"
 PREVIOUS=""
 [[ ! -L "$CURRENT" ]] || PREVIOUS="$(readlink -f "$CURRENT" || true)"
-RSYNC=(rsync -a --checksum --prune-empty-dirs '--chmod=D750,F640' '--exclude=.*' '--include=*/')
-IFS=',' read -r -a EXTS <<< "$GB_SYNC_EXTENSIONS"
-for ext in "${EXTS[@]}"; do
-    ext="${ext// /}"
-    [[ "$ext" =~ ^[a-z0-9]+$ ]] || { log "invalid extension: $ext"; false; }
-    RSYNC+=(--include="*.$ext")
-done
-# Anchored to the export root; parent directories are already included and
-# dot segments were excluded above, so a path can only name a plain file.
-IFS=',' read -r -a EXTRAS <<< "$GB_SYNC_EXTRA_FILES"
-for extra in "${EXTRAS[@]}"; do
-    extra="${extra// /}"
-    [[ -n "$extra" ]] || continue
-    [[ "$extra" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ && "$extra" != .* && "$extra" != *..* && "$extra" != */.* ]] || { log "invalid extra file path: $extra"; false; }
-    RSYNC+=(--include="/$extra")
-done
-RSYNC+=(--exclude='*')
-# Link only byte-identical, attribute-identical files into this new directory.
-# Never use --inplace, recycle a destination or chmod files after export:
-# those operations would mutate previous releases through shared inodes.
-[[ -z "$PREVIOUS" || ! -d "$PREVIOUS" ]] || RSYNC+=(--link-dest="$PREVIOUS")
-"${RSYNC[@]}" --out-format='%i' "$SOURCE/" "$RELEASE/" > "$RELEASE/.rsync"
-FILES="$(find "$RELEASE" -type f ! -name '.*' | wc -l)"
-CHANGED="$(grep -c '^>f' "$RELEASE/.rsync" || true)"
-rm -f "$RELEASE/.rsync"
-(( FILES > 0 )) || { log 'refusing to publish an empty export'; false; }
+STATS="$("$GB_EXPORT" "$CHECKOUT" "$HEAD_SHA" "$GB_SYNC_SUBPATH" "$RELEASE" "$PREVIOUS" "$GB_SYNC_EXTENSIONS" "$GB_SYNC_EXTRA_FILES")"
+IFS=$'\t' read -r FILES CHANGED <<< "$STATS"
 
-STEP="verify"
-"$GB_VERIFY" "$RELEASE"
 printf '%s\n' "$HEAD_SHA" > "$RELEASE/.revision"
 chmod 0640 "$RELEASE/.revision"
 

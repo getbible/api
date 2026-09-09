@@ -108,6 +108,17 @@ ln -sfn "releases/v2/r1" "$SB/srv/getbible/$D/v2"
 "$GB" pages "$D" publish >/dev/null 2>&1
 check "versions.json lists v2"   '"openapi": "https://'"$D"'/v2/openapi.json"' "$(cat "$SB/var/www/getbible/$D/versions.json")"
 check "domain page links openapi" '<a href="/v2/openapi.json">openapi.json</a>' "$(cat "$SB/var/www/getbible/$D/index.html")"
+"$GB" version add "$D" v3 --repo git@github.com:getbible/v3.git >/dev/null 2>&1
+mkdir -p "$SB/srv/getbible/$D/v3"
+printf '{}\n' > "$SB/srv/getbible/$D/v3/openapi.json"
+"$GB" pages "$D" publish >/dev/null 2>&1
+check "discovery adds new version" '"version": "v3"' "$(cat "$SB/var/www/getbible/$D/versions.json")"
+sed -i 's/^ENABLED=true$/ENABLED=false/' "$SB/etc/getbible/endpoints/$D/versions/v3.conf"
+"$GB" pages "$D" publish >/dev/null 2>&1
+check "disabled endpoint not discovered" "v2" "$(python3 -c 'import json,sys; print(",".join(x["version"] for x in json.load(open(sys.argv[1]))["endpoints"]))' "$SB/var/www/getbible/$D/versions.json")"
+"$GB" version remove "$D" v3 >/dev/null 2>&1
+check "discovery updates on removal" '"version": "v2"' "$(cat "$SB/var/www/getbible/$D/versions.json")"
+
 "$GB" pages "$D" openapi v2 from "$SB/domain.html" >/dev/null 2>&1 && echo "FAIL: invalid JSON accepted as OpenAPI"
 printf '{"openapi":"3.1.0","info":{"title":"mine","version":"v2"},"paths":{}}\n' > "$SB/mine.json"
 "$GB" pages "$D" openapi v2 from "$SB/mine.json" >/dev/null 2>&1
@@ -174,10 +185,10 @@ check "root html regex"          '^/.+\.html$'             "$(cat "$RSITE")"
 check "no catch-all 404"         ""                        "$(sed -n '/listen 443/,$p' "$RSITE" | grep -c '^    location / {' | sed 's/^0$//')"
 check "root page at /"           "try_files /index.html =404;" "$(cat "$RSITE")"
 check "root openapi at /"        "try_files /root/openapi.json =404;" "$(cat "$RSITE")"
-check "no versions.json"         ""                        "$(grep -c 'versions.json' "$RSITE" | sed 's/^0$//')"
+check "root discovery location"  "location = /versions.json" "$(cat "$RSITE")"
 check "root page rendered"       "<h1>$R</h1>"             "$(cat "$SB/var/www/getbible/$R/index.html")"
 check "root page base url"       "https://$R/path/to/document.json" "$(cat "$SB/var/www/getbible/$R/index.html")"
-check "no versions.json file"    ""                        "$(ls "$SB/var/www/getbible/$R/versions.json" 2>/dev/null)"
+check "root discovery initially empty" '"endpoints": []' "$(cat "$SB/var/www/getbible/$R/versions.json")"
 check "root sync unit"           "GB_SYNC_VERSION=root"    "$(cat "$SB/etc/systemd/system/getbible-sync-root_example_test-root.service")"
 check "status shows domain root" "Endpoints   : (domain root)" "$("$GB" status "$R" 2>/dev/null)"
 check "overview shows root"      "endpoints: domain root"  "$("$GB" status 2>/dev/null)"

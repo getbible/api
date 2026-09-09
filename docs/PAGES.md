@@ -22,7 +22,8 @@ over, and how nginx serves them.
 | `/` | the domain page: what the domain is and its endpoints (or, for a root endpoint, that endpoint's page) | generated, custom |
 | `/vN/` | the endpoint's documentation page | generated, custom, repository (static only), none |
 | `/vN/openapi.json` | the endpoint's OpenAPI document | generated (runtime only), repository (static only), custom, none |
-| `/versions.json` | the endpoints whose OpenAPI document is present, mapped to that document (domains with version folders only) | generated |
+| `/versions.json` | the endpoints whose OpenAPI document is present, mapped to that document (including a single root endpoint) | generated |
+| `/version.json` | alias of `/versions.json`, serving the same generated file | generated |
 | `/favicon.ico` | the favicon linked from every generated page | the system favicon, the domain's own, none |
 | `/openapi.json` | for a root endpoint its document; for a runtime domain with version folders the default endpoint's document, kept for clients that learnt the address before version folders existed | follows the endpoint |
 
@@ -140,7 +141,13 @@ cannot reach.
 }
 ```
 
-Only endpoints whose OpenAPI document is configured and present are listed;
-the file exists (possibly with an empty list) for every domain with version
-folders, so clients always find a valid index at the same address. It is
-rewritten on every apply, update and successful sync.
+Only enabled endpoints whose OpenAPI document is configured and present are
+listed. The file exists (possibly with an empty list) for every domain,
+including a single endpoint at its root. A root endpoint uses `/` and
+`/openapi.json`; a runtime root entry names its implemented version (for example
+`v2`). The singular `/version.json` address serves the same file.
+
+The list comes from the current domain registry, with no advance inventory to
+maintain. Adding/removing versions, applying settings, and successful syncs
+refresh it automatically. Static specifications are trusted files from the
+builder or operator; their absence never blocks data publication.

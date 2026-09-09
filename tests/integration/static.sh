@@ -123,6 +123,8 @@ it_check "wrong token -> 401"        "401"              "$(it_status "$DOMAIN" /
 it_check "docs still public"         "200"              "$(it_status "$DOMAIN" /)"
 it_check "endpoint page still public" "200"             "$(it_status "$DOMAIN" /v2/)"
 it_check "openapi still public"      "200"              "$(it_status "$DOMAIN" /v2/openapi.json)"
+it_check "discovery still public"    "200"              "$(it_status "$DOMAIN" /versions.json)"
+it_check "discovery alias public"    "200"              "$(it_status "$DOMAIN" /version.json)"
 it_check "preflight still public"    "204"              "$(it_status "$DOMAIN" /v2/kjv/1/1.json -X OPTIONS)"
 
 echo "-- open access --"
@@ -206,10 +208,20 @@ it_check "root page is html"         "text/html"        "$(it_header "$ROOTDOM" 
 it_check "root page path not served" "404"              "$(it_status "$ROOTDOM" /docs/index.html)"
 it_check "root openapi"              '"title":"rootfixture"' "$(it_body "$ROOTDOM" /openapi.json | tr -d ' \n')"
 it_check "root favicon"              "200"              "$(it_status "$ROOTDOM" /favicon.ico)"
-it_check "root has no versions.json" "404"              "$(it_status "$ROOTDOM" /versions.json)"
+it_check "root discovery public"     "200"              "$(it_status "$ROOTDOM" /versions.json)"
+it_check "root discovery uses root URL" '"url": "https://'"$ROOTDOM"'/"' "$(it_body "$ROOTDOM" /versions.json)"
+it_check "root discovery has one entry" "1" "$(it_body "$ROOTDOM" /versions.json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["endpoints"]))')"
+it_check "singular discovery alias" "$(it_body "$ROOTDOM" /versions.json)" "$(it_body "$ROOTDOM" /version.json)"
 it_check "root unknown folder"       "404"              "$(it_status "$ROOTDOM" /v2/kjv/1/1.json)"
 it_check "root dotfile hidden"       "404"              "$(it_status "$ROOTDOM" /.hidden)"
 it_check "root health"               '{"status":"ok"}'  "$(it_body "$ROOTDOM" /healthz)"
 it_check "root query string rejected" "400"             "$(it_status "$ROOTDOM" '/kjv/1/1.json?x=1')"
 
+echo "-- disabled specification stays disabled --"
+"$IT_ROOT/getbible.sh" pages "$ROOTDOM" openapi root none >/dev/null 2>&1
+"$IT_ROOT/getbible.sh" pages "$DOMAIN" openapi v2 none >/dev/null 2>&1
+it_nginx_reload
+it_check "root spec none reserves 404" "404" "$(it_status "$ROOTDOM" /openapi.json)"
+it_check "version spec none reserves 404" "404" "$(it_status "$DOMAIN" /v2/openapi.json)"
+it_check "root discovery is empty after none" '"endpoints": []' "$(it_body "$ROOTDOM" /versions.json)"
 it_summary

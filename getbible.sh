@@ -72,7 +72,7 @@ Domains
                                          point a static endpoint elsewhere, keeping its releases
   version default DOMAIN vN              the runtime endpoint that answers / and the short forms
   version remove DOMAIN vN|root
-  sync DOMAIN [vN|root] [--force]        run the synchronisation now
+  sync DOMAIN [vN|root] [--force]        publish the trusted repository's current files
   access DOMAIN open|metered|token       change the access mode
   limits DOMAIN [--rate N] [--burst N] [--hour N] [--day N] [--conn N]
   token DOMAIN add LABEL [--expires YYYY-MM-DD] | list | revoke ID

@@ -8,6 +8,11 @@ client / Cloudflare
         -> pages: /var/www/getbible/<domain>/ (domain page, endpoint pages, OpenAPI documents, favicon, versions.json)
 ```
 
+Static Git trees are authoritative. The exporter streams changed blobs and
+hard-links unchanged blob identities into a new release, without parsing JSON
+or calculating content/checksum hashes. Runtime applications read existing local
+version directories and trust those same upstream-validated files.
+
 A **domain** is a host name: one vhost, one certificate, one go-live. Its
 **endpoints** are its version folders (`/v2/`), or the domain root itself
 when it was set up without version folders (the label `root`). The registry
@@ -67,7 +72,7 @@ with the real host name. A failed certificate leaves the endpoint staged.
 
 Helper programs in `src/bin/` are installed to `/usr/local/lib/getbible`
 for timers and hooks that run as other users: `getbible-sync`,
-`getbible-verify-tree`, `getbible-notify`, `getbible-logrotate-hook`. The
+`getbible-export-tree`, `getbible-notify`, `getbible-logrotate-hook`. The
 rest (`getbible-render`, `getbible-tokens`, `getbible-analytics`,
 `getbible-cloudflare`, `getbible-nginx-strip`) run from the checkout.
 

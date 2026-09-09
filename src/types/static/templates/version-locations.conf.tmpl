@@ -23,6 +23,10 @@
         add_header Cache-Control "public, max-age=300" always;
     }
 {{/IF}}
+{{/UNLESS}}{{#UNLESS OPENAPI_FILE}}    # Reserve a disabled specification address even when the tree contains JSON.
+    location = {{PREFIX}}openapi.json {
+        return 404;
+    }
 {{/UNLESS}}    # {{DOMAIN}} endpoint {{LABEL}}: {{TREE_ROOT}}{{PREFIX}} -> current release
     location ^~ {{PREFIX}} {
         root {{TREE_ROOT}};

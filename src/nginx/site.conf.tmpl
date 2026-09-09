@@ -32,6 +32,8 @@ server {
     access_log {{LOG_DIR}}/access.log getbible_json buffer=64k flush=5s;
     error_log  {{LOG_DIR}}/error.log warn;
 
+    # Also answer origin-identity challenges after an HTTP-to-HTTPS redirect.
+    include snippets/getbible/acme.conf;
     include {{NGINX_GB_DIR}}/{{DOMAIN}}/server.conf;
     include snippets/getbible/headers.conf;
     include snippets/getbible/errors.conf;
@@ -71,6 +73,13 @@ server {
     }
 {{/IF}}{{#IF VERSIONS_JSON}}
     location = /versions.json {
+        root {{WWW_DIR}};
+        try_files /versions.json =404;
+        include snippets/getbible/headers.conf;
+        add_header Cache-Control "public, max-age=300" always;
+    }
+    # Compatibility spelling: both addresses serve the same generated index.
+    location = /version.json {
         root {{WWW_DIR}};
         try_files /versions.json =404;
         include snippets/getbible/headers.conf;
