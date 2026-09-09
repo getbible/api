@@ -4,7 +4,7 @@ set -Eeuo pipefail
 ROOT="$(cd -- "$(dirname -- "$0")/../.." && pwd -P)"
 SB="$(mktemp -d)"
 trap 'rm -rf "$SB"' EXIT
-GB_VERSION=test
+GB_VERSION='test'
 GB_YES=true
 GB_UI=none
 GB_PYTHON=python3

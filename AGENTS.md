@@ -45,7 +45,8 @@ The source repositories and sanctioned operators are trusted. Static builders
 own content, JSON, schema and checksum validation. This manager copies committed
 files faithfully and publishes them atomically; do not add downstream corpus
 validation, hash sweeps or approval gates. Runtime endpoints use existing local
-data and do not fetch public Bible APIs or revalidate upstream checksums.
+data and do not fetch public Bible APIs. Do not add validation passes on top
+of the librarian's existing cached data loading.
 
 Availability and fast access are the objective. Preserve open access and the
 existing unlimited-token behavior; do not introduce extra quotas, branch
