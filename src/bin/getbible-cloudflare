@@ -301,7 +301,10 @@ def cmd_bot_fight(domain: str, state: str) -> dict:
 def cmd_origin_pulls(domain: str, state: str) -> dict:
     zone = find_zone(domain)
     enabled = state.lower() in {"on", "true", "yes"}
-    request("PUT", f"/zones/{zone['id']}/origin_tls_client_auth/settings", {"enabled": enabled})
+    # nginx trusts Cloudflare's shared global AOP certificate. The separate
+    # origin_tls_client_auth/settings endpoint enables uploaded custom
+    # certificates and does not enable this shared-certificate mode.
+    request("PATCH", f"/zones/{zone['id']}/settings/tls_client_auth", {"value": "on" if enabled else "off"})
     return {"zone": zone["name"], "authenticated_origin_pulls": enabled}
 
 

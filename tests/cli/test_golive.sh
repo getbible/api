@@ -347,6 +347,8 @@ check "stand-in outside sandbox ignored" "no"                   "$(GB_CERTBOT=/u
 check "stand-in inside sandbox runs" "yes"                      "$(GB_CERTBOT="$SB/bin/certbot" certs_can_run && echo yes || echo no)"
 
 echo "-- failed verification never reports successful go-live --"
+# Overrides are deliberately local to this isolated regression fixture.
+# shellcheck disable=SC2030
 (
     # shellcheck source=../../src/lib/golive.sh
     source "$ROOT/src/lib/golive.sh"
@@ -381,6 +383,8 @@ check "already live retry actually verifies" "retry_exit=1" "$OUT"
 
 echo "-- live TLS cannot fall back to an untrusted certificate --"
 : > "$SB/golive-test-site"
+# Overrides are deliberately local to this isolated regression fixture.
+# shellcheck disable=SC2030
 (
     # shellcheck source=../../src/lib/golive.sh
     source "$ROOT/src/lib/golive.sh"
@@ -416,6 +420,8 @@ check "staged placeholder remains testable" "staged_tls_exit=0" "$OUT"
 check "live requests never retry insecurely" $'false\nfalse\ntrue\ntrue' "$(cat "$SB/probe-trust.log")"
 
 echo "-- public propagation waits, then verifies HTTPS --"
+# Overrides are deliberately local to this isolated regression fixture.
+# shellcheck disable=SC2030
 (
     # shellcheck source=../../src/lib/golive.sh
     source "$ROOT/src/lib/golive.sh"

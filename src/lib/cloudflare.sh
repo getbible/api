@@ -105,7 +105,8 @@ cloudflare_apply() {
         fi
         cloudflare_refresh_ips || return 1
         if [[ "$(ep_get "$domain" CLOUDFLARE_ORIGIN_PULLS false)" == true ]]; then
-            cloudflare_install_origin_ca
+            cf_human origin-pulls "$domain" on >&2 || return 1
+            cloudflare_install_origin_ca || return 1
         fi
     else
         cf_human host-rules-remove "$domain" >&2 || gb_warn "DNS now routes directly, but some managed Cloudflare rules could not be removed."
@@ -199,6 +200,22 @@ cloudflare_install_origin_ca() {
 cloudflare_apply_and_render() { cloudflare_apply "$1" && endpoint_apply "$1"; }
 cloudflare_refresh_and_reload() { cloudflare_refresh_ips && nginx_test && nginx_reload; }
 
+# The shared certificate is a zone-wide prerequisite, but enforcement is
+# selected per nginx vhost. Disabling a domain never disables the shared
+# feature for other hosts in the zone.
+cloudflare_endpoint_origin_pulls() {
+    local domain="$1" enabled="$2"
+    [[ "$enabled" == true || "$enabled" == false ]] || return 2
+    if [[ "$enabled" == true ]]; then
+        if ! cf_human origin-pulls "$domain" on; then
+            ep_state_set "$domain" CLOUDFLARE_ERROR "Authenticated origin pulls could not be enabled; the domain setting was kept."
+            return 1
+        fi
+    fi
+    ep_set "$domain" CLOUDFLARE_ORIGIN_PULLS "$enabled" || return 1
+    tg_notify info "Origin pulls configured: $domain" "Origin certificate requirement: $enabled. Apply the domain to render nginx."
+}
+
 # --- menu --------------------------------------------------------------------
 cloudflare_endpoint_menu() {
     local domain="$1" choice mode cache pulls
@@ -231,11 +248,10 @@ cloudflare_endpoint_menu() {
                     respect "Respect origin: cache per Cache-Control, origin logs see only misses" "$([[ "$cache" == respect ]] && echo on || echo off)")" || continue
                 ep_set "$domain" CLOUDFLARE_CACHE "$cache" ;;
             pulls)
-                if ui_yesno "Origin pulls" "Require Cloudflare's client certificate on this domain? Only meaningful in proxied mode; direct access to the origin stops working." "$([[ "$pulls" == true ]] && echo yes || echo no)"; then
-                    ep_set "$domain" CLOUDFLARE_ORIGIN_PULLS true
-                    ui_run "Enable origin pulls" cf_human origin-pulls "$domain" on
+                if ui_yesno "Origin pulls" "Require Cloudflare's client certificate on this domain? Enabling also enables Cloudflare's shared certificate for the zone; only selected nginx domains require it. Disabling this domain leaves the shared feature enabled for other hosts. Apply the domain afterwards. Only meaningful in proxied mode; direct origin HTTPS will stop working." "$([[ "$pulls" == true ]] && echo yes || echo no)"; then
+                    ui_run "Enable origin pulls" cloudflare_endpoint_origin_pulls "$domain" true || true
                 else
-                    ep_set "$domain" CLOUDFLARE_ORIGIN_PULLS false
+                    ui_run "Disable origin requirement" cloudflare_endpoint_origin_pulls "$domain" false || true
                 fi ;;
             apply) ui_run "Cloudflare apply" cloudflare_apply_and_render "$domain" ;;
             show) ui_run "DNS records" cf_human dns-show "$domain" ;;
