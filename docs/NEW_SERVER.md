@@ -22,8 +22,13 @@ command line forms are listed at the end for scripts.
 
 ## 1. Prepare the host
 
+Follow [INSTALL.md](INSTALL.md#1-clone) to install Git and the SSH client,
+prepare this server's root-owned release/deploy key and verify GitHub's host
+key. With the key at `/root/.ssh/getbible-api`:
+
 ```sh
-sudo git clone https://github.com/getbible/api.git /opt/getbible/api
+sudo git clone -c core.sshCommand='ssh -i /root/.ssh/getbible-api -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes' \
+  git@github.com:getbible/api.git /opt/getbible/api
 cd /opt/getbible/api
 sudo ./getbible.sh install-deps
 sudo ./getbible.sh
@@ -32,6 +37,9 @@ sudo ./getbible.sh
 `install-deps` installs nginx, certbot and, where the package exists, the
 `python3-certbot-dns-cloudflare` plugin that makes certificates possible
 before DNS changes. System > Check this host shows what was found.
+Later, `sudo ./getbible.sh self-update` updates the manager's source checkout
+with the same SSH key. It does not apply changes to hosted domains. See
+[UPDATING.md](UPDATING.md).
 
 Then, under Settings:
 

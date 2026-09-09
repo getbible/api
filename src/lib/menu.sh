@@ -13,7 +13,8 @@ menu_main() {
             domains "Domains: status, pages, logs, access, tokens, sync" \
             deploy "Deploy a new domain (live now, or staged for later)" \
             golive "Go live: switch a staged domain to its public name" \
-            update "Update all domains (after git pull)" \
+            self-update "Update manager script from Git" \
+            update "Apply current checkout to all domains" \
             analytics "Traffic analytics: calls and unique callers" \
             logs "Logs: view, archives, rotate" \
             settings "Settings: Telegram, Cloudflare, icons, defaults, retention" \
@@ -23,6 +24,12 @@ menu_main() {
             domains) menu_endpoints ;;
             deploy) menu_deploy ;;
             golive) golive_menu ;;
+            self-update)
+                if ui_run "Update manager script" update_manager; then
+                    # Libraries already sourced by this menu belong to the old
+                    # checkout. End the session before another action uses them.
+                    [[ "$GB_DRY_RUN" == true ]] || return 0
+                fi ;;
             update) menu_update ;;
             analytics) menu_analytics ;;
             logs) menu_logs ;;
@@ -203,11 +210,9 @@ menu_update() {
     local choice
     choice="$(ui_menu "Update" "$text" \
         apply "Update all domains from the current checkout" \
-        pull "git pull first, then update all domains" \
         back "Back")" || return 0
     case "$choice" in
         apply) ui_run "Update all" update_all ;;
-        pull) update_pull_and_all ;;
     esac
 }
 
