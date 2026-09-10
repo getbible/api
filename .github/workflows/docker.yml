@@ -1,0 +1,172 @@
+name: Docker image
+
+on:
+  pull_request:
+  push:
+    branches: [main, master, agent/docker-deployment]
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      publish_candidate:
+        description: Publish the tested private sha tag (never latest or a release tag)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  validate:
+    name: Image / ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Image version
+        env:
+          RELEASE_REF: ${{ github.ref }}
+        run: |
+          version=1.0.0-dev
+          if [[ "$RELEASE_REF" == refs/tags/* ]]; then
+            version="${RELEASE_REF#refs/tags/v}"
+            [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Release tags must be vMAJOR.MINOR.PATCH.' >&2; exit 1; }
+          fi
+          printf 'IMAGE_VERSION=%s\n' "$version" >> "$GITHUB_ENV"
+      - name: Build the complete image and verify all bundled runtimes
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: getbible-api-test:ci
+          platforms: linux/${{ matrix.arch }}
+          provenance: false
+          build-args: |
+            GETBIBLE_VERSION=${{ env.IMAGE_VERSION }}
+            GETBIBLE_REVISION=${{ github.sha }}
+          cache-from: type=gha,scope=getbible-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=getbible-${{ matrix.arch }}
+      - name: Install HAProxy for the real forwarding acceptance test
+        run: |
+          for list in /etc/apt/sources.list.d/*; do
+            if sudo grep -qsE 'dl\.google\.com|packages\.microsoft\.com' "$list"; then
+              sudo rm -f -- "$list"
+            fi
+          done
+          sudo apt-get update
+          sudo apt-get install -y haproxy shellcheck
+      - name: Lint image entry points and ownership restoration tests
+        run: |
+          shellcheck -x -s bash docker/*.sh tests/integration/docker.sh
+          python3 -m unittest tests.python.test_identities -v
+      - name: Real systemd, offline deployment, HAProxy, token access and recreation
+        run: tests/integration/docker.sh
+      - name: Preserve the exact tested image for publication
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish_candidate) || (github.event_name == 'push' && github.ref == 'refs/heads/agent/docker-deployment')
+        run: docker image save getbible-api-test:ci | gzip -1 > /tmp/getbible-image.tar.gz
+      - uses: actions/upload-artifact@v4
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish_candidate) || (github.event_name == 'push' && github.ref == 'refs/heads/agent/docker-deployment')
+        with:
+          name: image-${{ matrix.arch }}
+          path: /tmp/getbible-image.tar.gz
+          retention-days: 1
+          compression-level: 0
+
+  publish:
+    name: Publish tested image / ${{ matrix.arch }}
+    needs: validate
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish_candidate) || (github.event_name == 'push' && github.ref == 'refs/heads/agent/docker-deployment')
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: image-${{ matrix.arch }}
+          path: /tmp
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Require private repository and private existing package
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          test "$(gh api "repos/$GITHUB_REPOSITORY" --jq .private)" = true
+          if gh api "orgs/$GITHUB_REPOSITORY_OWNER/packages/container/api" > /tmp/package.json 2>/tmp/package-error; then
+            test "$(jq -r .visibility /tmp/package.json)" = private
+          elif ! grep -q 'HTTP 404' /tmp/package-error; then
+            cat /tmp/package-error >&2
+            exit 1
+          fi
+          # New GHCR packages are private by default. The source label links
+          # the package to this private repository; never change visibility.
+      - name: Push the image that passed acceptance
+        env:
+          IMAGE_ARCH: ${{ matrix.arch }}
+        run: |
+          docker load --input /tmp/getbible-image.tar.gz
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          tag="$image:sha-$GITHUB_SHA-$IMAGE_ARCH"
+          docker tag getbible-api-test:ci "$tag"
+          docker push "$tag"
+
+  manifest:
+    name: Publish multi-architecture manifest
+    needs: publish
+    concurrency:
+      group: getbible-ghcr-manifest
+      cancel-in-progress: false
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Candidate manifest or immutable release and latest
+        env:
+          RELEASE_REF: ${{ github.ref }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          sources=("$image:sha-$GITHUB_SHA-amd64" "$image:sha-$GITHUB_SHA-arm64")
+          docker buildx imagetools create -t "$image:sha-$GITHUB_SHA" "${sources[@]}"
+          if [[ "$RELEASE_REF" != refs/tags/* ]]; then exit 0; fi
+          version="${RELEASE_REF#refs/tags/v}"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          if docker buildx imagetools inspect "$image:$version" >/dev/null 2>&1; then
+            echo "Release $version already exists; numbered releases are never overwritten." >&2
+            exit 1
+          fi
+          docker buildx imagetools create -t "$image:$version" "${sources[@]}"
+          # Releasing a maintained older series must not move latest backwards.
+          latest_version=0.0.0
+          if docker pull "$image:latest" >/dev/null 2>&1; then
+            latest_version="$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$image:latest")"
+            [[ "$latest_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
+          fi
+          newest="$(printf '%s\n%s\n' "$latest_version" "$version" | sort -V | tail -1)"
+          if [[ "$newest" == "$version" ]]; then
+            docker buildx imagetools create -t "$image:latest" "${sources[@]}"
+          fi

@@ -1,19 +1,28 @@
 # Architecture
 
+```mermaid
+flowchart TD
+    C[Cloudflare] -->|HTTPS| H[HAProxy external TLS]
+    C -->|HTTPS in native managed mode| N[nginx]
+    H -->|HTTP and preserved Host| N
+    N --> S[Static release trees]
+    N --> P[Pages and discovery]
+    N -->|Unix sockets| R[Runtime services]
+    R --> L[Librarian and local data]
 ```
-client / Cloudflare
-    -> nginx  (TLS, methods, limits, tokens, CORS, problem documents, cache)
-        -> static: /srv/getbible/<domain>/<endpoint> -> releases/<endpoint>/<stamp>
-        -> runtime: /<endpoint>/ -> unix socket -> gunicorn -> Flask app -> librarian -> local Bible files
-        -> pages: /var/www/getbible/<domain>/ (domain page, endpoint pages, OpenAPI documents, favicon, versions.json)
-```
+
+In Docker, nginx and all managed services run in one Linux system container
+with systemd as PID 1. HAProxy stays on OPNsense. Native installation retains
+local managed TLS or can use the external TLS path. nginx continues to enforce
+methods, limits, bearer tokens, CORS, problem responses and origin caching.
+See [deployment decisions](DEPLOYMENT_DECISIONS.md) for the shared objectives.
 
 Static Git trees are authoritative. The exporter streams changed blobs and
 hard-links unchanged blob identities into a new release, without parsing JSON
 or calculating content/checksum hashes. Runtime applications read existing local
 version directories and trust those same upstream-validated files.
 
-A **domain** is a host name: one vhost, one certificate, one go-live. Its
+A **domain** is a host name: one vhost, TLS at its selected terminator, one go-live. Its
 **endpoints** are its version folders (`/v2/`), or the domain root itself
 when it was set up without version folders (the label `root`). In the registry,
 `/etc/getbible/endpoints/<domain>/endpoint.conf` describes the domain and
@@ -77,11 +86,15 @@ endpoint). Every endpoint uses the paths above.
 An endpoint carries `LIVE=true|false` in its `endpoint.conf` (absent means
 live). A staged endpoint runs the same pipeline without the steps that touch
 its public name: no edge-cache protection, no certificate request, no
-Cloudflare DNS or rules, and its vhost renders TLS with a self-signed
-placeholder under `/etc/getbible/placeholder-certs`. `golive_run` obtains the
+Cloudflare DNS or rules. In managed TLS its vhost renders a self-signed
+placeholder under `/etc/getbible/placeholder-certs`. In managed TLS,
+`golive_run` obtains the
 Let's Encrypt certificate first, then sets `LIVE=true`, applies (which now
 includes Cloudflare), records `LIVE_AT` and verifies through the local nginx
-with the real host name. A failed certificate leaves the endpoint staged.
+with the real host name. A failed managed certificate leaves the endpoint
+staged. External TLS verifies the local HTTP origin before DNS changes and
+checks the public HTTPS route after activation; an incomplete public check
+reports pending verification while preserving the active origin.
 
 Helper programs in `src/bin/` are installed to `/usr/local/lib/getbible`
 for timers and hooks that run as other users: `getbible-sync`,
@@ -108,6 +121,33 @@ rest (`getbible-render`, `getbible-tokens`, `getbible-analytics`,
   locations) and its tree (`^~ /vN/`, static) or its service (`= /vN`,
   `^~ /vN/`, runtime), then health and the fallback. A root endpoint's tree or
   service takes `/` itself.
+
+External TLS renders the complete serving vhost on the configured HTTP origin
+port, without the local certificate or unconditional HTTPS redirect. Multiple
+domains share that listener. A separate configured proxy trust boundary
+normalizes the public scheme and client address; the runtime sees nginx's
+normalized values rather than trusting an arbitrary number of proxy hops.
+
+## Docker image and lifecycle
+
+The image contains immutable manager source under `/usr/share/getbible/api`.
+`/usr/local/bin/getbible` links to its entry point. Its prepared Python and
+dependency artifacts let endpoint deployment create releases offline; the
+native path retains reviewed downloads. Runtime paths and their retained
+interpreters stay stable through container replacement for rollback.
+
+Bootstrap prepares mounted directories and restores recorded UIDs/GIDs before
+systemd activates services. Persisted configuration, units and active generation
+identities describe the saved installation; image replacement does not mean
+reapplying every domain or updating every endpoint. Temporary sockets and PID
+files are recreated under `/run`. Data mount roots include static release
+targets and their relative symlinks, preserving atomic rename and hard links.
+
+The Docker daemon enforces the container's aggregate resource ceiling. The
+manager's runtime allocation sits inside it and accounts for shared overhead
+and update generations. Service-level systemd limits remain in force. Docker
+mode requires the host's cgroup/namespace support for these controls; see the
+explicit host requirements and permissions in [DOCKER.md](DOCKER.md).
 
 ## State
 

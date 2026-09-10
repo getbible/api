@@ -44,7 +44,7 @@ jobs:
       - name: Install nginx, shellcheck and tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y nginx shellcheck rsync logrotate openssh-client openssh-server whiptail acl
+          sudo apt-get install -y nginx haproxy shellcheck rsync logrotate openssh-client openssh-server whiptail acl
           sudo systemctl stop nginx || true
       - name: Lint, unit and command line tests
         run: tests/run.sh
@@ -54,6 +54,7 @@ jobs:
           sudo -E env "PATH=$PATH" tests/integration/runtime.sh
           sudo -E env "PATH=$PATH" bash tests/integration/runtime_rollback.sh
           sudo -E env "PATH=$PATH" bash tests/integration/deploy_keys.sh
+          sudo -E env "PATH=$PATH" bash tests/integration/external_proxy.sh
 
   systemd:
     name: Production services / Ubuntu ${{ matrix.os }}

@@ -90,6 +90,8 @@ logs_ensure_endpoint_dir() { :; }
 gb_new_backup_set() { printf '%s\n' "$SB/backup"; }
 gb_backup_file() { :; }
 nginx_enabled_file() { printf '%s\n' "$SB/enabled"; }
+nginx_validate_proxy_settings() { return 0; }
+nginx_external_tls() { return 1; }
 nginx_transaction_begin() { printf 'begin\n' >> "$EVENTS"; }
 nginx_transaction_commit() { printf 'commit\n' >> "$EVENTS"; }
 cloudflare_protect_access() { :; }

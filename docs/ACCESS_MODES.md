@@ -27,6 +27,14 @@ a problem document with `Retry-After`. Budgets key on the client address
 (the real one behind Cloudflare, see `CLOUDFLARE.md`); a valid bearer token
 switches the key off entirely, which is how token holders are exempt.
 
+These budgets protect **origin capacity**. Public open/metered responses may
+be served repeatedly from Cloudflare without consuming the origin budget or
+appearing in origin logs. This is desirable: getBible encourages heavy
+legitimate use and lets the CDN absorb repeated reads. Authorization-bearing
+requests bypass the edge cache so nginx still evaluates their token. The
+token-only mode remains authenticated and never serves private data from a
+shared cache. See [Deployment decisions](DEPLOYMENT_DECISIONS.md).
+
 ## Tokens
 
 Tokens are random 256-bit values rendered as lowercase base32 (`gb...`, 54

@@ -6,15 +6,19 @@
 GB_MENU_LOADED=1
 
 menu_main() {
-    local choice
+    local choice manager_label='Update manager script from Git' update_label='Apply current checkout to all domains'
+    if gb_is_docker; then
+        manager_label='Update container image: host commands'
+        update_label='Apply current image to all domains'
+    fi
     menu_check_tools
     while true; do
         choice="$(ui_menu "getBible API" "$(menu_overview)" \
             domains "Domains: status, pages, logs, access, tokens, sync" \
             deploy "Deploy a new domain (live now, or staged for later)" \
             golive "Go live: switch a staged domain to its public name" \
-            self-update "Update manager script from Git" \
-            update "Apply current checkout to all domains" \
+            self-update "$manager_label" \
+            update "$update_label" \
             analytics "Traffic analytics: calls and unique callers" \
             logs "Logs: view, archives, rotate" \
             settings "Settings: Telegram, Cloudflare, icons, defaults, retention" \
@@ -25,6 +29,10 @@ menu_main() {
             deploy) menu_deploy ;;
             golive) golive_menu ;;
             self-update)
+                if gb_is_docker; then
+                    ui_msg 'Update container image' 'From the Docker host, in the directory containing compose.yaml:\n\ndocker compose pull\ndocker compose up -d\n\nSelect the image tag in .env first. Image replacement restarts the container and preserves mounted data. Apply the new image to domains explicitly afterwards.'
+                    continue
+                fi
                 if ui_run "Update manager script" update_manager; then
                     # Libraries already sourced by this menu belong to the old
                     # checkout. End the session before another action uses them.
@@ -48,6 +56,10 @@ menu_check_tools() {
         gb_have "$tool" || missing="$missing $tool"
     done
     [[ -n "$missing" ]] || return 0
+    if gb_is_docker; then
+        ui_msg 'Image dependencies' "This image lacks:$missing\n\nThe prepared image must include these tools. Select a complete image on the Docker host and run docker compose pull followed by docker compose up -d."
+        return 0
+    fi
     platform_detect
     if [[ "$PLATFORM_PACKAGE_MANAGER" == apt ]]; then
         if ui_yesno "Missing tools" "This host lacks:$missing\n\nDomains cannot be deployed completely without them. Install them now with apt (the same as System > Install dependencies)?" yes; then
@@ -102,7 +114,7 @@ menu_endpoints() {
 }
 
 menu_endpoint() {
-    local domain="$1" choice out type_text
+    local domain="$1" choice out type_text certificate_label
     ep_load "$domain"
     endpoint_source_type "$EP_TYPE"
     type_text="$EP_TYPE"
@@ -115,6 +127,13 @@ menu_endpoint() {
         else
             golive=(golive "Go live: certificate, DNS, HTTPS (this domain is staged)")
         fi
+        certificate_label='Certificate: status, issue, renew'
+        if nginx_external_tls; then
+            certificate_label='TLS certificate: managed by the external proxy'
+            if ! ep_is_live "$domain"; then
+                golive=(golive 'Go live: HTTP origin, Cloudflare DNS and public HTTPS verification')
+            fi
+        fi
         choice="$(ui_menu "$domain" "$type_text · endpoints: $(pages_endpoints "$domain" | sed "s/^$GB_ROOT_LABEL\$/the domain root/" | tr '\n' ' ')· access: $(ep_get "$domain" ACCESS_MODE) · $(ep_publication "$domain")" \
             status "Status and health" \
             verify "Verify this server end to end (service, nginx, TLS)" \
@@ -124,7 +143,7 @@ menu_endpoint() {
             access "Access mode (open, metered, token only)" \
             limits "Limits for anonymous callers" \
             tokens "Bearer tokens" \
-            certificate "Certificate: status, issue, renew" \
+            certificate "$certificate_label" \
             cloudflare "Cloudflare settings for this domain" \
             "${extra[@]}" \
             apply "Re-apply configuration" \
@@ -142,7 +161,12 @@ menu_endpoint() {
             golive) golive_interactive "$domain" || true ;;
             stage) golive_stage_again_interactive "$domain" ;;
             pages) pages_menu "$domain" ;;
-            certificate) certs_menu "$domain" ;;
+            certificate)
+                if nginx_external_tls; then
+                    ui_msg 'External TLS' "The reverse proxy manages the certificate and renewal for $domain. nginx serves the HTTP origin. Configure the certificate in OPNsense HAProxy, keep Cloudflare Full (strict), then use Verify to check the public HTTPS route."
+                else
+                    certs_menu "$domain"
+                fi ;;
             logs) menu_endpoint_logs "$domain" ;;
             access)
                 local mode
@@ -201,18 +225,23 @@ menu_deploy() {
 }
 
 menu_update() {
-    local state commit dirty
-    state="$(update_repo_state)"
-    commit="${state%%$'\n'*}"
-    dirty="${state#*$'\n'}"
-    local text="Checkout: $GB_REPO_DIR at $commit"
-    [[ -n "$dirty" ]] && text="$text (local modifications present)"
+    local state commit dirty text apply_label='Update all domains from the current checkout'
+    if gb_is_docker; then
+        text='Apply the software in the current image to hosted domains. Runtime updates use the newest bundled patch of each selected Python family. To replace the image itself, use the host commands under Update container image.'
+        apply_label='Update all domains from the current image'
+    else
+        state="$(update_repo_state)"
+        commit="${state%%$'\n'*}"
+        dirty="${state#*$'\n'}"
+        text="Checkout: $GB_REPO_DIR at $commit"
+        [[ -n "$dirty" ]] && text="$text (local modifications present)"
+    fi
     local choice
     choice="$(ui_menu "Update" "$text" \
-        apply "Update all domains from the current checkout" \
+        apply "$apply_label" \
         back "Back")" || return 0
     case "$choice" in
-        apply) ui_run "Update all" update_all ;;
+        apply) ui_run "Update all" update_all || true ;;
     esac
 }
 
@@ -250,24 +279,80 @@ menu_pick_domain() {
     ui_menu "Domains" "Choose a domain" "${items[@]}"
 }
 
+# Check the whole edit before prompting or changing any configuration file.
+menu_settings_editable() {
+    local file="$1" key locked=""
+    shift
+    for key in "$@"; do
+        if gb_environment_managed "$file" "$key"; then
+            locked="${locked}GETBIBLE_$key\n"
+        fi
+    done
+    [[ -n "$locked" ]] || return 0
+    ui_msg 'Environment settings' "These settings are controlled by the deployment environment:\n\n$locked\nChange the environment and recreate the container to change them. No settings were saved here."
+    return 1
+}
+
+# Call only after collecting every input. Validate the complete set first so a
+# cancelled/invalid dialog never leaves a partly edited defaults form behind.
+menu_settings_save() {
+    local title="$1" key value
+    shift
+    local -a pairs=("$@") keys=()
+    while (( $# > 0 )); do
+        key="$1"; value="$2"; shift 2
+        keys+=("$key")
+        if ! gb_setting_validate "$key" "$value"; then
+            ui_msg "$title" "Invalid value for $key. No settings were saved."
+            return 1
+        fi
+    done
+    menu_settings_editable "$GB_GLOBAL_CONF" "${keys[@]}" || return 1
+    set -- "${pairs[@]}"
+    while (( $# > 0 )); do
+        key="$1"; value="$2"; shift 2
+        if ! gb_global_set "$key" "$value"; then
+            ui_msg "$title" "Could not save $key. Check the effective configuration before retrying; any earlier successful settings in this operation remain saved."
+            return 1
+        fi
+    done
+}
+
 menu_settings() {
-    local choice
+    local choice certmethod_label certbot_label addresses_label
     while true; do
+        certmethod_label='Certificate validation: automatic, http, or dns-cloudflare'
+        certbot_label="Let's Encrypt contact email"
+        addresses_label='Public addresses used for DNS records (empty: detected)'
+        if nginx_external_tls; then
+            certmethod_label='Certificate validation: managed by the external proxy'
+            certbot_label='Certificate contact: managed by the external proxy'
+            addresses_label='Firewall WAN addresses used for Cloudflare DNS records'
+        elif gb_is_docker; then
+            addresses_label='Explicit public origin addresses used for DNS records'
+        fi
         choice="$(ui_menu "Settings" "$GB_ETC" \
+            deployment "Deployment mode, proxy, environment and memory budget" \
             telegram "Telegram notifications" \
             cloudflare "Cloudflare API token" \
             icons "Icons for all domains: favicon $(favicon_status_text | sed 's/^System favicon: //; s/^the repository icon .*/from the repository/'), logo $(logo_status_text | sed 's/^System logo: //; s/^the repository icons .*/from the repository/')" \
             defaults "Defaults for new domains (access, limits, caching, schedule)" \
             retention "Log retention" \
             deploymode "New domains: go live at once, or stage them for a later go-live" \
-            certmethod "Certificate validation: automatic, http, or dns-cloudflare" \
-            certbot "Let's Encrypt contact email" \
-            addresses "Public addresses used for DNS records (empty: detected)" \
+            certmethod "$certmethod_label" \
+            certbot "$certbot_label" \
+            addresses "$addresses_label" \
             hsts "HSTS includeSubDomains" \
             back "Back")" || return 0
         case "$choice" in
+            deployment) gb_settings_menu ;;
             telegram) menu_settings_telegram ;;
-            cloudflare) cloudflare_configure ;;
+            cloudflare)
+                menu_settings_editable "$GB_CLOUDFLARE_CONF" CLOUDFLARE_API_TOKEN || continue
+                if [[ "$(gb_global CLOUDFLARE_ENABLED false)" != true ]]; then
+                    menu_settings_editable "$GB_GLOBAL_CONF" CLOUDFLARE_ENABLED || continue
+                fi
+                cloudflare_configure || true ;;
             icons) menu_settings_icons ;;
             defaults) menu_settings_defaults ;;
             retention) menu_settings_retention ;;
@@ -276,15 +361,24 @@ menu_settings() {
             addresses) menu_settings_addresses ;;
             certbot)
                 local email
+                if nginx_external_tls; then
+                    ui_msg 'External TLS' 'Certificate contact, issuance and renewal are configured on the reverse proxy. This container does not request a local certificate in external TLS mode.'
+                    continue
+                fi
+                menu_settings_editable "$GB_GLOBAL_CONF" CERTBOT_EMAIL || continue
                 email="$(ui_input "Let's Encrypt" "Contact email" "$(gb_global CERTBOT_EMAIL)")" || continue
                 certs_valid_email "$email" || { ui_msg "Let's Encrypt" "'$email' is not a valid email address."; continue; }
-                gb_global_set CERTBOT_EMAIL "$email" ;;
+                menu_settings_save "Let's Encrypt" CERTBOT_EMAIL "$email" || continue ;;
             hsts)
+                local hsts=false answer_status
+                menu_settings_editable "$GB_GLOBAL_CONF" HSTS_INCLUDE_SUBDOMAINS || continue
                 if ui_yesno "HSTS" "Send includeSubDomains with Strict-Transport-Security? Only when every subdomain of every endpoint is HTTPS." "$([[ "$(gb_global HSTS_INCLUDE_SUBDOMAINS false)" == true ]] && echo yes || echo no)"; then
-                    gb_global_set HSTS_INCLUDE_SUBDOMAINS true
+                    hsts=true
                 else
-                    gb_global_set HSTS_INCLUDE_SUBDOMAINS false
+                    answer_status=$?
+                    (( answer_status == 1 )) || continue
                 fi
+                menu_settings_save HSTS HSTS_INCLUDE_SUBDOMAINS "$hsts" || continue
                 ui_msg "HSTS" "Saved. Run Update to re-render every domain." ;;
             back) return 0 ;;
         esac
@@ -293,11 +387,12 @@ menu_settings() {
 
 menu_settings_deploy_mode() {
     local current mode
+    menu_settings_editable "$GB_GLOBAL_CONF" DEFAULT_DEPLOY_MODE || return 0
     current="$(gb_global DEFAULT_DEPLOY_MODE live)"
     mode="$(ui_radiolist "New domains" "What should a newly deployed domain do by default? The deploy walkthrough still asks each time.\n\nStage them while building a replacement server: everything is installed, but no certificate is requested and DNS is untouched until you choose 'Go live' per domain." \
-        live "Go live at once: certificate and Cloudflare DNS on deploy" "$([[ "$current" == live ]] && echo on || echo off)" \
+        live "Go live at once: activate the origin and configured public route" "$([[ "$current" == live ]] && echo on || echo off)" \
         staged "Stage: prepare everything, go live later per domain" "$([[ "$current" == staged ]] && echo on || echo off)")" || return 0
-    gb_global_set DEFAULT_DEPLOY_MODE "$mode"
+    menu_settings_save 'New domains' DEFAULT_DEPLOY_MODE "$mode" || return 0
     ui_msg "New domains" "New domains are $mode by default. Existing domains are not affected."
 }
 
@@ -342,24 +437,43 @@ menu_settings_icons() {
 
 menu_settings_cert_method() {
     local current method
+    if nginx_external_tls; then
+        ui_msg 'External TLS' 'Certificate issuance and renewal belong to the reverse proxy. Configure them in OPNsense HAProxy. This container serves HTTP and verifies the public HTTPS route; it does not run local certificate validation in external TLS mode.'
+        return 0
+    fi
+    menu_settings_editable "$GB_GLOBAL_CONF" CERT_METHOD || return 0
     current="$(gb_global CERT_METHOD auto)"
     method="$(ui_radiolist "Certificate validation" "How Let's Encrypt validates a domain when a certificate is requested.\n\nDNS-01 through Cloudflare needs the certbot-dns-cloudflare plugin (System > Install dependencies) and the Cloudflare API token, and works before DNS points at this server: the zero-downtime path for a new server." \
         auto "Automatic: dns-cloudflare when available, otherwise http" "$([[ "$current" == auto ]] && echo on || echo off)" \
         http "HTTP-01: DNS must already route the name to this server" "$([[ "$current" == http ]] && echo on || echo off)" \
         dns-cloudflare "DNS-01 through the Cloudflare API token" "$([[ "$current" == dns-cloudflare ]] && echo on || echo off)")" || return 0
-    gb_global_set CERT_METHOD "$method"
+    menu_settings_save 'Certificate validation' CERT_METHOD "$method" || return 0
     ui_msg "Certificate validation" "Certificates are validated with: $method. 'Go live' and 'Issue certificate' can still choose per request."
 }
 
 menu_settings_addresses() {
-    local ipv4 ipv6
-    ipv4="$(ui_input "Public addresses" "IPv4 address for this server's DNS records (empty: detected through api.ipify.org)" "$(gb_global SERVER_PUBLIC_IPV4)")" || return 0
-    [[ -z "$ipv4" || "$ipv4" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || { ui_msg "Invalid" "$ipv4 is not an IPv4 address."; return 0; }
-    ipv6="$(ui_input "Public addresses" "IPv6 address for this server's DNS records (empty: first global address found)" "$(gb_global SERVER_PUBLIC_IPV6)")" || return 0
-    [[ -z "$ipv6" || "$ipv6" =~ ^[0-9A-Fa-f:]+$ && "$ipv6" == *:* ]] || { ui_msg "Invalid" "$ipv6 is not an IPv6 address."; return 0; }
-    gb_global_set SERVER_PUBLIC_IPV4 "$ipv4"
-    gb_global_set SERVER_PUBLIC_IPV6 "$ipv6"
-    ui_msg "Public addresses" "DNS records point at: IPv4 ${ipv4:-detected}, IPv6 ${ipv6:-detected}. Go live and Cloudflare apply use these."
+    local ipv4 ipv6 external=false ipv4_prompt ipv6_prompt note
+    menu_settings_editable "$GB_GLOBAL_CONF" SERVER_PUBLIC_IPV4 SERVER_PUBLIC_IPV6 || return 0
+    ipv4_prompt="IPv4 address for this server's DNS records (empty: detected through api.ipify.org)"
+    ipv6_prompt="IPv6 address for DNS records (empty: first global address found; none: remove this hostname's AAAA records)"
+    if nginx_external_tls || gb_is_docker; then
+        external=true
+        ipv4_prompt="Firewall WAN IPv4 reachable by Cloudflare (not the Docker/LAN address; empty only when using an explicit IPv6 origin)"
+        ipv6_prompt="Firewall WAN IPv6 reachable by Cloudflare (none: remove this hostname's AAAA records; empty: leave existing AAAA records unchanged)"
+    fi
+    ipv4="$(ui_input 'Public addresses' "$ipv4_prompt" "$(gb_global SERVER_PUBLIC_IPV4)")" || return 0
+    ipv6="$(ui_input 'Public addresses' "$ipv6_prompt" "$(gb_global SERVER_PUBLIC_IPV6)")" || return 0
+    if [[ "$external" == true && -z "$ipv4" && ( -z "$ipv6" || "$ipv6" == none ) ]]; then
+        ui_msg 'Public addresses' 'Set at least one explicit firewall WAN address. Docker/external TLS cannot discover the correct public origin from inside the container. No settings were saved.'
+        return 0
+    fi
+    menu_settings_save 'Public addresses' SERVER_PUBLIC_IPV4 "$ipv4" SERVER_PUBLIC_IPV6 "$ipv6" || return 0
+    if [[ "$external" == true ]]; then
+        note="IPv4 ${ipv4:-unchanged}, IPv6 ${ipv6:-unchanged}. No automatic address discovery is used."
+    else
+        note="IPv4 ${ipv4:-detected}, IPv6 ${ipv6:-detected}."
+    fi
+    ui_msg 'Public addresses' "Saved: $note\nGo live and Cloudflare apply use these settings; none explicitly disables IPv6 for the selected hostname."
 }
 
 menu_settings_telegram() {
@@ -370,14 +484,23 @@ menu_settings_telegram() {
         disable "Disable notifications" \
         back "Back")" || return 0
     case "$choice" in
-        configure) tg_configure ;;
+        configure)
+            menu_settings_editable "$GB_TELEGRAM_CONF" TELEGRAM_ENABLED TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID || return 0
+            tg_configure || true ;;
         test) tg_test ;;
-        disable) cfg_set "$GB_TELEGRAM_CONF" TELEGRAM_ENABLED false; ui_msg "Telegram" "Disabled." ;;
+        disable)
+            menu_settings_editable "$GB_TELEGRAM_CONF" TELEGRAM_ENABLED || return 0
+            if cfg_set "$GB_TELEGRAM_CONF" TELEGRAM_ENABLED false; then
+                ui_msg 'Telegram' 'Disabled.'
+            else
+                ui_msg 'Telegram' 'Notifications could not be disabled. Check the effective configuration before retrying.'
+            fi ;;
     esac
 }
 
 menu_settings_defaults() {
     local key label value
+    local -a values=()
     for key in DEFAULT_ACCESS_MODE:"Default access mode (open, metered, token)" \
                DEFAULT_RATE_PER_SECOND:"Requests per second per address" \
                DEFAULT_RATE_BURST:"Burst" DEFAULT_QUOTA_HOUR:"Requests per hour" \
@@ -388,37 +511,50 @@ menu_settings_defaults() {
                DEFAULT_EXTENSIONS:"Default file types"; do
         label="${key#*:}"
         key="${key%%:*}"
+        if gb_environment_managed "$GB_GLOBAL_CONF" "$key"; then
+            ui_msg 'Environment setting' "$key is controlled by GETBIBLE_$key. Change it in the deployment environment."
+            continue
+        fi
         value="$(ui_input "Defaults" "$label" "$(gb_global "$key")")" || return 0
-        gb_global_set "$key" "$value"
+        values+=("$key" "$value")
     done
+    (( ${#values[@]} > 0 )) || return 0
+    menu_settings_save Defaults "${values[@]}" || return 0
     ui_msg "Defaults" "Saved. Existing domains keep their own values."
 }
 
 menu_settings_retention() {
     local size keep
+    menu_settings_editable "$GB_GLOBAL_CONF" LOG_ROTATE_SIZE LOG_ROTATE_KEEP || return 0
     size="$(ui_input "Log retention" "Rotate a log once it reaches this size (e.g. 1G, 500M)" "$(gb_global LOG_ROTATE_SIZE 1G)")" || return 0
     keep="$(ui_input "Log retention" "Archived files to keep per log" "$(gb_global LOG_ROTATE_KEEP 30)")" || return 0
-    [[ "$size" =~ ^[0-9]+[kMG]?$ ]] || { ui_msg "Invalid" "Sizes look like 1G or 500M."; return 0; }
-    gb_valid_integer "$keep" || { ui_msg "Invalid" "Keep must be a number."; return 0; }
-    gb_global_set LOG_ROTATE_SIZE "$size"
-    gb_global_set LOG_ROTATE_KEEP "$keep"
-    logs_render_rotation
+    menu_settings_save 'Log retention' LOG_ROTATE_SIZE "$size" LOG_ROTATE_KEEP "$keep" || return 0
+    if ! logs_render_rotation; then
+        ui_msg 'Log retention' 'Settings were saved, but log rotation configuration could not be applied. Check the reported error before retrying.'
+        return 0
+    fi
     ui_msg "Log retention" "Logs rotate at $size and $keep archives are kept."
 }
 
 menu_system() {
-    local choice out
+    local choice out deps_label='Install dependencies (apt)'
+    gb_is_docker && deps_label='Image dependencies: update through the Docker host'
     while true; do
         choice="$(ui_menu "System" "$(hostname -f 2>/dev/null || hostname)" \
             doctor "Check this host" \
-            deps "Install dependencies (apt)" \
+            deps "$deps_label" \
             cloudflare "Cloudflare origin tools (IP ranges, origin pulls)" \
             selftest "Run the test suite" \
             back "Back")" || return 0
         out="$(gb_tmpdir)/system.$$"
         case "$choice" in
             doctor) doctor_run > "$out" 2>&1 || true; ui_textbox "Host check" "$out" ;;
-            deps) ui_run "Install dependencies" doctor_install_deps ;;
+            deps)
+                if gb_is_docker; then
+                    ui_msg 'Image dependencies' 'Dependencies are installed when the image is built. To receive updates, select the image tag in .env on the Docker host, then run:\n\ndocker compose pull\ndocker compose up -d\n\nThis replaces the container while retaining its persistent mounts.'
+                else
+                    ui_run "Install dependencies" doctor_install_deps || true
+                fi ;;
             cloudflare) cloudflare_system_menu ;;
             selftest) ui_run "Self-test" "$GB_REPO_DIR/tests/run.sh" ;;
             back) return 0 ;;

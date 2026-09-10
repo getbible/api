@@ -43,7 +43,7 @@ ep_load() {
     local domain="$1" key
     ep_exists "$domain" || gb_die "Unknown domain: $domain"
     for key in DOMAIN SLUG TYPE KIND ACCESS_MODE RATE_PER_SECOND RATE_BURST QUOTA_HOUR QUOTA_DAY \
-               CONN_LIMIT CLOUDFLARE_MODE CLOUDFLARE_CACHE CLOUDFLARE_ORIGIN_PULLS DOCS_SOURCE \
+               CONN_LIMIT CLOUDFLARE_MODE CLOUDFLARE_CACHE CLOUDFLARE_FEATURES CLOUDFLARE_ORIGIN_PULLS DOCS_SOURCE \
                EXTENSIONS CACHE_TTL SHA_CACHE_TTL SYNC_SCHEDULE SYNC_USER DEFAULT_ENDPOINT CREATED ENABLED LIVE \
                FAVICON_SOURCE FAVICON_MIME LOGO_SOURCE LOGO_FILE; do
         printf -v "EP_$key" '%s' ""
@@ -72,8 +72,9 @@ ep_create() {
     cfg_set "$conf" QUOTA_HOUR "$(gb_global DEFAULT_QUOTA_HOUR 10000)"
     cfg_set "$conf" QUOTA_DAY "$(gb_global DEFAULT_QUOTA_DAY 100000)"
     cfg_set "$conf" CONN_LIMIT "$(gb_global DEFAULT_CONN_LIMIT 100)"
-    cfg_set "$conf" CLOUDFLARE_MODE off
-    cfg_set "$conf" CLOUDFLARE_CACHE bypass
+    cfg_set "$conf" CLOUDFLARE_MODE "$(gb_global DEFAULT_CLOUDFLARE_MODE off)"
+    cfg_set "$conf" CLOUDFLARE_CACHE "$(gb_global DEFAULT_CLOUDFLARE_CACHE bypass)"
+    cfg_set "$conf" CLOUDFLARE_FEATURES "$(gb_global DEFAULT_CLOUDFLARE_FEATURES free)"
     cfg_set "$conf" CLOUDFLARE_ORIGIN_PULLS false
     cfg_set "$conf" DOCS_SOURCE generated
     cfg_set "$conf" FAVICON_SOURCE default

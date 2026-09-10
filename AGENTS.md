@@ -8,21 +8,26 @@ Read this before changing anything. It applies to the whole repository.
 server: static domains (file trees synced from git repositories and served
 by nginx) and runtime domains (the `query` and `search` services built on
 the getBible librarian, run by gunicorn behind nginx). Everything the tool
-installs is rendered from `src/` and recorded. `getbible.sh self-update`
+installs is rendered from `src/` and recorded. Native `getbible.sh self-update`
 fetches the tracked upstream into the manager's source checkout only;
 the next invocation loads the new code. Separately, `getbible.sh update`
 applies the current checkout to hosted domains without fetching.
+Docker installations load the manager from the image and use image replacement
+for manager updates; `getbible` is a command linked to the same entry point.
+See `docs/DEPLOYMENT_DECISIONS.md` before changing deployment behavior.
 
 ## Vocabulary
 
-- A **domain** is a host name: one nginx vhost, one certificate, one go-live.
+- A **domain** is a host name: one nginx vhost, one go-live, and a certificate
+  at the TLS terminator (local nginx with managed TLS, external HAProxy with
+  external TLS).
 - An **endpoint** is one of a domain's version folders (`/v2/`): a tree
   synced from its own repository with its own deploy key (static) or a
   service of its own (runtime). Static deploy keys belong to endpoints,
   never to a domain: endpoints on one domain may use different repositories.
   A domain set up without version folders serves a single endpoint at its
   root, label `root`; that endpoint still owns its repository identity while
-  the domain owns the hostname and certificate.
+  the domain owns the hostname and TLS configuration.
 - Use these words in the menu, in output and in documentation. The registry
   directory (`/etc/getbible/endpoints/<domain>/endpoint.conf` for the
   domain, `versions/<label>.conf` for its endpoints), the `endpoint_*`
@@ -58,8 +63,14 @@ of the librarian's existing cached data loading.
 Availability and fast access are the objective. Preserve open access and the
 existing unlimited-token behavior; do not introduce extra quotas, branch
 protection, production corpus load tests or monitoring requirements. Cloudflare
-management is optional and off by default. When enabled for a domain, only that
-domain's owned records and rules may be changed.
+management is optional and off by default for native deployment. The supplied
+Docker external-proxy profile uses proxied Cloudflare with Free capabilities
+and public cache respect mode. Public edge cache hits are desirable and need
+not count toward origin analytics or public budgets: limits protect origin
+capacity. Preserve token-only cache bypass and public-to-private purge behavior.
+Paid features require explicit selection and actual zone entitlement. When
+Cloudflare is enabled for a domain, only that domain's owned records and rules
+may be changed; do not silently change zone-wide settings for unrelated sites.
 
 Static pages and OpenAPI documents may be supplied freely by the repository or
 operator. Generated runtime documentation must match the actual GET query and
@@ -72,6 +83,25 @@ remain public regardless of the data access mode.
   Preserve normal updates, redeployment, certificate renewal and generation
   rollback. Do not add conversion of old schemas, legacy filesystem layouts
   or retirement routines for a previous server implementation.
+
+- Preserve both native and Docker execution modes. Docker is one Linux system
+  container with systemd, nginx and managed services; keep service identities,
+  sandboxes, timers, socket/readiness/drain and rollback behavior. Do not turn
+  test path redirection into container detection. TLS ownership is independent
+  of execution mode; external TLS serves complete HTTP vhosts behind trusted
+  proxies and retains public HTTPS URLs.
+- Container startup restores saved local state, identities and enabled services
+  before traffic. It must not fetch updates, redeploy applications, issue
+  certificates or take over DNS as a side effect of an ordinary restart.
+  Persist account UIDs/GIDs and membership before services access mounted data;
+  do not blanket-chown a corpus to hide an identity collision.
+- Release images contain the dependencies offered by Docker's runtime menu;
+  endpoint deployment must not download Python or compile runtime packages.
+  Container manager updates come from the image, native manager updates from
+  Git. Keep explicit endpoint apply/update and retained-generation rollback.
+- Environment overrides must be validated and identified as authoritative in
+  the manager. Aggregate memory budgeting must account for all runtime endpoints
+  and update overlap; never promise fixed cache-entry counts are byte limits.
 
 - Commits are authored in the maintainer's name. Do not add a
   `Co-Authored-By` trailer, a session link, an assistant name, or any other
@@ -93,7 +123,9 @@ remain public regardless of the data access mode.
 - nginx is only ever reloaded, never restarted, and only after `nginx -t`.
 - A staged domain (`LIVE=false`) never takes over its public name on its
   own: no apply requests a certificate or changes Cloudflare DNS or rules
-  until go-live, which obtains the certificate before marking it live. The
+  until go-live. Managed TLS obtains the local certificate before activation;
+  external TLS checks the local HTTP origin first and verifies public HTTPS
+  after activation, with certificate provisioning owned by the proxy. The
   operator may issue a certificate for it explicitly (Domain >
   Certificate > Issue; DNS-01 publishes a TXT record) without it going live.
 - Anything that changes files on the server sends a Telegram notification

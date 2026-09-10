@@ -5,3 +5,7 @@ __pycache__/
 .venv/
 .venv-test/
 .pytest_cache/
+.env
+.env.*
+!.env.example
+getbible-data/

@@ -85,7 +85,8 @@ class CloudflareCacheTest(unittest.TestCase):
             operations.append(("request", args))
             return {"success": True}
 
-        with patch.object(cloudflare, "find_zone", return_value={"id": "zone", "name": "example.test"}), \
+        with patch.object(cloudflare, "find_zone", return_value={"id": "zone", "name": "example.test", "plan": {"name": "Free Website"}}), \
+                patch.object(cloudflare, "entrypoint", return_value=None), \
                 patch.object(cloudflare, "replace_rule", side_effect=replace), patch.object(cloudflare, "request", side_effect=request):
             result = cloudflare.cmd_protect_access("api.example.test")
         self.assertEqual(operations[0][0], "rule")
@@ -95,7 +96,8 @@ class CloudflareCacheTest(unittest.TestCase):
 
     def test_failed_purge_is_not_reported_as_secured(self):
         cloudflare = helper("getbible-cloudflare")
-        with patch.object(cloudflare, "find_zone", return_value={"id": "zone", "name": "example.test"}), \
+        with patch.object(cloudflare, "find_zone", return_value={"id": "zone", "name": "example.test", "plan": {"name": "Free Website"}}), \
+                patch.object(cloudflare, "entrypoint", return_value=None), \
                 patch.object(cloudflare, "replace_rule"), \
                 patch.object(cloudflare, "request", side_effect=cloudflare.CloudflareError("Cache Purge permission missing")), \
                 self.assertRaisesRegex(cloudflare.CloudflareError, "Cache Purge"):

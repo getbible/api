@@ -3,10 +3,10 @@
 
 Usage:
   getbible-cloudflare verify
-  getbible-cloudflare zone DOMAIN
+  getbible-cloudflare zone DOMAIN [--features free|paid]
   getbible-cloudflare dns-show DOMAIN
   getbible-cloudflare dns DOMAIN --proxied true|false [--ipv4 A] [--ipv6 AAAA]
-  getbible-cloudflare host-rules DOMAIN --cache bypass|respect [--security api|default]
+  getbible-cloudflare host-rules DOMAIN --cache bypass|respect [--security api|default] [--features free|paid] [--check]
   getbible-cloudflare host-rules-remove DOMAIN
   getbible-cloudflare protect-access DOMAIN
   getbible-cloudflare zone-settings DOMAIN [--http3 on] [--brotli on] [--min-tls 1.2] [--always-https on]
@@ -23,8 +23,10 @@ they are updated in place and never duplicate.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -104,13 +106,31 @@ def cmd_dns(domain: str, args: list[str]) -> dict:
             ipv6 = args.pop(0)
         else:
             raise CloudflareError(f"unknown option {item}")
+    for value, version in ((ipv4, 4), (ipv6, 6)):
+        if value is None or (version == 6 and value == "none"):
+            continue
+        try:
+            if ipaddress.ip_address(value).version != version:
+                raise ValueError("wrong address family")
+        except ValueError as error:
+            raise CloudflareError(f"Invalid IPv{version} origin address: {value}") from error
     zone = find_zone(domain)
-    existing = {(r["type"]): r for r in dns_records(zone["id"], domain) if r["type"] in {"A", "AAAA"}}
+    records = dns_records(zone["id"], domain)
+    existing = {(r["type"]): r for r in records if r["type"] in {"A", "AAAA"}}
+    if not ipv4 and "A" not in existing and ipv6 == "none":
+        raise CloudflareError(f"No IPv4 address is available for {domain}; refusing to remove its only DNS origin")
     if not existing and not ipv4 and not ipv6:
         raise CloudflareError(f"No A/AAAA records or origin addresses are available for {domain}; DNS was not configured")
     results = []
+    removed = []
     for record_type, content in (("A", ipv4), ("AAAA", ipv6)):
         current = existing.get(record_type)
+        if record_type == "AAAA" and content == "none":
+            for record in records:
+                if record.get("type") == "AAAA":
+                    request("DELETE", f"/zones/{zone['id']}/dns_records/{record['id']}")
+                    removed.append({"type": "AAAA", "content": record["content"]})
+            continue
         if content is None:
             if current is not None and proxied is not None and current.get("proxied") != proxied:
                 body = {"type": record_type, "name": domain, "content": current["content"], "proxied": proxied, "ttl": 1}
@@ -124,7 +144,8 @@ def cmd_dns(domain: str, args: list[str]) -> dict:
             results.append(request("PATCH", f"/zones/{zone['id']}/dns_records/{current['id']}", body)["result"])
         else:
             results.append(current)
-    return {"zone": zone["name"], "records": [{"type": r["type"], "content": r["content"], "proxied": r["proxied"]} for r in results]}
+    return {"zone": zone["name"], "records": [{"type": r["type"], "content": r["content"], "proxied": r["proxied"]} for r in results],
+            "removed": removed}
 
 
 def cmd_dns_show(domain: str) -> dict:
@@ -207,7 +228,7 @@ def api_bot_settings(zone_id: str, domain: str) -> dict:
     if settings.get("fight_mode") or stale.get("fight_mode"):
         raise CloudflareError(
             f"Bot Fight Mode is enabled for the zone containing {domain}; it can challenge API clients "
-            "and cannot be skipped per hostname. Keep DNS-only mode, or explicitly disable it with "
+            "and cannot be skipped per hostname. Explicitly disable it with "
             f"'getbible.sh cloudflare bot-fight {domain} off' (affects the whole zone), then retry."
         )
     return settings
@@ -215,25 +236,203 @@ def api_bot_settings(zone_id: str, domain: str) -> dict:
 
 # The two expressions are complements within one hostname, so our cache and
 # bypass rules never override one another, regardless of their positions.
-# Query-bearing requests stay at the origin: shared cache-key rules may drop
-# parameters, and a full custom query-key override requires Enterprise.
+# Public query strings use Cloudflare's full default URL key, audited below.
 PUBLIC_CACHE_REQUEST = (
     '(http.request.method in {"GET" "HEAD"} '
-    'and http.request.uri.query eq "" '
-    'and not any(http.request.headers["authorization"][*] ne "") '
-    'and http.cookie eq "" and not http.request.headers.truncated)'
+    'and not has_key(http.request.headers, "authorization") '
+    'and not has_key(http.request.headers, "cookie") and not http.request.headers.truncated '
+    'and not starts_with(http.request.uri.path, "/.well-known/getbible-origin/") '
+    'and not http.request.uri.path in {"/healthz" "/readyz" "/probez"})'
 )
+
+
+# Free is the deliberate default even when the zone happens to have a paid
+# subscription. Paid selection uses only capabilities verified for that zone.
+RULE_LIMITS = {
+    "free": (10, 10, 5), "pro": (25, 25, 20),
+    "business": (50, 50, 100), "enterprise": (300, 300, 1000),
+}
+RULE_PHASES = ("http_config_settings", "http_request_cache_settings", "http_request_firewall_custom")
+
+
+def zone_plan(zone: dict) -> str:
+    plan = zone.get("plan") or {}
+    value = str(plan.get("legacy_id") or plan.get("name") or "").lower()
+    for name in RULE_LIMITS:
+        if value == name or value.startswith(name + " "):
+            return name
+    raise CloudflareError("Cloudflare did not return a recognized zone plan; no rules were changed")
+
+
+def selected_features(zone: dict, features: str) -> dict:
+    if features not in {"free", "paid"}:
+        raise CloudflareError("features must be free|paid")
+    actual = zone_plan(zone)
+    if features == "paid" and actual == "free":
+        raise CloudflareError("Paid features were selected, but this zone is on Cloudflare Free; no rules were changed")
+    return {"plan": actual, "features": features,
+            "limits": dict(zip(RULE_PHASES, RULE_LIMITS[actual if features == "paid" else "free"]))}
+
+
+def read_result(path: str, expected: type):
+    """An unreadable audit is not evidence that the zone has no configuration."""
+    payload = request("GET", path)
+    result = payload.get("result")
+    if not isinstance(result, expected):
+        raise CloudflareError(f"Cloudflare returned no readable configuration for {path}; check the token's read permissions")
+    return result
+
+
+def read_list(path: str, *, paginate: bool = False) -> list[dict]:
+    result = []
+    page = 1
+    while True:
+        query = f"{'&' if '?' in path else '?'}per_page=50&page={page}" if paginate else ""
+        payload = request("GET", path + query)
+        items = payload.get("result")
+        if not isinstance(items, list):
+            raise CloudflareError(f"Cannot inspect {path}; check the token's read permissions")
+        result.extend(items)
+        total_pages = (payload.get("result_info") or {}).get("total_pages", 1)
+        if not paginate or page >= total_pages:
+            return result
+        page += 1
+
+
+def host_may_match(expression: str, domain: str) -> bool:
+    """Recognize simple disjoint host rules; do not pretend to parse Rules language.
+
+    Unknown/compound expressions remain possible overlaps. The conflict report
+    identifies the exact foreign rule instead of modifying it or dropping keys.
+    """
+    expression = expression.strip()
+    match = re.fullmatch(r'\(?http\.host eq "([a-zA-Z0-9.-]+)"\)?', expression)
+    if match:
+        return match.group(1).lower() == domain.lower()
+    # A leading, parenthesized host condition joined only with AND scopes all
+    # following conditions. OR/NOT requires Cloudflare's own evaluator.
+    match = re.match(r'^\(http\.host eq "([a-zA-Z0-9.-]+)"\) and ', expression)
+    if match and " or " not in expression and " xor " not in expression:
+        return match.group(1).lower() == domain.lower()
+    return True
+
+
+def url_pattern_may_match(pattern: str, domain: str) -> bool:
+    # Page Rules and Workers use '*' globs. We inspect the hostname; a Worker
+    # on any path of this API hostname may override its cache/auth contract.
+    authority = pattern.split("://", 1)[-1].split("/", 1)[0].lower()
+    if ":" in authority:
+        authority = authority.rsplit(":", 1)[0]
+    if not authority:
+        return True
+    return re.fullmatch(re.escape(authority).replace(r"\*", ".*"), domain.lower()) is not None
+
+
+def audit_cache_keys(zone: dict, domain: str, rules: list[dict]) -> dict:
+    conflicts = []
+    level = read_result(f"/zones/{zone['id']}/settings/cache_level", dict).get("value")
+    if level != "aggressive":
+        conflicts.append(f"zone Caching Level is {level!r}; Standard (API value aggressive) is required")
+    for rule in rules:
+        if rule.get("enabled", True) is False or not host_may_match(rule.get("expression", ""), domain):
+            continue
+        params = rule.get("action_parameters") or {}
+        key = params.get("cache_key") or {}
+        custom = key.get("custom_key") or {}
+        query = custom.get("query_string")
+        host = custom.get("host") or {}
+        # These settings accumulate from previous matching rules even when the
+        # final host rule restores cache eligibility and the origin TTL.
+        if ((query is not None and query != {"include": ["*"]})
+                or host.get("resolved") is True
+                or key.get("ignore_query_strings_order") is True
+                or params.get("origin_cache_control") is False):
+            conflicts.append(f"Cache Rule {rule.get('id', '?')} ({rule.get('description', '')}) changes complete URL keys or disables origin cache control")
+    page_rules = read_list(f"/zones/{zone['id']}/pagerules?status=active", paginate=True)
+    for rule in page_rules:
+        if rule.get("status") == "disabled":
+            continue
+        targets = rule.get("targets") or []
+        applies = not targets or any(url_pattern_may_match((target.get("constraint") or {}).get("value", "*"), domain) for target in targets)
+        if not applies:
+            continue
+        for action in rule.get("actions", []):
+            if action.get("id") in {"cache_key", "cache_key_fields"} or (
+                    action.get("id") == "cache_level" and action.get("value") in {"ignore_query_string", "simplified"}):
+                conflicts.append(f"Page Rule {rule.get('id', '?')} changes the query cache key")
+    routes = read_list(f"/zones/{zone['id']}/workers/routes")
+    for route in routes:
+        if route.get("script") and url_pattern_may_match(route.get("pattern", "*"), domain):
+            conflicts.append(f"Worker route {route.get('id', '?')} ({route.get('pattern', '')}) can override caching and authentication")
+    account = (zone.get("account") or {}).get("id")
+    if not account:
+        raise CloudflareError("Cloudflare returned no account ID for the zone; cannot inspect Worker custom domains")
+    custom_domains = read_list(f"/accounts/{account}/workers/domains?hostname={domain}&zone_id={zone['id']}", paginate=True)
+    for item in custom_domains:
+        if item.get("hostname", "").lower() == domain.lower():
+            conflicts.append(f"Worker custom domain {item.get('id', '?')} serves this API hostname")
+    if conflicts:
+        raise CloudflareError("Cloudflare public-cache preflight failed for " + domain + ": " + "; ".join(conflicts)
+                              + ". Resolve the listed overlap for this hostname, then retry; unrelated settings were not changed.")
+    return {"query_string_requests": "cache eligible; complete hostname, path and query string retained",
+            "cache_audit": "zone settings, Cache Rules, Page Rules, Worker routes and custom domains checked"}
+
+
+def preflight_rules(zone: dict, domain: str, cache: str, security: str, features: str) -> dict:
+    profile = selected_features(zone, features)
+    snapshots = {phase: entrypoint(zone["id"], phase) or {"rules": []} for phase in RULE_PHASES}
+    description = f"getbible:{domain}"
+    wanted = {
+        RULE_PHASES[0]: [description] if security == "api" else [],
+        RULE_PHASES[1]: [description, description + ":private"] if cache == "respect" else [description],
+        RULE_PHASES[2]: [description] if security == "api" else [],
+    }
+    # WAF quotas include rules in the zone's custom rulesets, not only its
+    # entry point. Read those counts before the first mutation as well.
+    extra_waf = 0
+    if security == "api":
+        for ruleset in read_list(f"/zones/{zone['id']}/rulesets", paginate=True):
+            if ruleset.get("phase") == RULE_PHASES[2] and ruleset.get("kind") == "custom":
+                detail = read_result(f"/zones/{zone['id']}/rulesets/{ruleset['id']}", dict)
+                extra_waf += len(detail.get("rules") or [])
+    counts = {}
+    for phase, current in snapshots.items():
+        rules = current.get("rules") or []
+        extra = extra_waf if phase == RULE_PHASES[2] else 0
+        missing = sum(not any(rule.get("description") == desc for rule in rules) for desc in wanted[phase])
+        peak = len(rules) + extra + missing
+        limit = profile["limits"][phase]
+        # Removing/updating owned rules must remain possible at an existing
+        # limit. Only additions need an available slot during the operation.
+        if missing and peak > limit:
+            raise CloudflareError(f"Cloudflare {profile['features']} profile rule capacity exceeded in {phase}: "
+                                  f"{len(rules) + extra} existing + {missing} needed, limit {limit}. "
+                                  "No rules or DNS changed; free slots or explicitly select paid features on an entitled zone.")
+        counts[phase] = {"existing": len(rules) + extra, "additional": missing, "limit": limit}
+    out = {"plan": profile["plan"], "features": features, "rule_capacity": counts}
+    if cache == "respect":
+        if profile["plan"] == "enterprise" and features != "paid":
+            raise CloudflareError("An Enterprise zone needs explicit paid feature selection for public caching so "
+                                  "Origin Cache Control can be enforced. Free, Pro and Business always enable it.")
+        out.update(audit_cache_keys(zone, domain, snapshots[RULE_PHASES[1]].get("rules") or []))
+    return out
 
 
 def cmd_host_rules(domain: str, args: list[str]) -> dict:
     cache = "bypass"
     security = "api"
+    features = "free"
+    check = False
     while args:
         item = args.pop(0)
         if item == "--cache":
             cache = args.pop(0)
         elif item == "--security":
             security = args.pop(0)
+        elif item == "--features":
+            features = args.pop(0)
+        elif item == "--check":
+            check = True
         else:
             raise CloudflareError(f"unknown option {item}")
     if cache not in {"bypass", "respect"} or security not in {"api", "default"}:
@@ -243,6 +442,15 @@ def cmd_host_rules(domain: str, args: list[str]) -> dict:
     description = f"getbible:{domain}"
     out: dict = {"zone": zone["name"]}
     bot_settings = api_bot_settings(zone["id"], domain) if security == "api" else {}
+    has_sbfm = any(key.startswith("sbfm_") and value in ("block", "managed_challenge")
+                   for settings in (bot_settings, bot_settings.get("stale_zone_configuration") or {})
+                   for key, value in settings.items())
+    if has_sbfm and features != "paid":
+        raise CloudflareError("Super Bot Fight Mode is active; skipping this paid feature requires explicit "
+                              "'cloudflare features DOMAIN paid' selection on an entitled zone. No rules were changed.")
+    out.update(preflight_rules(zone, domain, cache, security, features))
+    if check:
+        return dict(out, check="passed; no remote changes")
 
     # Configuration rule: API-friendly security for this host only.
     if security == "api":
@@ -255,6 +463,23 @@ def cmd_host_rules(domain: str, args: list[str]) -> dict:
         config = None
     out["config_rule"] = "set" if config else "removed"
     replace_rule(zone["id"], "http_config_settings", description, config, last=True)
+
+    # An exception appended after a custom challenge is too late. Place only
+    # our host-scoped rule first, preserving other rules and their relative order.
+    phases = ["http_ratelimit", "http_request_firewall_managed"]
+    if has_sbfm:
+        phases.append("http_request_sbfm")
+    skip = {
+        "action": "skip", "expression": expression, "enabled": True,
+        "action_parameters": {"ruleset": "current", "phases": phases,
+                              "products": ["bic", "hot", "securityLevel", "uaBlock", "zoneLockdown"]},
+        "logging": {"enabled": True},
+    }
+    replace_rule(zone["id"], "http_request_firewall_custom", description,
+                 skip if security == "api" else None, first=security == "api")
+    out["waf_skip"] = "set" if security == "api" else "removed"
+    if security == "api":
+        out["bot_fight_mode"] = "off"
 
     # Cache eligibility applies to every endpoint on the hostname, including
     # JSON. Credentials and POSTs must also bypass reads of a public cache hit.
@@ -269,37 +494,21 @@ def cmd_host_rules(domain: str, args: list[str]) -> dict:
             "action": "set_cache_settings",
             "expression": f"{expression} and {PUBLIC_CACHE_REQUEST}", "enabled": True,
             "action_parameters": {"cache": True, "edge_ttl": {"mode": "bypass_by_default"},
-                                  "browser_ttl": {"mode": "respect_origin"},
-                                  "respect_strong_etags": True, "origin_error_page_passthru": True},
+                                  "browser_ttl": {"mode": "respect_origin"}},
         }
+        if out["plan"] == "enterprise":
+            # Unlike Free/Pro/Business, Enterprise can disable OCC. This field
+            # is Enterprise-only, and preflight requires the paid opt-in.
+            cache_rule["action_parameters"]["origin_cache_control"] = True
     else:
         cache_rule = {"action": "set_cache_settings", "expression": expression, "enabled": True,
                       "action_parameters": {"cache": False}}
     out["cache_rule"] = cache
-    if cache == "respect":
-        out["query_string_requests"] = "bypass edge cache; origin keeps complete URL cache keys"
     replace_rule(zone["id"], "http_request_cache_settings", description, cache_rule, last=True)
     if cache == "bypass":
         # The host-wide bypass is already active before the narrower rule goes.
         replace_rule(zone["id"], "http_request_cache_settings", description + ":private", None)
 
-    # An exception appended after a custom challenge is too late. Place only
-    # our host-scoped rule first, preserving other rules and their relative order.
-    phases = ["http_ratelimit", "http_request_firewall_managed"]
-    if any(key.startswith("sbfm_") for key in bot_settings) or any(
-            key.startswith("sbfm_") for key in (bot_settings.get("stale_zone_configuration") or {})):
-        phases.append("http_request_sbfm")
-    skip = {
-        "action": "skip", "expression": expression, "enabled": True,
-        "action_parameters": {"ruleset": "current", "phases": phases,
-                              "products": ["bic", "hot", "securityLevel", "uaBlock", "zoneLockdown"]},
-        "logging": {"enabled": True},
-    }
-    replace_rule(zone["id"], "http_request_firewall_custom", description,
-                 skip if security == "api" else None, first=security == "api")
-    out["waf_skip"] = "set" if security == "api" else "removed"
-    if security == "api":
-        out["bot_fight_mode"] = "off"
     return out
 
 
@@ -310,6 +519,15 @@ def cmd_protect_access(domain: str) -> dict:
     applications can share it. Missing Cache Purge permission is an error.
     """
     zone = find_zone(domain)
+    current = entrypoint(zone["id"], "http_request_cache_settings") or {"rules": []}
+    existing = current.get("rules") or []
+    # This transition changes only one cache rule; do not require unrelated
+    # security-profile capacity to make cached public data inaccessible.
+    if not any(item.get("description") == f"getbible:{domain}" for item in existing):
+        limit = RULE_LIMITS[zone_plan(zone)][1]
+        if len(existing) >= limit:
+            raise CloudflareError(f"Cloudflare cache rule capacity is full ({len(existing)}/{limit}); "
+                                  "the protected transition was not activated. Free one cache rule slot and retry.")
     rule = {
         "action": "set_cache_settings", "expression": f'(http.host eq "{domain}")', "enabled": True,
         "action_parameters": {"cache": False},
@@ -343,7 +561,7 @@ def cmd_zone_settings(domain: str, args: list[str]) -> dict:
         item = args.pop(0)
         value = args.pop(0)
         key = {"--http3": "http3", "--brotli": "brotli", "--min-tls": "min_tls_version", "--always-https": "always_use_https",
-               "--tls13": "tls_1_3", "--ssl": "ssl"}.get(item)
+               "--tls13": "tls_1_3", "--ssl": "ssl", "--cache-level": "cache_level"}.get(item)
         if key is None:
             raise CloudflareError(f"unknown option {item}")
         wanted[key] = value
@@ -352,7 +570,9 @@ def cmd_zone_settings(domain: str, args: list[str]) -> dict:
         try:
             request("PATCH", f"/zones/{zone['id']}/settings/{key}", {"value": value})
             out["settings"][key] = value
-        except SystemExit as error:
+        except CloudflareError as error:
+            if key == "cache_level":
+                raise
             out["settings"][key] = f"not applied ({error})"
     return out
 
@@ -431,7 +651,11 @@ def main(argv: list[str]) -> int:
         out = {"status": result.get("status"), "id": result.get("id")}
     elif command == "zone":
         zone = find_zone(rest[0])
-        out = {"id": zone["id"], "name": zone["name"], "plan": (zone.get("plan") or {}).get("name")}
+        out = {"id": zone["id"], "name": zone["name"], "plan": zone_plan(zone)}
+        if len(rest) > 1:
+            if len(rest) != 3 or rest[1] != "--features":
+                raise CloudflareError("zone options: --features free|paid")
+            out.update(selected_features(zone, rest[2]))
     elif command == "dns-show":
         out = cmd_dns_show(rest[0])
     elif command == "dns":

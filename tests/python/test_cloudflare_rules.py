@@ -178,14 +178,15 @@ class CloudflareRulesTest(unittest.TestCase):
 class CloudflareApiProfileTest(unittest.TestCase):
     def setUp(self):
         self.helper = load_helper()
-        self.zone = {"id": "zone", "name": "example.test"}
+        self.zone = {"id": "zone", "name": "example.test", "plan": {"name": "Free Website"}, "account": {"id": "account"}}
         self.domain = "api.example.test"
 
-    def profile(self, cache="respect", bot_settings=None):
+    def profile(self, cache="respect", bot_settings=None, features="free"):
         with patch.object(self.helper, "find_zone", return_value=self.zone), \
                 patch.object(self.helper, "request", return_value={"result": bot_settings or {"fight_mode": False}}), \
+                patch.object(self.helper, "preflight_rules", return_value={"plan": "free", "query_string_requests": "cache eligible; complete hostname, path and query string retained"}), \
                 patch.object(self.helper, "replace_rule", return_value={}) as replace:
-            result = self.helper.cmd_host_rules(self.domain, ["--cache", cache])
+            result = self.helper.cmd_host_rules(self.domain, ["--cache", cache, "--features", features])
         return result, replace.call_args_list
 
     def test_json_uses_origin_ttls_without_an_enterprise_cache_key(self):
@@ -199,11 +200,11 @@ class CloudflareApiProfileTest(unittest.TestCase):
         self.assertEqual(params["edge_ttl"], {"mode": "bypass_by_default"})
         self.assertEqual(params["browser_ttl"], {"mode": "respect_origin"})
         self.assertNotIn("cache_key", params)
-        self.assertNotIn("uri.path", public["expression"])
-        self.assertTrue(params["respect_strong_etags"])
-        self.assertTrue(params["origin_error_page_passthru"])
+        self.assertIn("/.well-known/getbible-origin/", public["expression"])
+        self.assertNotIn("respect_strong_etags", params)
+        self.assertNotIn("origin_error_page_passthru", params)
         self.assertEqual(result["waf_skip"], "set")
-        self.assertIn("bypass edge cache", result["query_string_requests"])
+        self.assertIn("complete hostname, path and query string", result["query_string_requests"])
 
     def test_private_requests_bypass_public_hits_without_rule_order_dependency(self):
         _, calls = self.profile()
@@ -213,8 +214,9 @@ class CloudflareApiProfileTest(unittest.TestCase):
         self.assertTrue(all(call.kwargs == {"last": True} for call in cache_calls))
         self.assertEqual(private["expression"], '(http.host eq "api.example.test") and not ' + self.helper.PUBLIC_CACHE_REQUEST)
         self.assertEqual(public["expression"], '(http.host eq "api.example.test") and ' + self.helper.PUBLIC_CACHE_REQUEST)
-        for required in ('{"GET" "HEAD"}', 'http.request.uri.query eq ""',
-                         'headers["authorization"]', 'http.cookie eq ""',
+        self.assertNotIn('http.request.uri.query eq ""', public["expression"])
+        for required in ('{"GET" "HEAD"}', 'not has_key(http.request.headers, "authorization")',
+                         'not has_key(http.request.headers, "cookie")',
                          'not http.request.headers.truncated'):
             self.assertIn(required, public["expression"])
 
@@ -228,7 +230,7 @@ class CloudflareApiProfileTest(unittest.TestCase):
     def test_skip_is_first_host_scoped_and_never_skips_ddos(self):
         for settings, has_sbfm in (({"fight_mode": False}, False), ({"sbfm_definitely_automated": "block"}, True)):
             with self.subTest(settings=settings):
-                _, calls = self.profile(bot_settings=settings)
+                _, calls = self.profile(bot_settings=settings, features="paid" if has_sbfm else "free")
                 call = next(call for call in calls if call.args[1] == "http_request_firewall_custom")
                 rule = call.args[3]
                 self.assertEqual(rule["expression"], '(http.host eq "api.example.test")')
@@ -267,6 +269,7 @@ class CloudflareApiProfileTest(unittest.TestCase):
             with self.subTest(phase=failure_phase), \
                     patch.object(self.helper, "find_zone", return_value=self.zone), \
                     patch.object(self.helper, "request", return_value={"result": {"fight_mode": False}}), \
+                    patch.object(self.helper, "preflight_rules", return_value={"plan": "free"}), \
                     patch.object(self.helper, "replace_rule", side_effect=apply), \
                     self.assertRaisesRegex(self.helper.CloudflareError, "plan rule limit"):
                 self.helper.cmd_host_rules(self.domain, ["--cache", "respect"])

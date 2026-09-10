@@ -1,5 +1,12 @@
 # Installing on a server
 
+This page describes **native installation** with locally managed TLS. For a
+prebuilt image and no host repository clone, follow [DOCKER.md](DOCKER.md).
+For externally managed TLS on either execution mode, use
+[OPNSENSE_HAPROXY.md](OPNSENSE_HAPROXY.md); local Certbot and port-443 steps
+below apply only to managed TLS. Both modes use the same domain and endpoint
+management commands and preserve existing service isolation.
+
 Start with a fresh Ubuntu 24.04 or 26.04 host and sudo. Each domain can be
 deployed staged and checked before public DNS points here, then go live later
 (see `NEW_SERVER.md`).

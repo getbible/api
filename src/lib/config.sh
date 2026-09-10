@@ -8,7 +8,7 @@ GB_CONFIG_LOADED=1
 cfg_valid_key() { [[ "$1" =~ ^[A-Z][A-Z0-9_]*$ ]]; }
 
 # cfg_get FILE KEY [DEFAULT]
-cfg_get() {
+cfg_get_raw() {
     local file="$1" key="$2" default="${3:-}" line value=""
     local found=false
     if [[ -f "$file" ]]; then
@@ -25,9 +25,27 @@ cfg_get() {
     fi
 }
 
+cfg_get() {
+    local status
+    if declare -F gb_environment_get >/dev/null; then
+        if gb_environment_get "$1" "$2"; then return 0; else status=$?; fi
+        (( status == 1 )) || return "$status"
+    fi
+    cfg_get_raw "$@"
+}
+
 # cfg_set FILE KEY VALUE
 cfg_set() {
-    local file="$1" key="$2" value="$3"
+    local file="$1" key="$2" value="$3" status
+    if [[ "${GB_CONFIG_INITIALIZING:-false}" != true ]] && declare -F gb_environment_managed >/dev/null; then
+        if gb_environment_managed "$file" "$key"; then
+            gb_warn "$key is controlled by GETBIBLE_$key; change the deployment environment and recreate the container."
+            return 1
+        else
+            status=$?
+            (( status == 1 )) || return "$status"
+        fi
+    fi
     cfg_valid_key "$key" || gb_die "Invalid configuration key: $key"
     [[ "$value" != *$'\n'* ]] || gb_die "Configuration values cannot contain newlines ($key)."
     local dir tmp replaced=false line
@@ -51,7 +69,10 @@ cfg_set() {
         chmod 0640 "$tmp"
     fi
     [[ "$replaced" == true ]] || printf '%s=%s\n' "$key" "$value" >> "$tmp"
-    mv -f -- "$tmp" "$file"
+    mv -f -- "$tmp" "$file" || return 1
+    if [[ "${GB_CONFIG_INITIALIZING:-false}" != true && "$file" == "$GB_TELEGRAM_CONF" ]] && declare -F gb_environment_telegram >/dev/null; then
+        gb_environment_telegram || return 1
+    fi
 }
 
 cfg_delete() {
@@ -116,9 +137,24 @@ GB_GLOBAL_DEFAULTS=(
     "CLOUDFLARE_ENABLED=false"
     "SERVER_PUBLIC_IPV4="
     "SERVER_PUBLIC_IPV6="
+    "TLS_MODE=managed"
+    "TRUSTED_PROXY_CIDRS="
+    "PUBLIC_SCHEME=https"
+    "ORIGIN_HTTP_PORT=80"
+    "MEMORY_BUDGET=auto"
+    "DEFAULT_CLOUDFLARE_MODE=off"
+    "DEFAULT_CLOUDFLARE_CACHE=bypass"
+    "DEFAULT_CLOUDFLARE_FEATURES=free"
+    "DEFAULT_QUERY_CACHE_TTL=300"
+    "DEFAULT_SEARCH_CACHE_TTL=60"
+    "DEFAULT_QUERY_WORKERS=4"
+    "DEFAULT_QUERY_THREADS=4"
+    "DEFAULT_SEARCH_WORKERS=2"
+    "DEFAULT_SEARCH_THREADS=4"
 )
 
 gb_global_init() {
+    local GB_CONFIG_INITIALIZING=true
     gb_ensure_dir "$GB_ETC" 0750
     local entry key
     # Before the repository shipped its own icons, a favicon under /etc was
@@ -128,8 +164,17 @@ gb_global_init() {
     fi
     for entry in "${GB_GLOBAL_DEFAULTS[@]}"; do
         key="${entry%%=*}"
-        if [[ -z "$(cfg_get "$GB_GLOBAL_CONF" "$key" "__unset__")" || "$(cfg_get "$GB_GLOBAL_CONF" "$key" "__unset__")" == "__unset__" ]]; then
-            cfg_set "$GB_GLOBAL_CONF" "$key" "${entry#*=}"
+        if [[ "$(cfg_get_raw "$GB_GLOBAL_CONF" "$key" "__unset__")" == "__unset__" ]]; then
+            local value="${entry#*=}"
+            if gb_is_docker; then
+                case "$key" in
+                    TLS_MODE) value=external ;;
+                    DEFAULT_CLOUDFLARE_MODE) value=proxied ;;
+                    DEFAULT_CLOUDFLARE_CACHE) value=respect ;;
+                    DEFAULT_DEPLOY_MODE) value=staged ;;
+                esac
+            fi
+            cfg_set "$GB_GLOBAL_CONF" "$key" "$value"
         fi
     done
     chmod 0640 "$GB_GLOBAL_CONF" 2>/dev/null || true
@@ -146,4 +191,11 @@ gb_global_init() {
 }
 
 gb_global() { cfg_get "$GB_GLOBAL_CONF" "$1" "${2:-}"; }
-gb_global_set() { cfg_set "$GB_GLOBAL_CONF" "$1" "$2"; }
+gb_global_set() {
+    if declare -F gb_setting_validate >/dev/null; then gb_setting_validate "$1" "$2" || return 1; fi
+    if [[ "$1" == MEMORY_BUDGET ]] && declare -F resources_plan >/dev/null; then
+        resources_plan --budget "$2" --format json >/dev/null || return 1
+    fi
+    cfg_set "$GB_GLOBAL_CONF" "$1" "$2" || return 1
+    if declare -F tg_notify >/dev/null; then tg_notify info "Setting changed" "$1 was updated."; fi
+}

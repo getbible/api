@@ -1,5 +1,14 @@
 # Set up a new server and publish its domains
 
+The host preparation and certificate instructions here describe native,
+managed-TLS deployment. To pull the prepared system container, start with
+[DOCKER.md](DOCKER.md), then use the same endpoint/key/menu workflow inside it
+through `docker compose exec --user root getbible getbible`. External TLS and
+public route checks are covered in [OPNSENSE_HAPROXY.md](OPNSENSE_HAPROXY.md).
+The Docker host does not need the manager repository's deploy key; private
+image pulls use a package token, while endpoint data keeps its separate SSH
+deploy keys.
+
 Start with a fresh host, install the manager, and create each domain through
 its deployment workflow. A **staged** domain installs its services, data,
 nginx configuration and documentation so they can be checked before public

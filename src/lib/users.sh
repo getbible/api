@@ -7,12 +7,27 @@ GB_USERS_LOADED=1
 gb_group_exists() { getent group "$1" >/dev/null 2>&1; }
 gb_user_exists() { getent passwd "$1" >/dev/null 2>&1; }
 
+# Numeric ownership belongs to the persistent installation, not the image.
+# Native hosts record the same registry, making backups self-describing.
+gb_identity_record() {
+    [[ -z "$GB_PREFIX" && "$GB_DRY_RUN" != true ]] || return 0
+    "$GB_PYTHON" "$GB_TOOLS/getbible-identities" \
+        --registry "$GB_VAR/identities.json" --log "$GB_VAR/identities.log" record "$@"
+}
+
+gb_identity_forget_user() {
+    [[ -z "$GB_PREFIX" && "$GB_DRY_RUN" != true ]] || return 0
+    "$GB_PYTHON" "$GB_TOOLS/getbible-identities" \
+        --registry "$GB_VAR/identities.json" --log "$GB_VAR/identities.log" forget-user "$1"
+}
+
 gb_ensure_group() {
     local group="$1"
-    gb_group_exists "$group" && return 0
+    if gb_group_exists "$group"; then gb_identity_record --group "$group"; return; fi
     [[ "$GB_DRY_RUN" == true ]] && { gb_log "(dry-run) would create group $group"; return 0; }
     [[ -n "$GB_PREFIX" ]] && return 0
     groupadd --system "$group"
+    gb_identity_record --group "$group" || return 1
     gb_log "Created group $group"
 }
 
@@ -30,6 +45,7 @@ gb_ensure_system_user() {
     if [[ -n "$extra" && -z "$GB_PREFIX" && "$GB_DRY_RUN" != true ]]; then
         usermod -a -G "$extra" "$name"
     fi
+    gb_identity_record --user "$name"
 }
 
 gb_user_in_group() {
@@ -43,6 +59,7 @@ gb_ensure_base_groups() {
     gb_ensure_group "$GB_NOTIFY_GROUP"
     if [[ -z "$GB_PREFIX" && "$GB_DRY_RUN" != true ]] && gb_user_exists "$GB_NGINX_USER"; then
         gb_user_in_group "$GB_NGINX_USER" "$GB_READERS_GROUP" || usermod -a -G "$GB_READERS_GROUP" "$GB_NGINX_USER"
+        gb_identity_record --user "$GB_NGINX_USER" || return 1
     fi
 }
 

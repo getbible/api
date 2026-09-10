@@ -15,7 +15,25 @@ py_app_root() {
 py_releases_dir() { printf '%s/releases\n' "$(py_app_root "$1")"; }
 py_current_link() { printf '%s/current\n' "$(py_app_root "$1")"; }
 py_current_release() { readlink -f -- "$(py_current_link "$1")" 2>/dev/null || true; }
-py_distributions_file() { printf '%s/python/distributions.lock\n' "$GB_SRC"; }
+py_bundle_root() { printf '%s\n' "${GB_RUNTIME_BUNDLE:-/usr/share/getbible/runtime}"; }
+py_distributions_file() {
+    if gb_is_docker; then
+        local catalog
+        catalog="$(py_bundle_root)/distributions.lock"
+        [[ -s "$catalog" ]] || gb_die "This image has no bundled Python catalog; pull a complete getBible image."
+        printf '%s\n' "$catalog"
+    else
+        printf '%s/python/distributions.lock\n' "$GB_SRC"
+    fi
+}
+
+py_selection_prompt() {
+    if gb_is_docker; then
+        printf 'Bundled Python version (%s)' "$(awk '$1 !~ /^#/ && NF {print $1}' "$(py_distributions_file)" | sort -Vu | paste -sd ',')"
+    else
+        printf 'Managed Python version (3.12, 3.13, 3.14 or a catalog patch)'
+    fi
+}
 
 py_catalog() {
     printf 'VERSION    ARCH       BUILD\n'
@@ -37,14 +55,25 @@ py_installed_distribution() {
 # Resolve a reviewed family/exact patch, never query a changing upstream index.
 py_resolve_version() {
     local requested="${1:-auto}" resolved
-    [[ "$requested" == auto ]] && requested="$(platform_default_python)"
+    if [[ "$requested" == auto ]]; then
+        requested="$(platform_default_python)"
+        # A deliberately smaller image may bundle only one reviewed family.
+        if gb_is_docker && ! awk -v wanted="$requested" '$1 !~ /^#/ && ($1 == wanted || index($1, wanted ".") == 1) {found=1} END {exit !found}' "$(py_distributions_file)"; then
+            requested="$(awk '$1 !~ /^#/ && NF {print $1}' "$(py_distributions_file)" | sort -V | tail -n1)"
+        fi
+    fi
     [[ "$requested" =~ ^3\.(12|13|14)(\.[0-9]+)?$ ]] \
         || gb_die "Python must be auto, 3.12, 3.13, 3.14, or an exact reviewed patch."
     resolved="$(awk -v wanted="$requested" '$1 !~ /^#/ && ($1 == wanted || index($1, wanted ".") == 1) {print $1}' "$(py_distributions_file)" | sort -Vu | tail -n1)"
     if [[ -z "$resolved" && "$requested" =~ ^3\.(12|13|14)\.[0-9]+$ && -n "$(py_installed_distribution "$requested")" ]]; then
         resolved="$requested"
     fi
-    [[ -n "$resolved" ]] || gb_die "Python $requested is not in src/python/distributions.lock; update the reviewed catalog first."
+    if [[ -z "$resolved" ]]; then
+        if gb_is_docker; then
+            gb_die "Python $requested is not bundled in this image. $(py_selection_prompt); pull a newer image to obtain other reviewed releases."
+        fi
+        gb_die "Python $requested is not in src/python/distributions.lock; update the reviewed catalog first."
+    fi
     printf '%s\n' "$resolved"
 }
 
@@ -77,7 +106,7 @@ for path in (sys.executable, sys.prefix, sys.base_prefix, encodings.__file__):
 # Installs only into a new, unreferenced directory. An already installed
 # distribution is read-only to service users and is never upgraded in place.
 py_managed_install() (
-    local row version arch build digest url identity target stage='' archive lock_fd
+    local row version arch build digest url identity target stage='' archive lock_fd bundled
     row="$(py_distribution "${1:-auto}")" || exit 1
     IFS=' ' read -r version arch build digest url <<< "$row"
     [[ "$digest" =~ ^[a-f0-9]{64}$ && "$build" =~ ^[0-9]{8}$ ]] || gb_die "Malformed reviewed Python distribution."
@@ -98,13 +127,21 @@ py_managed_install() (
     fi
     stage="$(mktemp -d "$(py_managed_root)/.install.XXXXXXXX")" || exit 1
     trap '[[ -z "$stage" ]] || rm -rf -- "$stage"' EXIT
-    archive="$stage/python.tar.gz"
-    gb_step "Installing managed CPython $version ($arch, build $build)"
-    curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
-        --connect-timeout 20 --max-time 900 --retry 3 --output "$archive" "$url" || exit 1
-    [[ "$(gb_sha256_file "$archive")" == "$digest" ]] || gb_die "Managed Python checksum mismatch; refusing to extract $url."
-    mkdir "$stage/tree" || exit 1
-    tar -xzf "$archive" --strip-components=1 --no-same-owner -C "$stage/tree" || exit 1
+    if gb_is_docker; then
+        bundled="$(py_bundle_root)/python/$identity"
+        [[ -x "$bundled/bin/python3" && "$(cat "$bundled/.distribution" 2>/dev/null)" == "$row" ]] \
+            || gb_die "CPython $version is not complete in this image; pull a complete image. No download was attempted."
+        gb_step "Installing bundled CPython $version ($arch, build $build)"
+        cp -a -- "$bundled" "$stage/tree" || exit 1
+    else
+        archive="$stage/python.tar.gz"
+        gb_step "Installing managed CPython $version ($arch, build $build)"
+        curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+            --connect-timeout 20 --max-time 900 --retry 3 --output "$archive" "$url" || exit 1
+        [[ "$(gb_sha256_file "$archive")" == "$digest" ]] || gb_die "Managed Python checksum mismatch; refusing to extract $url."
+        mkdir "$stage/tree" || exit 1
+        tar -xzf "$archive" --strip-components=1 --no-same-owner -C "$stage/tree" || exit 1
+    fi
     # Verify the executable and its stdlib before publishing the installation.
     py_verify_interpreter "$stage/tree" "$version" || exit 1
     printf '%s\n' "$row" > "$stage/tree/.distribution" || exit 1
@@ -143,7 +180,7 @@ py_inputs_hash() {
 # directory remains unreachable from serving symlinks until the caller
 # verifies it.
 py_build_release() (
-    local kind="$1" domain="$2" requested="${3:-auto}" app_dir="${4:-}" hash release='' stamp python version app complete=false
+    local kind="$1" domain="$2" requested="${3:-auto}" app_dir="${4:-}" hash release='' stamp python version app complete=false wheels=''
     [[ -n "$app_dir" ]] || app_dir="$(basename -- "$kind")"
     hash="$(py_inputs_hash "$app_dir" "$requested")" || exit 1
     version="$(py_resolve_version "$requested")" || exit 1
@@ -151,6 +188,11 @@ py_build_release() (
     if [[ "$GB_DRY_RUN" == true ]]; then
         printf '%s/%s-%s-preview\n' "$(py_releases_dir "$kind")" "$stamp" "$hash"
         exit 0
+    fi
+    if gb_is_docker; then
+        wheels="$(py_bundle_root)/wheels/$version/$app_dir"
+        [[ -s "$wheels/packages.requirements" && "$(cat "$wheels/.inputs" 2>/dev/null)" == "$hash" ]] \
+            || gb_die "This image does not bundle the current $app_dir application for Python $version. Run the endpoint update with a bundled Python version; existing releases remain available. No download was attempted."
     fi
     python="$(py_managed_install "$version")" || exit 1
     gb_ensure_dir "$(py_app_root "$kind")" 0755
@@ -171,13 +213,23 @@ root = pathlib.Path(sys.argv[1]).resolve()
 assert pathlib.Path(sys.base_prefix).resolve() == root
 assert pathlib.Path(encodings.__file__).resolve().is_relative_to(root)
 ' "$(dirname "$(dirname "$python")")" || exit 1
-    "$release/.venv/bin/python" -I -m pip --disable-pip-version-check install --quiet --no-cache-dir \
-        --require-virtualenv --only-binary=:all: --no-deps --require-hashes \
-        --requirement "$GB_SRC/python/build-requirements.txt" >&2 || exit 1
-    "$release/.venv/bin/python" -I -m pip --disable-pip-version-check install --quiet --require-virtualenv --no-cache-dir \
-        --only-binary=:all: --requirement "$release/src/$app_dir/requirements.txt" >&2 || exit 1
-    "$release/.venv/bin/python" -I -m pip --disable-pip-version-check install --quiet --require-virtualenv \
-        --no-deps --no-build-isolation "$release/src/common" "$release/src/$app_dir" >&2 || exit 1
+    if gb_is_docker; then
+        # Venvs are created at their final persistent paths, never copied from
+        # an image path with stale shebangs. Every dependency and local app is
+        # a prebuilt wheel; deployment cannot reach PyPI or invoke a compiler.
+        "$release/.venv/bin/python" -I -m pip --isolated --disable-pip-version-check install --quiet \
+            --require-virtualenv --no-cache-dir --no-index --find-links "$wheels" \
+            --only-binary=:all: --require-hashes --requirement "$wheels/packages.requirements" >&2 || exit 1
+        cp "$wheels/packages.requirements" "$release/.bundled-requirements" || exit 1
+    else
+        "$release/.venv/bin/python" -I -m pip --disable-pip-version-check install --quiet --no-cache-dir \
+            --require-virtualenv --only-binary=:all: --no-deps --require-hashes \
+            --requirement "$GB_SRC/python/build-requirements.txt" >&2 || exit 1
+        "$release/.venv/bin/python" -I -m pip --disable-pip-version-check install --quiet --require-virtualenv --no-cache-dir \
+            --only-binary=:all: --requirement "$release/src/$app_dir/requirements.txt" >&2 || exit 1
+        "$release/.venv/bin/python" -I -m pip --disable-pip-version-check install --quiet --require-virtualenv \
+            --no-deps --no-build-isolation "$release/src/common" "$release/src/$app_dir" >&2 || exit 1
+    fi
     "$release/.venv/bin/python" -I -m pip check >&2 || exit 1
     "$release/.venv/bin/python" -I -m pip freeze --all > "$release/packages.lock" || exit 1
     printf '%s\n' "$hash" > "$release/.inputs" || exit 1

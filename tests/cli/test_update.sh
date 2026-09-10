@@ -35,7 +35,7 @@ fixture() {
     cp "$ROOT/src/lib/update.sh" "$SEED/src/lib/update.sh"
     chmod +x "$SEED/getbible.sh"
     local lib
-    for lib in platform ui config registry users telegram nginx certs systemd logs access sync python docs pages endpoint; do
+    for lib in platform ui config deployment registry resources users telegram nginx certs systemd logs access sync python docs pages endpoint; do
         : > "$SEED/src/lib/$lib.sh"
     done
     cat > "$SEED/src/lib/core.sh" <<'CORE'
@@ -54,6 +54,9 @@ gb_step() { gb_log "$@"; }
 gb_warn() { gb_log "$@"; }
 gb_die() { gb_log "$@"; exit 1; }
 gb_require_root() { :; }
+gb_is_docker() { return 1; }
+gb_environment_validate() { :; }
+gb_environment_telegram() { :; }
 gb_valid_domain() { [[ "$1" == api.example.test ]]; }
 gb_management_lock() {
     printf 'lock\n' >> "$GB_TEST_EVENTS"

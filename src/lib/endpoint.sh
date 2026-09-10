@@ -51,10 +51,15 @@ endpoint_apply() {
     EP_APPLY_EDGE_FAILED=false
     ep_load "$domain" || return 1
     endpoint_source_type "$EP_TYPE" || return 1
+    nginx_validate_proxy_settings || return 1
+    if [[ "$EP_TYPE" == runtime ]] && declare -F resources_reconcile >/dev/null; then
+        resources_reconcile "$domain" || return 1
+        ep_load "$domain" || return 1
+    fi
     ep_is_live "$domain" || live=false
     gb_ensure_base_dirs || return 1
     logs_ensure_endpoint_dir "$domain" || return 1
-    if nginx_cert_exists "$domain" && ! certs_install_hook; then
+    if ! nginx_external_tls && nginx_cert_exists "$domain" && ! certs_install_hook; then
         gb_warn "Could not install the certificate renewal hook for $domain."
         ep_state_set "$domain" LAST_ERROR "Certificate renewal hook installation failed" || true
         tg_notify fail "Domain update failed: $domain" "Certificate renewal hook installation failed; services and routing were not changed."
@@ -68,7 +73,7 @@ endpoint_apply() {
     fi
     "type_${EP_TYPE}_prepare" "$domain" || { endpoint_apply_abort "$domain" "Preparing the domain's services failed"; return 1; }
     pages_publish "$domain" || { endpoint_apply_abort "$domain" "Publishing the domain's pages failed"; return 1; }
-    if [[ "$live" == false ]] && ! nginx_cert_exists "$domain"; then
+    if [[ "$live" == false ]] && ! nginx_external_tls && ! nginx_cert_exists "$domain"; then
         certs_placeholder_ensure "$domain" || gb_warn "$domain is staged without a placeholder certificate and renders HTTP-only until one exists."
     fi
     if [[ "$live" == true ]] && declare -F cloudflare_ensure_origin_files >/dev/null; then
@@ -84,7 +89,7 @@ endpoint_apply() {
     fi
     nginx_apply_stage "$stage" "$EP_SLUG" || { endpoint_apply_abort "$domain" "nginx rejected the endpoint configuration"; return 1; }
 
-    if [[ "$live" == true ]] && ! nginx_cert_exists "$domain"; then
+    if [[ "$live" == true ]] && ! nginx_external_tls && ! nginx_cert_exists "$domain"; then
         if certs_obtain "$domain"; then
             rm -rf -- "$stage" || return 1
             nginx_render_global "$stage" && nginx_render_endpoint "$stage" || { endpoint_apply_abort "$domain" "TLS configuration rendering failed"; return 1; }
@@ -157,6 +162,10 @@ endpoint_remove() {
     fi
     ep_remove_config "$domain"
     tg_notify warn "Domain removed" "$domain was removed from this server$([[ "$purge" == true ]] && printf ' with its data and logs' || printf '; data and logs kept')."
+    if declare -F resources_reconcile >/dev/null && ! resources_reconcile ""; then
+        gb_warn "$domain was removed; resource redistribution for remaining domains is incomplete. Their existing services remain available."
+        return 1
+    fi
 }
 
 endpoint_status_text() {
@@ -240,9 +249,13 @@ endpoint_publication_text() {
 # 'Go live' is chosen. The default comes from Settings. Choosing live makes
 # sure the Let's Encrypt contact exists while dialogs are still possible.
 endpoint_prompt_deploy_mode() {
-    local domain="$1" default mode
+    local domain="$1" default mode prompt
     default="$(ep_deploy_mode_default)"
-    mode="$(ui_radiolist "Go live now?" "Live: request the Let's Encrypt certificate now and, when Cloudflare manages $domain here, point its DNS at this server.\n\nStaged: install everything (code, data, services, nginx with a placeholder certificate) but leave the certificate and DNS alone, so whatever serves $domain today keeps serving until you choose 'Go live' for it." \
+    prompt="Live: request the Let's Encrypt certificate now and, when Cloudflare manages $domain here, point its DNS at this server.\n\nStaged: install everything (code, data, services, nginx with a placeholder certificate) but leave the certificate and DNS alone, so whatever serves $domain today keeps serving until you choose 'Go live' for it."
+    if nginx_external_tls; then
+        prompt="TLS is managed by your external reverse proxy.\n\nLive: activate the HTTP origin and, when Cloudflare manages $domain here, point DNS at the configured firewall address. Configure the proxy's certificate and routing first.\n\nStaged: prepare the complete HTTP origin without changing public DNS or Cloudflare rules."
+    fi
+    mode="$(ui_radiolist "Go live now?" "$prompt" \
         live "Go live now" "$([[ "$default" == live ]] && echo on || echo off)" \
         staged "Stage it; go live later from the domain menu" "$([[ "$default" == staged ]] && echo on || echo off)")" || return 1
     if [[ "$mode" == live ]] && ! certs_email_interactive; then
