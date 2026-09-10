@@ -73,7 +73,11 @@ root = Path(sys.argv[1])
 entries = {}
 for wheel in sorted(root.glob("*.whl")):
     with zipfile.ZipFile(wheel) as archive:
-        metadata = [name for name in archive.namelist() if name.endswith(".dist-info/METADATA")]
+        # A wheel may vendor other distributions and retain their metadata
+        # below its package directory (setuptools does this). Only the root
+        # dist-info directory identifies the distribution being installed.
+        metadata = [name for name in archive.namelist()
+                    if name.count("/") == 1 and name.endswith(".dist-info/METADATA")]
         if len(metadata) != 1:
             raise SystemExit(f"Invalid wheel metadata: {wheel.name}")
         fields = BytesParser().parsebytes(archive.read(metadata[0]))

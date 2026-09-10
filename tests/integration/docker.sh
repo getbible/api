@@ -53,7 +53,7 @@ container getbible.sh --help >/dev/null
 container test ! -d /usr/share/getbible/api/.git
 
 docker cp "$ROOT/tests/python/fixtures/repository" "$CONTAINER:/srv/getbible/ci-fixture"
-container bash -c 'chmod -R a+rX /srv/getbible/ci-fixture
+container bash -Eeuo pipefail -c 'chmod -R a+rX /srv/getbible/ci-fixture
 git -C /srv/getbible/ci-fixture init --initial-branch=master
 git -C /srv/getbible/ci-fixture add .
 git -C /srv/getbible/ci-fixture -c user.name=Fixture -c user.email=fixture@example.test commit -m Fixture
@@ -75,7 +75,7 @@ manager deploy static --domain static.example.test --version v2 \
 # This local bare fixture is read by the sync account. Match ownership rather
 # than disabling Git's ownership checks; production repositories use SSH.
 # shellcheck disable=SC2016
-container bash -c 'sync_user=$(sed -n "s/^SYNC_USER=//p" /etc/getbible/endpoints/static.example.test/endpoint.conf)
+container bash -Eeuo pipefail -c 'sync_user=$(sed -n "s/^SYNC_USER=//p" /etc/getbible/endpoints/static.example.test/endpoint.conf)
 chown -R "$sync_user" /srv/getbible/ci-origin.git'
 manager sync static.example.test v2 --force
 container /usr/share/getbible/api/docker/healthcheck.sh
@@ -85,7 +85,7 @@ container curl --fail --silent -H 'Host: search.example.test' http://127.0.0.1/v
     | python3 -c 'import json,sys; assert json.load(sys.stdin)["query"]["kind"] == "search"'
 container curl --fail --silent -H 'Host: static.example.test' http://127.0.0.1/v2/test/1/1.json >/dev/null
 # shellcheck disable=SC2016 # These expressions run inside the container.
-container bash -c 'for kind in query search; do
+container bash -Eeuo pipefail -c 'for kind in query search; do
     generation=$(readlink -f "/opt/getbible/$kind/v2/active")
     unit="getbible-$kind-v2-$(basename "$generation").service"
     test "$(systemctl show -p ProtectSystem --value "$unit")" = strict
@@ -97,7 +97,7 @@ container bash -c 'for kind in query search; do
     test "$(sed -n "s/^CapEff:[[:space:]]*//p" "/proc/$process/status")" = 0000000000000000
     "/opt/getbible/$kind/v2/current/.venv/bin/python" -m pip check
 done'
-container getbible resources --json | python3 -c 'import json,sys; assert json.load(sys.stdin)'
+container getbible resources --json | python3 -c 'import json,sys; p=json.load(sys.stdin); assert p["enabled"] and p["cgroup_limit_bytes"] == 4*1024**3 and p["budget_bytes"] <= 4*1024**3; assert len(p["endpoints"]) == 2'
 docker network connect "${PROJECT}_default" "$CONTAINER"
 
 # Real HAProxy HTTP forwarding: backend address never replaces request Host.
@@ -131,8 +131,9 @@ manager access query.example.test token
 [[ "$(request query.example.test /v2/test/Ge1:1 -o /dev/null -w '%{http_code}')" == 401 ]]
 request query.example.test /v2/test/Ge1:1 --fail -H "Authorization: Bearer $TOKEN" > /dev/null
 container /usr/local/lib/getbible/getbible-identities show > "$TEST_ROOT/identities-before.json"
-container bash -c 'id getbible-query; id getbible-search; id www-data; stat -Lc "%u:%g" /srv/getbible/static.example.test/v2/test/1/1.json' > "$TEST_ROOT/owners-before"
-container bash -c 'find /var/lib/getbible -name "*.pub" -type f -exec sha256sum {} +' > "$TEST_ROOT/keys-before"
+container bash -Eeuo pipefail -c 'id getbible-query; id getbible-search; id www-data; stat -Lc "%u:%g" /srv/getbible/static.example.test/v2/test/1/1.json' > "$TEST_ROOT/owners-before"
+container bash -Eeuo pipefail -c 'find /var/lib/getbible -name "*.pub" -type f -exec sha256sum {} +' > "$TEST_ROOT/keys-before"
+test -s "$TEST_ROOT/keys-before"
 container touch /var/log/getbible/recreation-sentinel
 
 # Recreate, do not merely restart: account databases and image root are fresh.
@@ -140,8 +141,8 @@ compose down --timeout 120
 compose up -d --wait --wait-timeout 240
 CONTAINER="$(compose ps -q getbible)"
 container /usr/local/lib/getbible/getbible-identities show > "$TEST_ROOT/identities-after.json"
-container bash -c 'id getbible-query; id getbible-search; id www-data; stat -Lc "%u:%g" /srv/getbible/static.example.test/v2/test/1/1.json' > "$TEST_ROOT/owners-after"
-container bash -c 'find /var/lib/getbible -name "*.pub" -type f -exec sha256sum {} +' > "$TEST_ROOT/keys-after"
+container bash -Eeuo pipefail -c 'id getbible-query; id getbible-search; id www-data; stat -Lc "%u:%g" /srv/getbible/static.example.test/v2/test/1/1.json' > "$TEST_ROOT/owners-after"
+container bash -Eeuo pipefail -c 'find /var/lib/getbible -name "*.pub" -type f -exec sha256sum {} +' > "$TEST_ROOT/keys-after"
 cmp "$TEST_ROOT/identities-before.json" "$TEST_ROOT/identities-after.json"
 cmp "$TEST_ROOT/owners-before" "$TEST_ROOT/owners-after"
 cmp "$TEST_ROOT/keys-before" "$TEST_ROOT/keys-after"
