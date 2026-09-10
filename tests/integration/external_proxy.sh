@@ -87,15 +87,18 @@ from pathlib import Path
 import sys
 path, sandbox, domain = sys.argv[1:]
 site = Path(path).read_text()
-marker = "    location ~ /\\. {"
-assert marker in site
+# Match the complete indentation from the start of the line. Version folders
+# have their own nested dotfile location with eight spaces; matching a bare
+# substring would inject /inspect there as well as at server scope.
+marker = "\n    location ~ /\\. {"
+assert site.count(marker) == 1, "expected one server-level dotfile location"
 location = f"""    location = /inspect {{
         include {sandbox}/etc/nginx/getbible/{domain}/auth.conf;
         include snippets/getbible/proxy.conf;
         proxy_pass http://unix:{sandbox}/capture.sock:;
     }}
 """
-Path(path).write_text(site.replace(marker, location + marker))
+Path(path).write_text(site.replace(marker, "\n" + location + marker, 1))
 PY
 done
 it_nginx_start
