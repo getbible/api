@@ -103,8 +103,8 @@ resources_menu() {
         choice="$(ui_menu "Runtime resources" "Memory allocation across all enabled runtime endpoints" \
             show "Show effective resource targets" apply "Apply targets through healthy runtime generations")" || return 0
         case "$choice" in
-            show) ui_run "Runtime resource targets" resources_status ;;
-            apply) ui_run "Apply runtime resources" resources_apply ;;
+            show) ui_run "Runtime resource targets" resources_status || true ;;
+            apply) ui_run "Apply runtime resources" resources_apply || true ;;
         esac
     done
 }
