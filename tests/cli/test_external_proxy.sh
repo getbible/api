@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2329 # Mocks are invoked by dynamically sourced manager functions.
 # External TLS must prepare complete HTTP origins without local certificates,
 # while native certificate deployment keeps its existing behavior.
 # shellcheck disable=SC2016 # nginx variables in assertions are literal

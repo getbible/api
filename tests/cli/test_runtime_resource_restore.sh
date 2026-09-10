@@ -5,7 +5,7 @@ set -Eeuo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 TEST_ROOT="$(mktemp -d)"
 export GB_PREFIX="$TEST_ROOT/root" GB_REPO_DIR="$ROOT" GETBIBLE_EXECUTION_MODE=docker
-export GETBIBLE_MEMORY_BUDGET=2G
+export GETBIBLE_MEMORY_BUDGET=auto
 for lib in core config registry python; do
     # shellcheck source=/dev/null
     source "$ROOT/src/lib/$lib.sh"
@@ -14,6 +14,30 @@ done
 source "$ROOT/src/types/runtime/type.sh"
 trap 'rm -rf -- "$TEST_ROOT"; gb_cleanup' EXIT
 check() { "$@" || { printf 'FAILED: %s\n' "$*" >&2; exit 1; }; }
+
+# Hosted CI can run directly on a VM with no finite Docker cgroup. Supply a
+# real cgroup-v2 fixture to the actual planner instead of depending on the
+# runner's memory.max, CPU quota or membership path.
+RESTORE_REAL_PYTHON="$(command -v "$GB_PYTHON")"
+export RESTORE_REAL_PYTHON
+export RESTORE_PROC_ROOT="$TEST_ROOT/proc" RESTORE_CGROUP_ROOT="$TEST_ROOT/cgroup"
+mkdir -p "$RESTORE_PROC_ROOT/self" "$RESTORE_CGROUP_ROOT/system.slice/getbible.scope"
+printf '0::/system.slice/getbible.scope\n' > "$RESTORE_PROC_ROOT/self/cgroup"
+printf '10 9 0:2 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n' > "$RESTORE_PROC_ROOT/self/mountinfo"
+printf '4294967296\n' > "$RESTORE_CGROUP_ROOT/memory.max"
+printf '200000 100000\n' > "$RESTORE_CGROUP_ROOT/cpu.max"
+printf 'max\n' > "$RESTORE_CGROUP_ROOT/system.slice/memory.max"
+printf 'max\n' > "$RESTORE_CGROUP_ROOT/system.slice/getbible.scope/memory.max"
+cat > "$TEST_ROOT/python-fixture" <<'PYTHON'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == */getbible-resources ]]; then
+    exec "$RESTORE_REAL_PYTHON" "$@" --proc-root "$RESTORE_PROC_ROOT" --cgroup-root "$RESTORE_CGROUP_ROOT"
+fi
+exec "$RESTORE_REAL_PYTHON" "$@"
+PYTHON
+chmod 0755 "$TEST_ROOT/python-fixture"
+GB_PYTHON="$TEST_ROOT/python-fixture"
 domain=query.example.test
 ep_create "$domain" runtime query
 ep_set "$domain" ACCESS_MODE token
@@ -67,6 +91,18 @@ if rt_restore_resource_settings 2>/dev/null; then echo 'Runtime restore accepted
 check cmp "$TEST_ROOT/original.env" "$active/runtime.env"
 
 export GB_RESOURCES_BOOTSTRAP=true
+resources_plan --format json > "$TEST_ROOT/resource-plan.json"
+check "$GB_PYTHON" - "$TEST_ROOT/resource-plan.json" <<'PYTHON'
+import json
+import sys
+with open(sys.argv[1]) as stream:
+    plan = json.load(stream)
+assert plan["budget_bytes"] == 4 * 1024**3, plan
+assert plan["cgroup_limit_bytes"] == 4 * 1024**3, plan
+assert plan["source"] == "cgroup", plan
+assert (plan["steady_runtime_bytes"] + plan["candidate_reserve_bytes"]
+        + plan["infrastructure_reserve_bytes"]) <= plan["budget_bytes"], plan
+PYTHON
 # Prove that initialization uses the retained release's manifest, not a new
 # image implementation that may have different defaults or supported versions.
 GB_APPS="$TEST_ROOT/no-new-app-sources"

@@ -53,7 +53,8 @@ container getbible.sh --help >/dev/null
 container test ! -d /usr/share/getbible/api/.git
 
 docker cp "$ROOT/tests/python/fixtures/repository" "$CONTAINER:/srv/getbible/ci-fixture"
-container bash -Eeuo pipefail -c 'chmod -R a+rX /srv/getbible/ci-fixture
+container bash -Eeuo pipefail -c 'chown -R root:root /srv/getbible/ci-fixture
+chmod -R a+rX /srv/getbible/ci-fixture
 git -C /srv/getbible/ci-fixture init --initial-branch=master
 git -C /srv/getbible/ci-fixture add .
 git -C /srv/getbible/ci-fixture -c user.name=Fixture -c user.email=fixture@example.test commit -m Fixture
