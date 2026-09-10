@@ -106,6 +106,8 @@ def cmd_dns(domain: str, args: list[str]) -> dict:
             raise CloudflareError(f"unknown option {item}")
     zone = find_zone(domain)
     existing = {(r["type"]): r for r in dns_records(zone["id"], domain) if r["type"] in {"A", "AAAA"}}
+    if not existing and not ipv4 and not ipv6:
+        raise CloudflareError(f"No A/AAAA records or origin addresses are available for {domain}; DNS was not configured")
     results = []
     for record_type, content in (("A", ipv4), ("AAAA", ipv6)):
         current = existing.get(record_type)
@@ -136,10 +138,13 @@ def entrypoint(zone_id: str, phase: str) -> dict | None:
     return payload.get("result")
 
 
-def replace_rule(zone_id: str, phase: str, description: str, rule: dict | None) -> dict:
+def replace_rule(zone_id: str, phase: str, description: str, rule: dict | None,
+                 *, first: bool = False, last: bool = False) -> dict:
     """Change only this host's managed rule, never replace a shared ruleset.
 
-    Keep an existing rule in its current position. The single-rule endpoints
+    Keep an existing rule in its current position unless first is requested
+    for the API exception before challenges, or last for cache/config overrides.
+    The single-rule endpoints
     also preserve unrelated rules changed after our GET. Exact descriptions
     identify the rules created by this tool across subsequent updates.
     """
@@ -171,6 +176,10 @@ def replace_rule(zone_id: str, phase: str, description: str, rule: dict | None) 
     path = f"/zones/{zone_id}/rulesets/{ruleset_id}/rules"
     result = current
     if wanted is not None:
+        if first:
+            wanted["position"] = {"index": 1}
+        elif last:
+            wanted["position"] = {"after": ""}
         if not owned:
             return request("POST", path, wanted)["result"]
         existing = owned.pop(0)
@@ -181,6 +190,39 @@ def replace_rule(zone_id: str, phase: str, description: str, rule: dict | None) 
     for existing in owned:
         result = request("DELETE", f"{path}/{existing['id']}")["result"]
     return result
+
+
+def api_bot_settings(zone_id: str, domain: str) -> dict:
+    """Read the non-skippable prerequisite without changing other hosts."""
+    try:
+        settings = request("GET", f"/zones/{zone_id}/bot_management").get("result")
+    except CloudflareError as error:
+        raise CloudflareError(
+            f"Cannot verify Bot Fight Mode for {domain}; the API profile was not applied. "
+            f"The token needs Bot Management Read permission: {error}"
+        ) from error
+    if not isinstance(settings, dict):
+        raise CloudflareError(f"Cloudflare did not return bot settings for {domain}")
+    stale = settings.get("stale_zone_configuration") or {}
+    if settings.get("fight_mode") or stale.get("fight_mode"):
+        raise CloudflareError(
+            f"Bot Fight Mode is enabled for the zone containing {domain}; it can challenge API clients "
+            "and cannot be skipped per hostname. Keep DNS-only mode, or explicitly disable it with "
+            f"'getbible.sh cloudflare bot-fight {domain} off' (affects the whole zone), then retry."
+        )
+    return settings
+
+
+# The two expressions are complements within one hostname, so our cache and
+# bypass rules never override one another, regardless of their positions.
+# Query-bearing requests stay at the origin: shared cache-key rules may drop
+# parameters, and a full custom query-key override requires Enterprise.
+PUBLIC_CACHE_REQUEST = (
+    '(http.request.method in {"GET" "HEAD"} '
+    'and http.request.uri.query eq "" '
+    'and not any(http.request.headers["authorization"][*] ne "") '
+    'and http.cookie eq "" and not http.request.headers.truncated)'
+)
 
 
 def cmd_host_rules(domain: str, args: list[str]) -> dict:
@@ -200,6 +242,7 @@ def cmd_host_rules(domain: str, args: list[str]) -> dict:
     expression = f'(http.host eq "{domain}")'
     description = f"getbible:{domain}"
     out: dict = {"zone": zone["name"]}
+    bot_settings = api_bot_settings(zone["id"], domain) if security == "api" else {}
 
     # Configuration rule: API-friendly security for this host only.
     if security == "api":
@@ -211,32 +254,52 @@ def cmd_host_rules(domain: str, args: list[str]) -> dict:
     else:
         config = None
     out["config_rule"] = "set" if config else "removed"
-    replace_rule(zone["id"], "http_config_settings", description, config)
+    replace_rule(zone["id"], "http_config_settings", description, config, last=True)
 
-    # Cache rule: bypass keeps the origin logs complete; respect follows the origin's Cache-Control.
+    # Cache eligibility applies to every endpoint on the hostname, including
+    # JSON. Credentials and POSTs must also bypass reads of a public cache hit.
     if cache == "respect":
+        private_rule = {
+            "action": "set_cache_settings",
+            "expression": f"{expression} and not {PUBLIC_CACHE_REQUEST}", "enabled": True,
+            "action_parameters": {"cache": False},
+        }
+        replace_rule(zone["id"], "http_request_cache_settings", description + ":private", private_rule, last=True)
         cache_rule = {
-            "action": "set_cache_settings", "expression": expression, "enabled": True,
-            "action_parameters": {"cache": True, "edge_ttl": {"mode": "respect_origin"}, "browser_ttl": {"mode": "respect_origin"},
-                                  "cache_key": {"custom_key": {"query_string": {"include": "*"}}}},
+            "action": "set_cache_settings",
+            "expression": f"{expression} and {PUBLIC_CACHE_REQUEST}", "enabled": True,
+            "action_parameters": {"cache": True, "edge_ttl": {"mode": "bypass_by_default"},
+                                  "browser_ttl": {"mode": "respect_origin"},
+                                  "respect_strong_etags": True, "origin_error_page_passthru": True},
         }
     else:
         cache_rule = {"action": "set_cache_settings", "expression": expression, "enabled": True,
                       "action_parameters": {"cache": False}}
     out["cache_rule"] = cache
-    replace_rule(zone["id"], "http_request_cache_settings", description, cache_rule)
+    if cache == "respect":
+        out["query_string_requests"] = "bypass edge cache; origin keeps complete URL cache keys"
+    replace_rule(zone["id"], "http_request_cache_settings", description, cache_rule, last=True)
+    if cache == "bypass":
+        # The host-wide bypass is already active before the narrower rule goes.
+        replace_rule(zone["id"], "http_request_cache_settings", description + ":private", None)
 
-    # WAF: skip managed challenges and rate limiting for this host, keep DDoS protection.
+    # An exception appended after a custom challenge is too late. Place only
+    # our host-scoped rule first, preserving other rules and their relative order.
+    phases = ["http_ratelimit", "http_request_firewall_managed"]
+    if any(key.startswith("sbfm_") for key in bot_settings) or any(
+            key.startswith("sbfm_") for key in (bot_settings.get("stale_zone_configuration") or {})):
+        phases.append("http_request_sbfm")
     skip = {
         "action": "skip", "expression": expression, "enabled": True,
-        "action_parameters": {"phases": ["http_ratelimit", "http_request_firewall_managed", "http_request_sbfm"],
+        "action_parameters": {"ruleset": "current", "phases": phases,
                               "products": ["bic", "hot", "securityLevel", "uaBlock", "zoneLockdown"]},
+        "logging": {"enabled": True},
     }
-    try:
-        replace_rule(zone["id"], "http_request_firewall_custom", description, skip if security == "api" else None)
-        out["waf_skip"] = "set" if security == "api" else "removed"
-    except SystemExit as error:
-        out["waf_skip"] = f"not applied ({error})"
+    replace_rule(zone["id"], "http_request_firewall_custom", description,
+                 skip if security == "api" else None, first=security == "api")
+    out["waf_skip"] = "set" if security == "api" else "removed"
+    if security == "api":
+        out["bot_fight_mode"] = "off"
     return out
 
 
@@ -251,7 +314,7 @@ def cmd_protect_access(domain: str) -> dict:
         "action": "set_cache_settings", "expression": f'(http.host eq "{domain}")', "enabled": True,
         "action_parameters": {"cache": False},
     }
-    replace_rule(zone["id"], "http_request_cache_settings", f"getbible:{domain}", rule)
+    replace_rule(zone["id"], "http_request_cache_settings", f"getbible:{domain}", rule, last=True)
     request("POST", f"/zones/{zone['id']}/purge_cache", {"hosts": [domain]})
     return {"zone": zone["name"], "host": domain, "cache": "bypass", "purged": True}
 
@@ -260,9 +323,12 @@ def cmd_host_rules_remove(domain: str) -> dict:
     zone = find_zone(domain)
     description = f"getbible:{domain}"
     errors = []
-    for phase in ("http_config_settings", "http_request_cache_settings", "http_request_firewall_custom"):
+    for phase, owned_description in (
+        ("http_config_settings", description), ("http_request_cache_settings", description),
+        ("http_request_cache_settings", description + ":private"), ("http_request_firewall_custom", description),
+    ):
         try:
-            replace_rule(zone["id"], phase, description, None)
+            replace_rule(zone["id"], phase, owned_description, None)
         except CloudflareError as error:
             errors.append(f"{phase}: {error}")
     if errors:

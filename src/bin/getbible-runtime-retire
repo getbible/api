@@ -7,10 +7,10 @@ ctl="$1"; unit="$2"; snapshot="$3"
 [[ "$unit" =~ ^getbible-[A-Za-z0-9-]+$ && -f "$snapshot" ]] || exit 2
 while true; do
     alive=false
-    while read -r pid started; do
+    while IFS=' ' read -r pid started; do
         [[ "$pid" =~ ^[0-9]+$ && "$started" =~ ^[0-9]+$ ]] || exit 2
         stat=""
-        [[ -r "/proc/$pid/stat" ]] && IFS= read -r stat < "/proc/$pid/stat" || true
+        IFS= read -r stat 2>/dev/null < "/proc/$pid/stat" || true
         [[ -n "$stat" ]] || continue
         read -r -a fields <<< "${stat##*) }"
         if [[ "${fields[19]:-}" == "$started" && "${fields[0]:-}" != Z ]]; then alive=true; break; fi

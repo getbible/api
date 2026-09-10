@@ -5,7 +5,7 @@ set -Eeuo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 GB_PREFIX="$(mktemp -d)"
 export GB_PREFIX GB_REPO_DIR="$ROOT" GB_UI=none GB_YES=true
-for lib in core config registry users systemd python pages; do
+for lib in core config registry users systemd python pages endpoint; do
     # shellcheck source=/dev/null
     source "$ROOT/src/lib/$lib.sh"
 done
@@ -16,6 +16,7 @@ trap 'rm -rf -- "$GB_PREFIX"; gb_cleanup' EXIT
 mkdir -p "$GB_LOG"
 events="$GB_PREFIX/events"; : > "$events"
 FAIL_READY=false; FAIL_PROBE=false; FAIL_NGINX=false; FAIL_BUILD=false; RELOAD_DONE=false
+FAIL_ROUTING=false; FAIL_SNAPSHOT=false; FAIL_SWITCH_CONFIRM=false; FAIL_RETIRE=false
 SOURCE_REVISION=one
 record() { printf '%s\n' "$*" >> "$events"; }
 tg_notify() { record "notify $*"; }
@@ -44,6 +45,20 @@ sd_start() { record "start $*"; }
 sd_is_active() { return 0; }
 sd_disable_now() { record "disable $*"; }
 sd_journal() { :; }
+nginx_master_pid() { printf '4241\n'; }
+sd_snapshot_nginx_workers() {
+    record "snapshot $1"
+    [[ "$FAIL_SNAPSHOT" == false ]] || return 1
+    printf '4242 1234\n' > "$1"
+}
+sd_wait_nginx_workers_reloaded() {
+    record "switch-confirm $1"
+    [[ -f "$1" && "$FAIL_SWITCH_CONFIRM" == false ]]
+}
+nginx_transaction_rollback() {
+    record rollback-reload
+    [[ "$FAIL_ROUTING" == false ]]
+}
 sd_wait_ready() {
     record "ready $1 $2"
     [[ "$FAIL_PROBE" == false || "$2" != /probez ]] || return 1
@@ -52,7 +67,8 @@ sd_wait_ready() {
 sd_retire_after() {
     [[ "$RELOAD_DONE" == true ]] || { echo 'retired before nginx reload' >&2; return 1; }
     [[ -f "$2" ]] || return 1
-    record "retire $1"
+    record "retire $1 $2"
+    [[ "$FAIL_RETIRE" == false ]]
 }
 endpoint_apply() {
     local domain="$1"
@@ -174,6 +190,61 @@ check test "$(rt_previous_generation "$domain" v2)" = "$previous"
 check grep -q 'QUERY_DEFAULT_REFERENCE="Ge1:1"' "$(rt_env_file "$domain" v2)"
 # The aborted change is taken back in the record as well, so v2 is current again.
 ep_version_set "$domain" v2 DEFAULT_REFERENCE Ge1:1
+
+# A late activation failure rolls back pointers but keeps candidate backends
+# until the workers captured BEFORE the rollback reload finish their requests.
+ep_version_set "$domain" v2 DEFAULT_REFERENCE Ge1:6
+type_runtime_prepare "$domain"
+late_candidate="${RT_CANDIDATES[v2]}"
+late_unit="$(rt_generation_unit "$domain" v2 "$late_candidate")"
+type_runtime_before_switch "$domain"; record nginx-reload; RELOAD_DONE=true
+RT_COMMITTED=true
+rt_switch_link "$late_candidate" "$root/active"
+printf 'wrong\n' > "$(rt_env_file "$domain" v2)"
+: > "$events"
+if endpoint_apply_abort "$domain" 'Injected failure committing runtime environment'; then
+    echo 'late failure unexpectedly succeeded' >&2; exit 1
+fi
+check test "$(rt_active_generation "$domain" v2)" = "$active"
+check test "$(rt_previous_generation "$domain" v2)" = "$previous"
+check grep -q 'QUERY_DEFAULT_REFERENCE="Ge1:1"' "$(rt_env_file "$domain" v2)"
+check test -d "$late_candidate"
+check test -f "$GB_SYSTEMD/$late_unit.service"
+check test -f "$GB_SYSTEMD/$late_unit.socket"
+check grep -q "^retire $late_unit .*nginx-rollback-workers$" "$events"
+check test "$(grep -c '^disable ' "$events" || true)" = 0
+check test "$(sed -n '2p' "$events")" = "snapshot $RT_STATE_BACKUP/nginx-rollback-workers"
+check test "$(sed -n '3p' "$events")" = rollback-reload
+
+# Missing worker evidence or a failed retirement launch must never kill a
+# backend that nginx could still use. A later successful apply reaps it.
+for failure in snapshot switch-confirm retire routing; do
+    ep_version_set "$domain" v2 DEFAULT_REFERENCE Ge1:7
+    type_runtime_prepare "$domain"
+    retained_candidate="${RT_CANDIDATES[v2]}"
+    retained_unit="$(rt_generation_unit "$domain" v2 "$retained_candidate")"
+    type_runtime_before_switch "$domain"; record nginx-reload; RELOAD_DONE=true
+    : > "$events"
+    case "$failure" in
+        snapshot) FAIL_SNAPSHOT=true ;;
+        switch-confirm) FAIL_SWITCH_CONFIRM=true ;;
+        retire) FAIL_RETIRE=true ;;
+        routing) FAIL_ROUTING=true ;;
+    esac
+    if endpoint_apply_abort "$domain" "Injected $failure failure"; then echo 'failure accepted' >&2; exit 1; fi
+    FAIL_SNAPSHOT=false; FAIL_SWITCH_CONFIRM=false; FAIL_RETIRE=false; FAIL_ROUTING=false
+    check test -d "$retained_candidate"
+    check test -f "$GB_SYSTEMD/$retained_unit.service"
+    check test -f "$GB_SYSTEMD/$retained_unit.socket"
+    check test "$(grep -c '^disable ' "$events" || true)" = 0
+    if [[ "$failure" == routing ]]; then
+        check test "${RT_CANDIDATES[v2]}" = "$retained_candidate"
+        check test "$(grep -c '^retire ' "$events" || true)" = 0
+    fi
+done
+ep_version_set "$domain" v2 DEFAULT_REFERENCE Ge1:1
+endpoint_apply "$domain"
+check grep -q "^retire $retained_unit " "$events"
 
 # A second version is its own service: own root, units, sockets, cache and
 # environment file, deployed by the same transaction as the first.

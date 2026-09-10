@@ -110,12 +110,13 @@ golive_plan() {
     step=$((step + 1))
     if golive_cloudflare_managed "$domain"; then
         ipv4="$(cf_public_ipv4)"; ipv6="$(cf_public_ipv6)"
+        if [[ "$mode" == proxied ]]; then
+            [[ "$(ep_get "$domain" CLOUDFLARE_ORIGIN_PULLS false)" == true ]] && pulls=" and authenticated origin pulls"
+            printf '  %d. Prepare the hostname API rules, cache policy and real-IP ranges%s.\n' "$step" "$pulls"
+            step=$((step + 1))
+        fi
         printf '  %d. Point the Cloudflare DNS records (%s) at this server: %s%s\n' "$step" "$mode" "${ipv4:-no IPv4 found}" "${ipv6:+, $ipv6}"
         printf '     (Settings > Public addresses overrides the detected address).\n'
-        if [[ "$mode" == proxied ]]; then
-            [[ "$(ep_get "$domain" CLOUDFLARE_ORIGIN_PULLS false)" == true ]] && pulls=" and require authenticated origin pulls"
-            printf '     Apply the API-safe rules and real-IP ranges%s.\n' "$pulls"
-        fi
     else
         printf '  %d. Leave DNS alone: it is not managed by Cloudflare here and should be pointed at this server by the operator.\n' "$step"
     fi
@@ -152,20 +153,26 @@ golive_run() {
     dns_before="$(ep_state_get "$domain" CLOUDFLARE_DNS_AT)"
     ep_set "$domain" LIVE true || return 1
     if ! GOLIVE_CHECK_ORIGIN=true endpoint_apply "$domain"; then
-        ep_set "$domain" LIVE false || true
-        gb_warn "Activation failed; $domain is staged again. The certificate is kept for the next attempt."
-        tg_notify fail "Go-live failed: $domain" "The live configuration could not be applied; the domain is staged again."
-        return 1
+        if [[ "${EP_APPLY_EDGE_FAILED:-false}" == true ]]; then
+            # The origin was committed and verified before the edge update.
+            # Keep it serving while reporting the incomplete Cloudflare step.
+            cf_failed=true
+        else
+            ep_set "$domain" LIVE false || true
+            gb_warn "Activation failed; $domain is staged again. The certificate is kept for the next attempt."
+            tg_notify fail "Go-live failed: $domain" "The live configuration could not be applied; the domain is staged again."
+            return 1
+        fi
     fi
     ep_state_set "$domain" LIVE_AT "$(gb_timestamp)"
     if golive_cloudflare_managed "$domain"; then
-        # The DNS step is recorded separately from the rules that follow it,
-        # so the report says exactly which of the two happened.
+        # API rules are prepared before DNS switches. Record DNS separately
+        # so a profile failure cannot be reported as a completed takeover.
         if [[ "$(ep_state_get "$domain" CLOUDFLARE_DNS_AT)" != "$dns_before" ]]; then
             if [[ -n "$(ep_state_get "$domain" CLOUDFLARE_ERROR)" ]]; then
                 cf_failed=true
-                cf_note=" Cloudflare DNS now points here, but the rules, address ranges or origin CA were not applied: fix the cause, then Domain > Cloudflare > Apply."
-                gb_warn "Cloudflare DNS for $domain now points here, but the rules were not applied; apply them from Domain > Cloudflare once the cause is fixed."
+                cf_note=" Cloudflare DNS now points here, but the requested Cloudflare changes are incomplete: fix the cause, then Domain > Cloudflare > Apply."
+                gb_warn "Cloudflare DNS for $domain now points here, but its update is incomplete; retry Domain > Cloudflare > Apply once the cause is fixed."
             else
                 cf_note=" Cloudflare DNS now points here."
             fi

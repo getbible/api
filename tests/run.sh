@@ -76,6 +76,7 @@ if [[ "$ALL" == true ]]; then
     if command -v nginx >/dev/null && [[ "$(id -u)" -eq 0 ]]; then
         bash tests/integration/static.sh || fail "integration static"
         bash tests/integration/runtime.sh || fail "integration runtime"
+        bash tests/integration/runtime_rollback.sh || fail "integration runtime rollback"
         bash tests/integration/deploy_keys.sh || fail "integration SSH deploy keys"
     else
         fail "--all requires nginx and root; integration tests were not run"

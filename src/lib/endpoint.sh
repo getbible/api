@@ -13,11 +13,14 @@ endpoint_source_type() {
     source "$GB_TYPES/$type/type.sh"
 }
 
-# Restore routing before stopping a failed candidate. The old runtime keeps
-# serving until the full configuration transaction has committed.
+# Capture the workers still using a failed candidate before restoring routing.
+# The type's abort hook keeps their backend available while they drain.
 endpoint_apply_abort() {
     local domain="$1" reason="$2" recovery=true
     gb_warn "$reason"
+    if declare -F "type_${EP_TYPE}_before_abort" >/dev/null; then
+        "type_${EP_TYPE}_before_abort" "$domain" || recovery=false
+    fi
     if [[ -n "${EP_ENABLE_BACKUP:-}" ]]; then
         gb_restore_file "$(nginx_enabled_file "$domain")" "$EP_ENABLE_BACKUP" || recovery=false
     fi
@@ -43,6 +46,9 @@ endpoint_apply_abort() {
 # certificate so the complete vhost can be tested before go-live.
 endpoint_apply() {
     local domain="$1" stage live=true
+    # Go-live uses this marker to distinguish a committed, healthy origin
+    # from an activation failure when the optional edge update fails later.
+    EP_APPLY_EDGE_FAILED=false
     ep_load "$domain" || return 1
     endpoint_source_type "$EP_TYPE" || return 1
     ep_is_live "$domain" || live=false
@@ -103,6 +109,7 @@ endpoint_apply() {
         if cloudflare_apply "$domain"; then
             ep_state_set "$domain" CLOUDFLARE_ERROR ""
         else
+            EP_APPLY_EDGE_FAILED=true
             gb_warn "Cloudflare update failed for $domain; nginx is unaffected."
             ep_state_set "$domain" CLOUDFLARE_ERROR "Cloudflare update failed at $(gb_timestamp)"
         fi
@@ -116,6 +123,11 @@ endpoint_apply() {
     fi
     ep_state_set "$domain" LAST_APPLY "$(gb_timestamp)"
     ep_state_set "$domain" LAST_APPLY_COMMIT "$(git -C "$GB_REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    if [[ "$EP_APPLY_EDGE_FAILED" == true ]]; then
+        ep_state_set "$domain" LAST_ERROR "Cloudflare update incomplete; the origin remains active."
+        tg_notify warn "Domain update incomplete: $domain" "The origin remains active, but Cloudflare was not fully applied. Fix the reported error and apply the domain again."
+        return 1
+    fi
     ep_state_set "$domain" LAST_ERROR ""
 }
 

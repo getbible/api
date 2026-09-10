@@ -237,6 +237,7 @@ type_runtime_prepare() {
     local domain="$1" kind user label
     # Transaction-local state, cleared for every domain apply.
     RT_DOMAIN="$domain"; RT_COMMITTED=false; RT_LABELS=()
+    RT_NGINX_SNAPSHOT=""; RT_SWITCH_PREPARED=false; RT_ABORT_NGINX_SNAPSHOT=""
     RT_CANDIDATES=(); RT_OLD_GENERATIONS=(); RT_OLD_RELEASES=(); RT_OLD_UNITS=(); RT_OLD_SOCKETS=()
     ep_load "$domain"
     kind="$EP_KIND"
@@ -491,10 +492,13 @@ type_runtime_render_locations() {
 }
 
 type_runtime_before_switch() {
-    local domain="$1" label unit generation
+    local domain="$1" label unit generation master
     [[ "${RT_DOMAIN:-}" == "$domain" && "$GB_DRY_RUN" != true ]] || return 0
     RT_NGINX_SNAPSHOT="$RT_STATE_BACKUP/nginx-workers"
-    [[ -f "$RT_NGINX_SNAPSHOT" ]] || sd_snapshot_nginx_workers "$RT_NGINX_SNAPSHOT" || return 1
+    if [[ ! -f "$RT_NGINX_SNAPSHOT" ]]; then
+        master="$(nginx_master_pid)" || master=0
+        sd_snapshot_nginx_workers "$RT_NGINX_SNAPSHOT" "$master" || return 1
+    fi
     for label in "${RT_LABELS[@]}"; do
         generation="${RT_CANDIDATES[$label]:-}"
         [[ -n "$generation" ]] || continue
@@ -507,6 +511,7 @@ type_runtime_before_switch() {
         unit="$(rt_generation_unit "$domain" "$label" "$generation")"
         sd_enable "$unit.socket" "$unit.service" || return 1
     done
+    RT_SWITCH_PREPARED=true
 }
 
 # Called only after every nginx validation/reload succeeded. The old runtime
@@ -573,9 +578,35 @@ rt_reap_unselected() {
     return 0
 }
 
-# The caller restores nginx before aborting if it had already switched traffic.
+# Called before restoring any nginx files: capture the workers that can still
+# use candidate sockets, including POST bodies nginx has not yet forwarded.
+type_runtime_before_abort() {
+    local domain="$1" snapshot master
+    [[ "${RT_DOMAIN:-}" == "$domain" && "${RT_SWITCH_PREPARED:-false}" == true ]] || return 0
+    RT_ABORT_NGINX_SNAPSHOT=""
+    # A late failure may occur immediately after an asynchronous nginx reload.
+    # Wait for that switch before collecting its new workers. If the switch
+    # never completed, restore routing but retain all candidate backends.
+    if ! sd_wait_nginx_workers_reloaded "$RT_NGINX_SNAPSHOT"; then
+        gb_warn "Could not confirm the nginx traffic switch; retaining candidates during recovery."
+        return 0
+    fi
+    snapshot="$RT_STATE_BACKUP/nginx-rollback-workers"
+    master="$(nginx_master_pid)" || {
+        gb_warn "Could not identify the managed nginx master for rollback; retaining candidates during recovery."
+        return 0
+    }
+    if sd_snapshot_nginx_workers "$snapshot" "$master"; then
+        RT_ABORT_NGINX_SNAPSHOT="$snapshot"
+    else
+        gb_warn "Could not capture nginx workers for rollback; retaining candidates during recovery."
+    fi
+}
+
+# The caller has restored nginx, but reload is asynchronous and pre-rollback
+# workers may still send requests. Keep their candidate generations intact.
 type_runtime_abort() {
-    local domain="$1" label generation root unit target recovered=true
+    local domain="$1" label generation root unit target recovered=true retained=false
     [[ "${RT_DOMAIN:-}" == "$domain" ]] || return 0
     for label in "${RT_LABELS[@]}"; do
         root="$(rt_root "$domain" "$label")"
@@ -587,9 +618,16 @@ type_runtime_abort() {
         generation="${RT_CANDIDATES[$label]:-}"
         if [[ -n "$generation" ]]; then
             unit="$(rt_generation_unit "$domain" "$label" "$generation")"
-            sd_remove_unit "$unit.service"
-            sd_remove_unit "$unit.socket"
-            rm -rf -- "$generation"
+            if [[ "${RT_SWITCH_PREPARED:-false}" == true ]]; then
+                retained=true
+                if [[ -z "${RT_ABORT_NGINX_SNAPSHOT:-}" ]] || ! sd_retire_after "$unit" "$RT_ABORT_NGINX_SNAPSHOT"; then
+                    gb_warn "Retaining $unit until its nginx requests can drain; a later successful apply will retry retirement."
+                fi
+            else
+                sd_remove_unit "$unit.service"
+                sd_remove_unit "$unit.socket"
+                rm -rf -- "$generation"
+            fi
         fi
     done
     sd_daemon_reload || recovered=false
@@ -603,7 +641,11 @@ type_runtime_abort() {
     done
     RT_CANDIDATES=(); RT_COMMITTED=false
     if [[ "$recovered" == true ]]; then
-        tg_notify fail "Runtime deployment rejected: $domain" "The candidates were removed; the previous runtime and configuration remain selected."
+        if [[ "$retained" == true ]]; then
+            tg_notify fail "Runtime deployment rejected: $domain" "The previous runtime and configuration remain selected. Candidate backends are retained until their nginx requests drain."
+        else
+            tg_notify fail "Runtime deployment rejected: $domain" "The candidates were removed; the previous runtime and configuration remain selected."
+        fi
     else
         tg_notify fail "Runtime recovery needs attention: $domain" "The previous service did not pass recovery verification. Inspect its journal."
     fi

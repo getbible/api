@@ -148,7 +148,12 @@ is ready, use the normal go-live workflow to publish its shared hostname.
 - `Cache-Control: public, max-age=3600` (documents) and `300` (checksums),
   both with stale-while-revalidate in open/metered mode. Token-only documents,
   checksums and HTML use `private, no-store` with `Vary: Authorization`.
-  ETags and conditional requests remain available; gzip and optional brotli.
+  ETags and Last-Modified support conditional requests (`If-None-Match` or
+  `If-Modified-Since`): unchanged files return `304`, changed files return
+  `200` with the current representation. Cache policy, validators and CDN
+  status headers are readable by cross-origin browser clients. See
+  `ACCESS_MODES.md` for lifetimes and stale-response allowances. Gzip and
+  optional brotli are supported.
 - The domain page, the endpoint pages, the OpenAPI documents, `versions.json`
   and the favicon are public in every access mode, served by exact locations
   independent of the allowed file types; `/vN` redirects to `/vN/`;

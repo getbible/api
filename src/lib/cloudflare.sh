@@ -19,7 +19,7 @@ cf_human() { cf_cmd --human "$@"; }
 
 cloudflare_configure() {
     local token result
-    token="$(ui_password "Cloudflare" "API token (Zone:Read, DNS:Edit, Zone Settings:Edit, Zone WAF:Edit, Cache Purge:Purge, SSL and Certificates:Edit). Empty keeps the stored one.")" || return 1
+    token="$(ui_password "Cloudflare" "API token (Zone:Read, DNS:Edit, Zone Settings:Edit, Zone WAF:Edit, Bot Management:Read, Cache Purge:Purge, SSL and Certificates:Edit). Use Bot Management:Edit for the zone-wide bot-fight command. Empty keeps the stored one.")" || return 1
     if [[ -n "$token" ]]; then
         cfg_set "$GB_CLOUDFLARE_CONF" CLOUDFLARE_API_TOKEN "$token"
         chmod 0600 "$GB_CLOUDFLARE_CONF" 2>/dev/null || true
@@ -89,18 +89,14 @@ cloudflare_apply() {
         cloudflare_protect_access "$domain" || return 1
     fi
     [[ "$mode" == off ]] && return 0
-    cf_enabled || { gb_warn "No Cloudflare token stored; skipping Cloudflare for $domain."; return 0; }
+    cf_enabled || { gb_warn "Cloudflare is enabled for $domain, but no API token is stored; nothing was applied."; return 1; }
     ipv4="$(cf_public_ipv4)"
     ipv6="$(cf_public_ipv6)"
     proxied=false
     [[ "$mode" == proxied ]] && proxied=true
-    gb_step "Cloudflare DNS for $domain (proxied: $proxied)"
-    local -a args=(dns "$domain" --proxied "$proxied")
-    [[ -n "$ipv4" ]] && args+=(--ipv4 "$ipv4")
-    [[ -n "$ipv6" ]] && args+=(--ipv6 "$ipv6")
-    cf_human "${args[@]}" >&2 || return 1
-    ep_state_set "$domain" CLOUDFLARE_DNS_AT "$(gb_timestamp)"
     if [[ "$mode" == proxied ]]; then
+        # Complete the API profile before orange-cloud DNS can send traffic
+        # through it. A permission/plan failure keeps the previous DNS route.
         gb_step "Cloudflare rules for $domain (cache: $cache)"
         cf_human host-rules "$domain" --cache "$cache" --security api >&2 || return 1
         if [[ "$(ep_get "$domain" ACCESS_MODE metered)" != token ]]; then
@@ -111,8 +107,18 @@ cloudflare_apply() {
             cf_human origin-pulls "$domain" on >&2 || return 1
             cloudflare_install_origin_ca || return 1
         fi
-    else
-        cf_human host-rules-remove "$domain" >&2 || gb_warn "DNS now routes directly, but some managed Cloudflare rules could not be removed."
+    fi
+    gb_step "Cloudflare DNS for $domain (proxied: $proxied)"
+    local -a args=(dns "$domain" --proxied "$proxied")
+    [[ -n "$ipv4" ]] && args+=(--ipv4 "$ipv4")
+    [[ -n "$ipv6" ]] && args+=(--ipv6 "$ipv6")
+    cf_human "${args[@]}" >&2 || return 1
+    ep_state_set "$domain" CLOUDFLARE_DNS_AT "$(gb_timestamp)"
+    if [[ "$mode" == dns ]]; then
+        if ! cf_human host-rules-remove "$domain" >&2; then
+            gb_warn "DNS now routes directly, but some managed Cloudflare rules could not be removed; retry Cloudflare apply."
+            return 1
+        fi
     fi
     tg_notify info "Cloudflare updated: $domain" "Mode: $mode, cache: $cache."
 }
@@ -200,7 +206,12 @@ cloudflare_install_origin_ca() {
     gb_ledger_record "$(cf_origin_ca_file)"
 }
 
-cloudflare_apply_and_render() { cloudflare_apply "$1" && endpoint_apply "$1"; }
+# Render origin trust/TLS first; endpoint_apply applies Cloudflare after nginx
+# is ready. Applying Cloudflare first would expose the old origin configuration.
+cloudflare_apply_and_render() {
+    ep_is_live "$1" || gb_log "$1 is staged; Cloudflare DNS and rules are applied when it goes live."
+    endpoint_apply "$1"
+}
 cloudflare_refresh_and_reload() { cloudflare_refresh_ips && nginx_test && nginx_reload; }
 
 # The shared certificate is a zone-wide prerequisite, but enforcement is
@@ -289,19 +300,18 @@ cloudflare_cli() {
     case "$command" in
         token) cloudflare_configure ;;
         verify) cf_cmd verify ;;
-        apply) cloudflare_apply "${1:?domain}" ;;
+        apply) cloudflare_apply_and_render "${1:?domain}" ;;
         mode)
             local domain="${1:?domain}" mode="${2:?off|dns|proxied}"
             [[ "$mode" =~ ^(off|dns|proxied)$ ]] || gb_die "mode is off, dns or proxied"
-            ep_set "$domain" CLOUDFLARE_MODE "$mode"
-            cloudflare_apply "$domain"
-            endpoint_apply "$domain" ;;
+            ep_set "$domain" CLOUDFLARE_MODE "$mode" || return 1
+            cloudflare_apply_and_render "$domain" ;;
         cache)
             local domain="${1:?domain}" cache="${2:?bypass|respect}"
             [[ "$cache" =~ ^(bypass|respect)$ ]] || gb_die "cache is bypass or respect"
             [[ "$cache" != respect || "$(ep_get "$domain" ACCESS_MODE metered)" != token ]] || gb_die "Token-only domains must bypass shared caches."
-            ep_set "$domain" CLOUDFLARE_CACHE "$cache"
-            cloudflare_apply "$domain" ;;
+            ep_set "$domain" CLOUDFLARE_CACHE "$cache" || return 1
+            cloudflare_apply_and_render "$domain" ;;
         refresh-ips) cloudflare_refresh_and_reload ;;
         dns) cf_cmd dns-show "${1:?domain}" ;;
         zone) cf_cmd zone "${1:?domain}" ;;

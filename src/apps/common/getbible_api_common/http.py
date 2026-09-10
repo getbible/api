@@ -42,6 +42,11 @@ def install_request_hooks(app: Flask, settings: ServiceSettings, logger: logging
         response.headers.setdefault("Referrer-Policy", "no-referrer")
         response.headers.setdefault("Cross-Origin-Resource-Policy", "cross-origin")
         response.headers.setdefault("Access-Control-Allow-Origin", "*")
+        response.headers.setdefault(
+            "Access-Control-Expose-Headers",
+            "Cache-Control, ETag, Last-Modified, Date, Age, Expires, Content-Length, "
+            "Content-Range, Retry-After, X-Cache-Status, CF-Cache-Status, X-Request-ID",
+        )
         duration_ms = round((time.perf_counter() - g.get("started", time.perf_counter())) * 1000, 3)
         operation = g.get("operation")
         if operation in {"health", "readiness"} and response.status_code < 500:

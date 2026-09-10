@@ -35,6 +35,39 @@ class QueryAppTest(EndpointCase, unittest.TestCase):
         first = self.client.get("/v2/test/Ge1:1")
         second = self.client.get("/v2/test/Ge1:1", headers={"If-None-Match": first.headers["ETag"]})
         self.assertEqual(second.status_code, 304)
+        self.assertEqual(second.data, b"")
+        self.assertEqual(second.headers["ETag"], first.headers["ETag"])
+        self.assertEqual(second.headers["Cache-Control"], first.headers["Cache-Control"])
+
+    def test_head_and_changed_scripture_preserve_validator_semantics(self) -> None:
+        path = "/v2/test/Ge1:1"
+        first = self.client.get(path)
+        head = self.client.head(path)
+        self.assertEqual(head.status_code, 200)
+        self.assertEqual(head.data, b"")
+        self.assertEqual(head.headers["ETag"], first.headers["ETag"])
+        self.assertEqual(head.headers["Cache-Control"], first.headers["Cache-Control"])
+        changed = first.get_json()
+        changed["test_1_1"]["verses"][0]["text"] = "Updated scripture fixture."
+        with patch.object(self.app.extensions["getbible"], "select", return_value=changed):
+            refreshed = self.client.get(path, headers={"If-None-Match": first.headers["ETag"]})
+        self.assertEqual(refreshed.status_code, 200)
+        self.assertEqual(refreshed.get_json(), changed)
+        self.assertNotEqual(refreshed.headers["ETag"], first.headers["ETag"])
+
+    def test_cache_metadata_is_readable_by_cross_origin_clients(self) -> None:
+        for path in ("/v2/test/Ge1:1", "/v2/test/nonsense", "/healthz"):
+            with self.subTest(path=path):
+                response = self.client.get(path, headers={"Origin": "https://reader.example"})
+                exposed = {header.strip() for header in response.headers["Access-Control-Expose-Headers"].split(",")}
+                self.assertTrue({"ETag", "Cache-Control", "Last-Modified", "Age", "Retry-After", "CF-Cache-Status"} <= exposed)
+
+    def test_health_and_problems_are_not_cacheable(self) -> None:
+        for path in ("/healthz", "/readyz", "/v2/test/nonsense", "/v2/nope/Ge1:1"):
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                self.assertEqual(response.headers["Cache-Control"], "no-store")
+                self.assertNotIn("ETag", response.headers)
 
     def test_multiple_references_are_joined(self) -> None:
         response = self.client.get("/v2/test/Ge1:1;Ge1:2")

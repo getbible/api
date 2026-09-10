@@ -77,7 +77,8 @@ class CloudflareCacheTest(unittest.TestCase):
         cloudflare = helper("getbible-cloudflare")
         operations = []
 
-        def replace(*args):
+        def replace(*args, **kwargs):
+            self.assertEqual(kwargs, {"last": True})
             operations.append(("rule", args))
 
         def request(*args):

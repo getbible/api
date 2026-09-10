@@ -52,6 +52,7 @@ jobs:
         run: |
           sudo -E env "PATH=$PATH" tests/integration/static.sh
           sudo -E env "PATH=$PATH" tests/integration/runtime.sh
+          sudo -E env "PATH=$PATH" bash tests/integration/runtime_rollback.sh
           sudo -E env "PATH=$PATH" bash tests/integration/deploy_keys.sh
 
   systemd:
