@@ -1,0 +1,98 @@
+name: getbible
+
+services:
+  getbible:
+    # Production deployment only pulls the prebuilt private image. No checkout
+    # or Dockerfile is required on the server. See docs/DOCKER.md for login.
+    image: ${GETBIBLE_IMAGE_REPOSITORY:-ghcr.io/getbible/api}:${GETBIBLE_IMAGE_TAG:-1.0.0}
+    restart: unless-stopped
+    hostname: ${GETBIBLE_HOSTNAME:-getbible}
+    user: "0:0"
+    cgroup: private
+    cap_add:
+      # systemd creates mount namespaces and delegates this private cgroup tree.
+      # Service units still drop capabilities and restrict writable paths.
+      - SYS_ADMIN
+    security_opt:
+      # docker-default blocks the mounts required by systemd service isolation.
+      # Docker's default seccomp profile remains enabled.
+      - apparmor:unconfined
+    stop_signal: SIGRTMIN+3
+    stop_grace_period: ${GETBIBLE_STOP_GRACE_PERIOD:-120s}
+    mem_limit: ${GETBIBLE_MEMORY_LIMIT:-4g}
+    memswap_limit: ${GETBIBLE_MEMORY_LIMIT:-4g}
+    cpus: ${GETBIBLE_CPU_LIMIT:-2.0}
+    pids_limit: ${GETBIBLE_PIDS_LIMIT:-4096}
+    shm_size: ${GETBIBLE_SHM_SIZE:-64m}
+    ports:
+      - "${GETBIBLE_BIND_ADDRESS:-0.0.0.0}:${GETBIBLE_HTTP_PORT:-8080}:${GETBIBLE_ORIGIN_HTTP_PORT:-80}"
+    tmpfs:
+      - /run:rw,nosuid,nodev,mode=755,size=64m
+      - /run/lock:rw,nosuid,nodev,noexec,mode=755,size=8m
+      - /tmp:rw,nosuid,nodev,mode=1777,size=128m
+    environment:
+      GB_EXECUTION_MODE: docker
+      container: docker
+      TZ: ${TZ:-UTC}
+      GETBIBLE_TLS_MODE: ${GETBIBLE_TLS_MODE:-external}
+      GETBIBLE_TRUSTED_PROXY_CIDRS: ${GETBIBLE_TRUSTED_PROXY_CIDRS:-}
+      GETBIBLE_PUBLIC_SCHEME: ${GETBIBLE_PUBLIC_SCHEME:-https}
+      GETBIBLE_ORIGIN_HTTP_PORT: ${GETBIBLE_ORIGIN_HTTP_PORT:-80}
+      GETBIBLE_DEFAULT_DEPLOY_MODE: ${GETBIBLE_DEFAULT_DEPLOY_MODE:-staged}
+      GETBIBLE_DEFAULT_ACCESS_MODE: ${GETBIBLE_DEFAULT_ACCESS_MODE:-}
+      GETBIBLE_DEFAULT_RATE_PER_SECOND: ${GETBIBLE_DEFAULT_RATE_PER_SECOND:-}
+      GETBIBLE_DEFAULT_RATE_BURST: ${GETBIBLE_DEFAULT_RATE_BURST:-}
+      GETBIBLE_DEFAULT_QUOTA_HOUR: ${GETBIBLE_DEFAULT_QUOTA_HOUR:-}
+      GETBIBLE_DEFAULT_QUOTA_DAY: ${GETBIBLE_DEFAULT_QUOTA_DAY:-}
+      GETBIBLE_DEFAULT_CONN_LIMIT: ${GETBIBLE_DEFAULT_CONN_LIMIT:-}
+      GETBIBLE_DEFAULT_CACHE_TTL: ${GETBIBLE_DEFAULT_CACHE_TTL:-}
+      GETBIBLE_DEFAULT_SHA_CACHE_TTL: ${GETBIBLE_DEFAULT_SHA_CACHE_TTL:-}
+      GETBIBLE_DEFAULT_QUERY_CACHE_TTL: ${GETBIBLE_DEFAULT_QUERY_CACHE_TTL:-}
+      GETBIBLE_DEFAULT_SEARCH_CACHE_TTL: ${GETBIBLE_DEFAULT_SEARCH_CACHE_TTL:-}
+      GETBIBLE_DEFAULT_QUERY_WORKERS: ${GETBIBLE_DEFAULT_QUERY_WORKERS:-}
+      GETBIBLE_DEFAULT_QUERY_THREADS: ${GETBIBLE_DEFAULT_QUERY_THREADS:-}
+      GETBIBLE_DEFAULT_SEARCH_WORKERS: ${GETBIBLE_DEFAULT_SEARCH_WORKERS:-}
+      GETBIBLE_DEFAULT_SEARCH_THREADS: ${GETBIBLE_DEFAULT_SEARCH_THREADS:-}
+      GETBIBLE_MEMORY_BUDGET: ${GETBIBLE_MEMORY_BUDGET:-}
+      GETBIBLE_DEFAULT_SYNC_SCHEDULE: ${GETBIBLE_DEFAULT_SYNC_SCHEDULE:-}
+      GETBIBLE_DEFAULT_EXTENSIONS: ${GETBIBLE_DEFAULT_EXTENSIONS:-}
+      GETBIBLE_LOG_ROTATE_SIZE: ${GETBIBLE_LOG_ROTATE_SIZE:-}
+      GETBIBLE_LOG_ROTATE_KEEP: ${GETBIBLE_LOG_ROTATE_KEEP:-}
+      GETBIBLE_HSTS_INCLUDE_SUBDOMAINS: ${GETBIBLE_HSTS_INCLUDE_SUBDOMAINS:-}
+      GETBIBLE_CLOUDFLARE_ENABLED: ${GETBIBLE_CLOUDFLARE_ENABLED:-true}
+      GETBIBLE_DEFAULT_CLOUDFLARE_MODE: ${GETBIBLE_DEFAULT_CLOUDFLARE_MODE:-proxied}
+      GETBIBLE_DEFAULT_CLOUDFLARE_CACHE: ${GETBIBLE_DEFAULT_CLOUDFLARE_CACHE:-respect}
+      GETBIBLE_DEFAULT_CLOUDFLARE_FEATURES: ${GETBIBLE_DEFAULT_CLOUDFLARE_FEATURES:-free}
+      GETBIBLE_CLOUDFLARE_API_TOKEN: ${GETBIBLE_CLOUDFLARE_API_TOKEN:-}
+      GETBIBLE_CLOUDFLARE_API_TOKEN_FILE: ${GETBIBLE_CLOUDFLARE_API_TOKEN_FILE:-}
+      GETBIBLE_SERVER_PUBLIC_IPV4: ${GETBIBLE_SERVER_PUBLIC_IPV4:-}
+      GETBIBLE_SERVER_PUBLIC_IPV6: ${GETBIBLE_SERVER_PUBLIC_IPV6:-}
+      GETBIBLE_TELEGRAM_ENABLED: ${GETBIBLE_TELEGRAM_ENABLED:-}
+      GETBIBLE_TELEGRAM_BOT_TOKEN: ${GETBIBLE_TELEGRAM_BOT_TOKEN:-}
+      GETBIBLE_TELEGRAM_BOT_TOKEN_FILE: ${GETBIBLE_TELEGRAM_BOT_TOKEN_FILE:-}
+      GETBIBLE_TELEGRAM_CHAT_ID: ${GETBIBLE_TELEGRAM_CHAT_ID:-}
+      GETBIBLE_TELEGRAM_HOSTNAME: ${GETBIBLE_TELEGRAM_HOSTNAME:-getbible}
+      GETBIBLE_CERTBOT_EMAIL: ${GETBIBLE_CERTBOT_EMAIL:-}
+      GETBIBLE_CERT_METHOD: ${GETBIBLE_CERT_METHOD:-}
+    volumes:
+      # Mount whole parent trees: static publication uses relative symlinks,
+      # hard links and atomic rename within /srv/getbible.
+      - ${GETBIBLE_DATA_ROOT:-/srv/getbible-data}/config:/etc/getbible
+      - ${GETBIBLE_DATA_ROOT:-/srv/getbible-data}/state:/var/lib/getbible
+      - ${GETBIBLE_DATA_ROOT:-/srv/getbible-data}/backups:/var/backups/getbible
+      - ${GETBIBLE_DATA_ROOT:-/srv/getbible-data}/data:/srv/getbible
+      - ${GETBIBLE_DATA_ROOT:-/srv/getbible-data}/runtime:/opt/getbible
+      - ${GETBIBLE_DATA_ROOT:-/srv/getbible-data}/pages:/var/www/getbible
+      - ${GETBIBLE_DATA_ROOT:-/srv/getbible-data}/cache:/var/cache/getbible
+      - ${GETBIBLE_DATA_ROOT:-/srv/getbible-data}/nginx-cache:/var/cache/nginx/getbible
+      - ${GETBIBLE_DATA_ROOT:-/srv/getbible-data}/nginx:/etc/nginx
+      - ${GETBIBLE_DATA_ROOT:-/srv/getbible-data}/systemd:/etc/systemd/system
+      - ${GETBIBLE_DATA_ROOT:-/srv/getbible-data}/certificates:/etc/letsencrypt
+      - ${GETBIBLE_DATA_ROOT:-/srv/getbible-data}/logs:/var/log/getbible
+      - ${GETBIBLE_DATA_ROOT:-/srv/getbible-data}/nginx-logs:/var/log/nginx
+      - ${GETBIBLE_DATA_ROOT:-/srv/getbible-data}/journal:/var/log/journal
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -5,7 +5,7 @@
 [[ -n "${GB_SYSTEMD_LOADED:-}" ]] && return 0
 GB_SYSTEMD_LOADED=1
 
-sd_available() { gb_have "$GB_SYSTEMCTL" && [[ -z "$GB_PREFIX" ]]; }
+sd_available() { gb_have "$GB_SYSTEMCTL" && [[ -z "$GB_PREFIX" && "${GB_CONTAINER_BOOTSTRAP:-false}" != true ]]; }
 
 sd_daemon_reload() {
     sd_available || return 0
@@ -40,6 +40,13 @@ sd_install_dropin() {
 }
 
 sd_enable() {
+    if [[ "${GB_CONTAINER_BOOTSTRAP:-false}" == true && -z "$GB_PREFIX" && "$GB_DRY_RUN" != true ]]; then
+        local arg
+        local -a units=()
+        for arg in "$@"; do [[ "$arg" == --now ]] || units+=("$arg"); done
+        "$GB_SYSTEMCTL" --root=/ enable "${units[@]}"
+        return
+    fi
     sd_available || return 0
     [[ "$GB_DRY_RUN" == true ]] && return 0
     "$GB_SYSTEMCTL" enable "$@" >/dev/null 2>&1 || "$GB_SYSTEMCTL" enable "$@"

@@ -1,0 +1,13 @@
+.git
+.venv*
+**/__pycache__
+**/*.pyc
+**/*.egg-info
+**/build
+.env
+.env.*
+!.env.example
+*.log
+*.tar
+*.tar.gz
+getbible-data

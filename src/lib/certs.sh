@@ -66,6 +66,10 @@ certs_dns_cloudflare_available() {
 # DNS is on Cloudflare but not managed here choose dns-cloudflare explicitly.
 certs_method() {
     local domain="$1" requested="${2:-}" method
+    if declare -F nginx_external_tls >/dev/null && nginx_external_tls; then
+        printf 'external\n'
+        return 0
+    fi
     method="${requested:-$(gb_global CERT_METHOD auto)}"
     certs_valid_method "$method" || { gb_warn "Unknown certificate method: $method (auto, http, dns-cloudflare)"; return 1; }
     if [[ "$method" == auto ]]; then
@@ -79,6 +83,7 @@ certs_method() {
 
 certs_method_description() {
     case "$1" in
+        external) printf 'external TLS: the reverse proxy owns certificate issuance and renewal\n' ;;
         http) printf 'HTTP-01 through the port-80 challenge directory; DNS must already reach this server\n' ;;
         dns-cloudflare) printf 'DNS-01 through the stored Cloudflare API token; works before DNS points here\n' ;;
         *) printf 'automatic: dns-cloudflare for a Cloudflare-managed domain when its plugin and the token are present, otherwise http\n' ;;
@@ -158,6 +163,10 @@ certs_http_probe() {
 certs_obtain() {
     local domain="$1" requested="${2:-}" method email
     local -a args=()
+    if nginx_external_tls; then
+        gb_warn "TLS is managed by the external reverse proxy; issue and renew $domain there."
+        return 1
+    fi
     if nginx_cert_exists "$domain"; then
         gb_log "Certificate for $domain already exists; reusing it."
         certs_install_hook
@@ -203,6 +212,10 @@ certs_obtain() {
 certs_issue() {
     local domain="$1" method="${2:-}"
     ep_exists "$domain" || gb_die "Unknown endpoint: $domain"
+    if nginx_external_tls; then
+        gb_warn "TLS is managed by the external reverse proxy; issue and renew $domain there."
+        return 1
+    fi
     if nginx_cert_exists "$domain"; then
         gb_log "$domain already has a Let's Encrypt certificate (expires $(certs_expiry "$domain"))."
     fi
@@ -234,6 +247,10 @@ HOOK
 
 certs_renew_now() {
     local domain="$1"
+    if nginx_external_tls; then
+        gb_warn "TLS is managed by the external reverse proxy; issue and renew $domain there."
+        return 1
+    fi
     certs_available || { gb_warn "certbot is not installed (System > Install dependencies)."; return 1; }
     nginx_cert_exists "$domain" || { gb_warn "$domain has no Let's Encrypt certificate to renew; issue one first."; return 1; }
     certs_install_hook || return 1
@@ -255,6 +272,7 @@ certs_placeholder_exists() { [[ -f "$(certs_placeholder_dir "$1")/fullchain.pem"
 # TLS vhost before any DNS change. Go-live replaces it with Let's Encrypt.
 certs_placeholder_ensure() {
     local domain="$1" dir
+    nginx_external_tls && return 0
     certs_placeholder_exists "$domain" && return 0
     [[ "$GB_DRY_RUN" == true ]] && { gb_log "(dry-run) would create a placeholder certificate for $domain"; return 0; }
     gb_have openssl || { gb_warn "openssl is missing; $domain gets no placeholder certificate and stays HTTP-only while staged."; return 1; }
@@ -285,7 +303,8 @@ certs_placeholder_remove() {
 # certs_source DOMAIN: letsencrypt | placeholder | none
 certs_source() {
     local domain="$1"
-    if nginx_cert_exists "$domain"; then printf 'letsencrypt\n'
+    if nginx_external_tls; then printf 'external\n'
+    elif nginx_cert_exists "$domain"; then printf 'letsencrypt\n'
     elif certs_placeholder_exists "$domain"; then printf 'placeholder\n'
     else printf 'none\n'; fi
 }
@@ -305,6 +324,7 @@ certs_renewal_method() {
 certs_status_line() {
     local domain="$1"
     case "$(certs_source "$domain")" in
+        external) printf 'external TLS terminator (certificate and renewal managed there)\n' ;;
         letsencrypt) printf "Let's Encrypt, expires %s, renewal method %s\n" "$(certs_expiry "$domain")" "$(certs_renewal_method "$domain")" ;;
         placeholder) printf 'self-signed placeholder (staged; replaced at go-live)\n' ;;
         *) printf 'none (HTTP only)\n' ;;
@@ -313,6 +333,13 @@ certs_status_line() {
 
 certs_status_text() {
     local domain="$1" method
+    if nginx_external_tls; then
+        printf 'Domain      : %s (%s)\n' "$domain" "$(ep_publication "$domain")"
+        printf 'Certificate : %s\n' "$(certs_status_line "$domain")"
+        printf 'Origin      : HTTP port %s; public URL https://%s\n' "$(nginx_origin_http_port)" "$domain"
+        printf 'Verification: getbible verify %s checks the local origin and, when live, public HTTPS.\n' "$domain"
+        return 0
+    fi
     method="$(certs_method "$domain")" || method=http
     printf 'Domain      : %s (%s)\n' "$domain" "$(ep_publication "$domain")"
     printf 'Certificate : %s\n' "$(certs_status_line "$domain")"
@@ -343,12 +370,19 @@ certs_prompt_method() {
 
 # Make sure a contact email exists while dialogs are still possible.
 certs_email_interactive() {
+    if declare -F nginx_external_tls >/dev/null && nginx_external_tls; then return 0; fi
     [[ -n "$(gb_global CERTBOT_EMAIL)" ]] && return 0
     certs_email >/dev/null
 }
 
 certs_menu() {
     local domain="$1" choice method out
+    if nginx_external_tls; then
+        out="$(gb_tmpdir)/cert.$$"
+        certs_status_text "$domain" > "$out" || return 1
+        ui_textbox "External certificate: $domain" "$out"
+        return 0
+    fi
     while true; do
         choice="$(ui_menu "Certificate: $domain" "$(certs_status_line "$domain")" \
             status "Show certificate details" \

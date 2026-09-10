@@ -1,0 +1,11 @@
+# Independent of ACME: the firewall may answer certificate challenges itself.
+# Random short-lived identity files prove the public HTTPS route reaches this
+# installation, with no runtime work or bearer token required.
+location ^~ /.well-known/getbible-origin/ {
+    alias {{PROBE_ROOT}}/;
+    default_type text/plain;
+    autoindex off;
+    open_file_cache off;
+    add_header Cache-Control "no-store" always;
+    limit_except GET HEAD { deny all; }
+}

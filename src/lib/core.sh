@@ -15,6 +15,20 @@ umask 027
 
 GB_VERSION="1.0.0"
 
+# Execution environment is independent of certificate ownership. A test root
+# remains native unless its test explicitly selects Docker.
+gb_execution_mode() {
+    local mode="${GETBIBLE_EXECUTION_MODE:-${GB_EXECUTION_MODE:-auto}}"
+    if [[ "$mode" == auto ]]; then
+        mode=native
+        if [[ -z "${GB_PREFIX:-}" ]] && { [[ "${container:-}" == docker || -f /.dockerenv ]] || [[ -f /run/systemd/container && "$(cat /run/systemd/container)" == docker ]]; }; then
+            mode=docker
+        fi
+    fi
+    case "$mode" in native|docker) printf '%s\n' "$mode" ;; *) printf 'Invalid execution mode: use native or docker.\n' >&2; return 1 ;; esac
+}
+gb_is_docker() { [[ "$(gb_execution_mode)" == docker ]]; }
+
 # --- locations ---------------------------------------------------------------
 GB_PREFIX="${GB_PREFIX:-}"
 GB_REPO_DIR="${GB_REPO_DIR:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)}"
@@ -44,6 +58,7 @@ GB_OPT="$GB_PREFIX/opt/getbible"
 GB_WWW="$GB_PREFIX/var/www/getbible"
 GB_CACHE="$GB_PREFIX/var/cache/getbible"
 GB_RUN="$GB_PREFIX/run/getbible"
+GB_ENVIRONMENT_CONF="$GB_RUN/environment.conf"
 GB_NGINX="$GB_PREFIX/etc/nginx"
 GB_NGINX_GB="$GB_NGINX/getbible"
 GB_SYSTEMD="$GB_PREFIX/etc/systemd/system"
@@ -101,7 +116,12 @@ gb_require_root() {
     [[ -n "$GB_PREFIX" ]] && return 0   # test prefix: everything is user-owned
     command -v sudo >/dev/null || gb_die "This action needs root and sudo is not installed."
     gb_log "Re-running under sudo."
-    exec sudo --preserve-env=GB_PREFIX,GB_YES,GB_DRY_RUN,GB_UI,TERM -- "$GB_SELF" "${GB_ARGS[@]}"
+    local keep=GB_PREFIX,GB_YES,GB_DRY_RUN,GB_UI,TERM,GB_EXECUTION_MODE,GETBIBLE_EXECUTION_MODE key
+    if declare -F gb_environment_keys >/dev/null; then
+        while IFS= read -r key; do keep+=",GETBIBLE_$key"; done < <(gb_environment_keys)
+        keep+=",GETBIBLE_CLOUDFLARE_API_TOKEN_FILE,GETBIBLE_TELEGRAM_BOT_TOKEN_FILE"
+    fi
+    exec sudo --preserve-env="$keep" -- "$GB_SELF" "${GB_ARGS[@]}"
 }
 
 # --- temporary files ---------------------------------------------------------

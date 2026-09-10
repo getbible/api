@@ -82,7 +82,7 @@ type_static_remove() {
         home="$(sync_home "$domain")"
         rm -rf -- "$(ep_data_dir "$domain")" "$home"
         if gb_user_exists "$user" && [[ -z "$GB_PREFIX" && "$GB_DRY_RUN" != true ]]; then
-            userdel "$user" 2>/dev/null || true
+            if userdel "$user" 2>/dev/null; then gb_identity_forget_user "$user"; fi
         fi
     fi
 }

@@ -14,7 +14,7 @@ GB_ARGS=("$@")
 GB_REPO_DIR="$(cd -- "$(dirname -- "$GB_SELF")" && pwd -P)"
 export GB_REPO_DIR
 
-for lib in core platform ui config registry users telegram nginx certs systemd logs access sync python docs pages endpoint; do
+for lib in core platform ui config deployment registry resources users telegram nginx certs systemd logs access sync python docs pages endpoint; do
     # shellcheck source=/dev/null
     source "$GB_REPO_DIR/src/lib/$lib.sh"
 done
@@ -111,6 +111,9 @@ Platform
   settings [deploy-mode live|staged | cert-method auto|http|dns-cloudflare | certbot-email ADDRESS
            | public-ipv4 [ADDRESS] | public-ipv6 [ADDRESS]]
                                          show or change the defaults used by deploy and go-live
+  settings environment                  show configuration values and their sources (secrets hidden)
+  settings set KEY VALUE                set a system setting; explicit environment values take priority
+  resources [show|apply] [--json]         inspect or apply the shared runtime memory budget
   telegram enable|disable|test
   cloudflare ...                         see: getbible.sh cloudflare help
   doctor                                 check this host
@@ -137,13 +140,42 @@ export GB_YES GB_DRY_RUN
 
 gb_system_init() {
     gb_require_root
+    gb_environment_validate || return 1
+    if gb_is_docker && [[ -z "$GB_PREFIX" && "${GB_CONTAINER_BOOTSTRAP:-false}" != true && ! -d /run/systemd/system ]]; then
+        gb_die "The Docker image must run systemd as PID 1. Start it using the supplied Compose configuration."
+    fi
     gb_management_lock || return 1
     gb_global_init
     gb_ensure_base_groups
     gb_ensure_base_dirs
+    gb_environment_telegram
     tg_install_helper
     sync_install_tools
     logs_render_rotation
+}
+
+# Internal first-boot/restore operation. It never creates endpoints, requests
+# certificates, changes DNS or activates a new runtime code generation.
+cmd_container_init() {
+    gb_is_docker || gb_die "container-init is only available in Docker mode."
+    gb_require_root
+    local GB_CONTAINER_BOOTSTRAP=true GB_RESOURCES_BOOTSTRAP=true stage
+    export GB_CONTAINER_BOOTSTRAP GB_RESOURCES_BOOTSTRAP
+    gb_environment_capture || return 1
+    gb_system_init || return 1
+    if [[ ! -f "$GB_NGINX/conf.d/getbible-http.conf" ]]; then
+        stage="$(gb_tmpdir)/initial-nginx"
+        nginx_render_global "$stage" || return 1
+        cp -a "$stage/." "$GB_NGINX/" || return 1
+    fi
+    if [[ -n "$(ep_list_by_type runtime)" ]]; then
+        endpoint_source_type runtime
+        rt_restore_resource_settings || return 1
+    else
+        resources_status >/dev/null || return 1
+    fi
+    nginx_test || return 1
+    tg_notify ok "Container initialized" "Persistent state restored; endpoint deployment and public activation remain explicit."
 }
 
 cmd_deploy() {
@@ -400,6 +432,13 @@ cmd_golive() {
 cmd_settings() {
     local key="${1:-}" value="${2:-}"
     case "$key" in
+        environment) gb_environment_status ;;
+        set)
+            key="${2:?setting key}"
+            value="${3?setting value}"
+            gb_environment_keys | grep -qxF "$key" || gb_die "Unknown system setting: $key"
+            [[ "$(gb_environment_file "$key")" == "$GB_GLOBAL_CONF" ]] || gb_die "Use the Cloudflare or Telegram settings for credentials."
+            gb_global_set "$key" "$value" ;;
         "")
             printf 'deploy-mode    %s\ncert-method    %s\ncertbot-email  %s\npublic-ipv4    %s\npublic-ipv6    %s\n' \
                 "$(gb_global DEFAULT_DEPLOY_MODE live)" "$(gb_global CERT_METHOD auto)" "$(gb_global CERTBOT_EMAIL)" \
@@ -411,7 +450,7 @@ cmd_settings() {
             gb_log "Public IPv4 for DNS records: ${value:-detected automatically}." ;;
         public-ipv6)
             [[ $# -ge 2 ]] || { gb_global SERVER_PUBLIC_IPV6; return 0; }
-            [[ -z "$value" || "$value" =~ ^[0-9A-Fa-f:]+$ && "$value" == *:* ]] || gb_die "Invalid IPv6 address: $value"
+            [[ "$value" == none || -z "$value" || "$value" =~ ^[0-9A-Fa-f:]+$ && "$value" == *:* ]] || gb_die "Invalid IPv6 address: $value"
             gb_global_set SERVER_PUBLIC_IPV6 "$value"
             gb_log "Public IPv6 for DNS records: ${value:-detected automatically}." ;;
         deploy-mode)
@@ -449,6 +488,8 @@ main() {
     [[ $# -gt 0 ]] && shift
     case "$command" in
         menu) gb_system_init; ui_init; menu_main ;;
+        container-init) cmd_container_init ;;
+        resources) gb_system_init; resources_cli "$@" ;;
         list) ep_list ;;
         status)
             if [[ -n "${1:-}" ]]; then endpoint_status_text "$1"; else
@@ -460,7 +501,7 @@ main() {
         cert) gb_system_init; certs_cli "$@" ;;
         settings) gb_system_init; cmd_settings "$@" ;;
         apply) gb_system_init; endpoint_apply "${1:?domain}" ;;
-        update) gb_system_init; if [[ -n "${1:-}" ]]; then endpoint_apply "$1"; else update_all; fi ;;
+        update) gb_system_init; if [[ -n "${1:-}" ]]; then update_domain "$1"; else update_all; fi ;;
         self-update)
             [[ $# == 0 ]] || gb_die "self-update takes no arguments (use --dry-run to preview)."
             gb_require_root
@@ -517,4 +558,5 @@ main() {
     esac
 }
 
+gb_environment_validate || exit 1
 main "$@"

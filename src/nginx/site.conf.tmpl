@@ -1,9 +1,9 @@
 # getBible API - {{DOMAIN}} ({{TYPE}}{{#IF KIND}}/{{KIND}}{{/IF}}), rendered by getbible.sh.
 # Hand edits are detected on update and never silently overwritten.
 
-server {
-    listen 80;
-{{#IF IPV6}}    listen [::]:80;
+{{#UNLESS EXTERNAL_TLS}}server {
+    listen {{HTTP_PORT}};
+{{#IF IPV6}}    listen [::]:{{HTTP_PORT}};
 {{/IF}}    server_name {{DOMAIN}};
 
     include snippets/getbible/acme.conf;
@@ -12,8 +12,16 @@ server {
         return 301 https://$host$request_uri;
     }
 }
-{{#IF TLS}}
+{{/UNLESS}}{{#IF SERVING}}
 server {
+{{#IF EXTERNAL_TLS}}    listen {{HTTP_PORT}};
+{{#IF IPV6}}    listen [::]:{{HTTP_PORT}};
+{{/IF}}    server_name {{DOMAIN}};
+    # TLS terminates at the trusted reverse proxy. Relative redirects keep
+    # nginx's internal HTTP scheme and published Docker port out of Location.
+    absolute_redirect off;
+    include snippets/getbible/external-proxy.conf;
+{{/IF}}{{#IF TLS}}
     listen 443 ssl{{#IF HTTP2_LEGACY}} http2{{/IF}};
 {{#IF IPV6}}    listen [::]:443 ssl{{#IF HTTP2_LEGACY}} http2{{/IF}};
 {{/IF}}{{#IF HTTP2_NATIVE}}    http2 on;
@@ -22,6 +30,7 @@ server {
     ssl_certificate     {{CERT_DIR}}/fullchain.pem;
     ssl_certificate_key {{CERT_DIR}}/privkey.pem;
     include snippets/getbible/tls.conf;
+{{/IF}}
 {{#IF ORIGIN_PULLS}}
     # Only Cloudflare holds a client certificate signed by this CA.
     ssl_client_certificate {{NGINX_GB_DIR}}/cloudflare-origin-pull-ca.pem;
@@ -34,6 +43,7 @@ server {
 
     # Also answer origin-identity challenges after an HTTP-to-HTTPS redirect.
     include snippets/getbible/acme.conf;
+    include snippets/getbible/origin-probe.conf;
     include {{NGINX_GB_DIR}}/{{DOMAIN}}/server.conf;
     include snippets/getbible/headers.conf;
     include snippets/getbible/errors.conf;

@@ -15,6 +15,56 @@ NG_TRANSACTION_ACTIVE=false
 NG_TRANSACTION_FILES=()
 NG_TRANSACTION_SETS=()
 
+# TLS ownership is independent of the execution environment. Native installs
+# keep their certificate lifecycle; an external TLS terminator sends HTTP to
+# the same virtual hosts and is the only trusted source of client addresses.
+nginx_tls_mode() {
+    local default=managed
+    if declare -F gb_is_docker >/dev/null && gb_is_docker; then default=external; fi
+    gb_global TLS_MODE "$default"
+}
+nginx_external_tls() { [[ "$(nginx_tls_mode)" == external ]]; }
+nginx_origin_http_port() { gb_global ORIGIN_HTTP_PORT 80; }
+nginx_public_scheme() {
+    # shellcheck disable=SC2016 # nginx variable, not a shell expansion
+    if nginx_external_tls; then gb_global PUBLIC_SCHEME https; else printf '$scheme\n'; fi
+}
+
+# Validate before interpolating operator configuration into nginx directives.
+# A broad /0 trust would let callers choose the address used for rate limits.
+nginx_proxy_cidrs() {
+    local cidrs
+    cidrs="$(gb_global TRUSTED_PROXY_CIDRS)"
+    "$GB_PYTHON" - "$cidrs" <<'PY'
+import ipaddress
+import sys
+
+value = sys.argv[1]
+if not value:
+    raise SystemExit("External TLS requires TRUSTED_PROXY_CIDRS (HAProxy's backend source IP or CIDR).")
+try:
+    networks = [ipaddress.ip_network(part.strip(), strict=False) for part in value.split(",")]
+    if any(network.prefixlen == 0 for network in networks):
+        raise ValueError("a /0 network trusts every caller")
+except ValueError as exc:
+    raise SystemExit(f"Invalid TRUSTED_PROXY_CIDRS: {exc}") from exc
+for network in dict.fromkeys(networks):
+    print(network)
+PY
+}
+
+nginx_validate_proxy_settings() {
+    local mode port
+    mode="$(nginx_tls_mode)"
+    [[ "$mode" == managed || "$mode" == external ]] || { gb_warn "TLS_MODE must be managed or external."; return 1; }
+    port="$(nginx_origin_http_port)"
+    [[ "$port" =~ ^[0-9]{1,5}$ ]] && (( 10#$port > 0 && 10#$port <= 65535 )) || { gb_warn "ORIGIN_HTTP_PORT must be between 1 and 65535."; return 1; }
+    if [[ "$mode" == external ]]; then
+        [[ "$(gb_global PUBLIC_SCHEME https)" == https ]] || { gb_warn "PUBLIC_SCHEME must be https; public API URLs and the external TLS terminator use HTTPS."; return 1; }
+        nginx_proxy_cidrs >/dev/null || return 1
+    fi
+}
+
 # Keep each applied stage until the endpoint passes its service health check.
 # Replaying backups in reverse restores both HTTP and TLS stages correctly.
 nginx_transaction_begin() {
@@ -80,6 +130,7 @@ nginx_cert_exists() { [[ -f "$(nginx_cert_dir "$1")/fullchain.pem" && -f "$(ngin
 # placeholder of a staged endpoint, otherwise nothing (HTTP only).
 nginx_tls_cert_dir() {
     local domain="$1"
+    nginx_external_tls && return 0
     if nginx_cert_exists "$domain"; then
         nginx_cert_dir "$domain"
     elif declare -F certs_placeholder_exists >/dev/null && certs_placeholder_exists "$domain"; then
@@ -102,11 +153,23 @@ nginx_render_global() {
     hsts="$(gb_global HSTS_INCLUDE_SUBDOMAINS false)"
     install -d -m 0755 "$stage/conf.d" "$stage/snippets/getbible" "$stage/getbible/tokens" || return 1
     install -d -m 0700 "$stage/getbible/tokens" "$stage/getbible/token-validity" || return 1
-    gb_render "$GB_NGINX_SRC/http.conf.tmpl" "$stage/conf.d/getbible-http.conf" "NGINX_GB_DIR=$GB_NGINX_GB" || return 1
+    gb_render "$GB_NGINX_SRC/http.conf.tmpl" "$stage/conf.d/getbible-http.conf" "NGINX_GB_DIR=$GB_NGINX_GB" "PUBLIC_SCHEME=$(nginx_public_scheme)" || return 1
     gb_render "$GB_NGINX_SRC/snippets/headers.conf.tmpl" "$stage/snippets/getbible/headers.conf" "HSTS_INCLUDE_SUBDOMAINS=$hsts" || return 1
     gb_render "$GB_NGINX_SRC/snippets/headers-html.conf.tmpl" "$stage/snippets/getbible/headers-html.conf" "HSTS_INCLUDE_SUBDOMAINS=$hsts" || return 1
     sed 's/"public, max-age=300"/"private, no-store"/' "$stage/snippets/getbible/headers-html.conf" > "$stage/snippets/getbible/headers-html-private.conf" || return 1
     gb_render "$GB_NGINX_SRC/snippets/acme.conf.tmpl" "$stage/snippets/getbible/acme.conf" "ACME_ROOT=$GB_ACME_ROOT" || return 1
+    gb_render "$GB_NGINX_SRC/snippets/origin-probe.conf.tmpl" "$stage/snippets/getbible/origin-probe.conf" "PROBE_ROOT=$GB_VAR/origin-probes" || return 1
+    # Nginx trusts only the last address supplied by the immediate HAProxy
+    # peer. HAProxy overwrites X-Forwarded-For after validating its own peer.
+    printf '# Trusted external TLS terminator peers.\n' > "$stage/snippets/getbible/external-proxy.conf"
+    if nginx_external_tls && [[ -n "$(gb_global TRUSTED_PROXY_CIDRS)" ]]; then
+        local cidrs cidr
+        cidrs="$(nginx_proxy_cidrs)" || return 1
+        while IFS= read -r cidr; do
+            printf 'set_real_ip_from %s;\n' "$cidr" >> "$stage/snippets/getbible/external-proxy.conf"
+        done <<< "$cidrs"
+        printf 'real_ip_header X-Forwarded-For;\nreal_ip_recursive off;\n' >> "$stage/snippets/getbible/external-proxy.conf"
+    fi
     cp "$GB_NGINX_SRC/snippets/tls.conf" "$stage/snippets/getbible/tls.conf" || return 1
     cp "$GB_NGINX_SRC/snippets/errors.conf" "$stage/snippets/getbible/errors.conf" || return 1
     cp "$GB_NGINX_SRC/snippets/proxy.conf" "$stage/snippets/getbible/proxy.conf" || return 1
@@ -128,11 +191,14 @@ nginx_render_global() {
 # endpoint type module sourced (type_<TYPE>_render_locations).
 nginx_render_endpoint() {
     local stage="$1"
+    nginx_validate_proxy_settings || return 1
     nginx_detect
-    local slug="$EP_SLUG" domain="$EP_DOMAIN" tls=false cert_dir
+    local slug="$EP_SLUG" domain="$EP_DOMAIN" tls=false external=false serving=false cert_dir
+    nginx_external_tls && external=true
     cert_dir="$(nginx_tls_cert_dir "$domain")"
     [[ -n "$cert_dir" ]] && tls=true
-    [[ "${GB_FORCE_TLS:-}" == true ]] && { tls=true; cert_dir="${cert_dir:-$(nginx_cert_dir "$domain")}"; }
+    [[ "${GB_FORCE_TLS:-}" == true && "$external" == false ]] && { tls=true; cert_dir="${cert_dir:-$(nginx_cert_dir "$domain")}"; }
+    [[ "$tls" == true || "$external" == true ]] && serving=true
     install -d -m 0755 "$stage/sites-available" "$stage/conf.d" "$stage/getbible/$domain"
     install -d -m 0700 "$stage/getbible/tokens" "$stage/getbible/token-validity"
 
@@ -150,7 +216,7 @@ nginx_render_endpoint() {
     # files they include, never the publication state: a vhost that serves
     # the name keeps them through "Stage again", while a freshly built server
     # has no ranges file yet (go-live fetches it) and stays verifiable directly.
-    if [[ "$EP_CLOUDFLARE_MODE" == proxied ]]; then
+    if [[ "$EP_CLOUDFLARE_MODE" == proxied && "$external" == false ]]; then
         [[ -f "$GB_NGINX_GB/cloudflare-real-ip.conf" ]] && real_ip=true
         [[ "$EP_CLOUDFLARE_ORIGIN_PULLS" == true && -f "$GB_NGINX_GB/cloudflare-origin-pull-ca.pem" ]] && origin_pulls=true
     fi
@@ -175,6 +241,7 @@ nginx_render_endpoint() {
 
     gb_render "$GB_NGINX_SRC/site.conf.tmpl" "$stage/sites-available/$domain.conf" \
         "DOMAIN=$domain" "SLUG=$slug" "TYPE=$EP_TYPE" "KIND=$EP_KIND" "TLS=$tls" \
+        "EXTERNAL_TLS=$external" "SERVING=$serving" "HTTP_PORT=$(nginx_origin_http_port)" \
         "IPV6=$NG_IPV6" "HTTP2_NATIVE=$http2_native" "HTTP2_LEGACY=$http2_legacy" \
         "CERT_DIR=$cert_dir" "NGINX_GB_DIR=$GB_NGINX_GB" \
         "ORIGIN_PULLS=$origin_pulls" "REAL_IP=$real_ip" "LOG_DIR=$(ep_log_dir "$domain")" \

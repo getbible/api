@@ -14,6 +14,10 @@ update_repo_state() {
 }
 
 update_pull() {
+    if gb_is_docker; then
+        gb_warn "The Docker manager is supplied by its image. On the host run: docker compose pull && docker compose up -d"
+        return 1
+    fi
     gb_have git || { gb_warn "git is not installed."; return 1; }
     local root branch dirty upstream remote ref
     root="$(git -C "$GB_REPO_DIR" rev-parse --show-toplevel 2>/dev/null)" || {
@@ -69,6 +73,16 @@ update_manager() {
     gb_log "Run getbible.sh again to use this checkout. Applying it to hosted domains is a separate update action."
 }
 
+update_domain() {
+    local domain="$1"
+    if gb_is_docker && [[ "$(ep_get "$domain" TYPE)" == runtime ]]; then
+        endpoint_source_type runtime
+        rt_update "$domain"
+    else
+        endpoint_apply "$domain"
+    fi
+}
+
 update_all() {
     local commit dirty failures=0 count=0 domain
     commit="$(git -C "$GB_REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
@@ -85,7 +99,7 @@ update_all() {
         [[ -n "$domain" ]] || continue
         count=$((count + 1))
         gb_step "Updating $domain"
-        if ! endpoint_apply "$domain"; then
+        if ! update_domain "$domain"; then
             failures=$((failures + 1))
             gb_warn "Update failed for $domain"
         fi

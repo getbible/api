@@ -1,6 +1,52 @@
 # Updating and recovery
 
+## Docker image updates
+
+Docker installations use the image's manager source. From the host directory
+holding `compose.yaml`, select the desired numbered `GETBIBLE_IMAGE_TAG` in
+`.env`, then:
+
+```sh
+docker compose pull
+docker compose up -d
+docker compose exec --user root getbible getbible doctor
+docker compose exec --user root getbible getbible list
+```
+
+This replaces the whole system container and causes a service restart; allow
+the configured graceful stop period. Mounted configuration, numeric account
+identities, data, interpreters and saved runtime generations survive. It does
+not automatically apply new domain templates, redeploy applications, issue
+certificates or change public DNS. After the replacement, explicitly apply to
+one domain and then the others when ready:
+
+```sh
+docker compose exec --user root getbible getbible update query.example.org
+docker compose exec --user root getbible getbible status query.example.org
+docker compose exec --user root getbible getbible update
+```
+
+The existing commands below work inside the container with this `docker
+compose exec` prefix and `getbible` command. Docker's `self-update` directs the
+operator to the image workflow; it does not mutate image code through Git.
+Explicit runtime updates use the image's bundled interpreters/dependencies
+without fetching packages. To adopt newly released interpreter patches, first
+pull an image that bundles them, then run an explicit domain/runtime update.
+In Docker mode, `update DOMAIN` also adopts the newest bundled patch of each
+runtime endpoint's selected Python family. This differs from native ordinary
+`update`, which retains the selected exact patch. Retained generations keep
+their exact interpreter for rollback in both modes.
+
+`latest` is a moving stable-image tag, not an automatic updater. Pulling and
+recreating is still necessary. Numbered tags provide repeatability. Returning
+to a previous image is different from runtime generation rollback: if a newer
+image has already applied incompatible persisted configuration, restore the
+matching backup as well. Keep a consistent, numeric-ownership-preserving
+backup before updating; see [DOCKER.md](DOCKER.md).
+
 ## Update the manager script
+
+This section applies to native installations.
 
 When improvements are published, update the manager's checkout with one
 command:
@@ -57,7 +103,7 @@ operator has taken over are left alone (`PAGES.md`).
 | Operation | Result |
 | --- | --- |
 | `self-update` | Fetches the current branch's upstream and fast-forwards the clean manager checkout. The next invocation loads the updated code; hosted domains are not applied. |
-| `update [DOMAIN]` | Applies checked-out templates, helpers, configuration, documentation and changed runtime code/dependency pins. Retains the selected exact Python patch. |
+| `update [DOMAIN]` | Applies current templates, helpers, configuration, documentation and runtime changes. Native retains the selected exact Python patch; Docker adopts the newest bundled patch of the selected family. |
 | `runtime DOMAIN update` | Rebuilds application dependencies and adopts the latest reviewed patch of each endpoint's selected Python family. `runtime DOMAIN v3 update` does it for one endpoint. |
 | `runtime DOMAIN [vN] update --python 3.14` | Explicitly selects the catalog's current 3.14 patch and creates a new runtime release. An exact catalog patch is also accepted. |
 | `runtime DOMAIN redeploy` | Starts a fresh deployment of every endpoint's current release and settings, rebuilding code only if its inputs changed. |

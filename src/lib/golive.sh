@@ -65,6 +65,7 @@ golive_runtime_ready() {
 # certificate is requested. Never prompts; golive_interactive asks first.
 golive_preflight() {
     local domain="$1" method="$2" missing
+    nginx_validate_proxy_settings || return 1
     if [[ "$(ep_get "$domain" TYPE)" == runtime ]]; then
         golive_runtime_ready "$domain" || return 1
     else
@@ -78,6 +79,10 @@ golive_preflight() {
     if golive_cloudflare_managed "$domain" && ! cf_enabled; then
         gb_warn "$domain is managed through Cloudflare here (mode $(ep_get "$domain" CLOUDFLARE_MODE off)) but no Cloudflare API token is stored, so its DNS could not be switched: store it under Settings > Cloudflare API token, or set the domain's Cloudflare mode to off and change DNS yourself."
         return 1
+    fi
+    if nginx_external_tls; then
+        gb_log "External TLS: the reverse proxy must serve a valid certificate for $domain; public HTTPS is verified after activation."
+        return 0
     fi
     nginx_cert_exists "$domain" && return 0
     certs_available || { gb_warn "certbot is not installed (System > Install dependencies)."; return 1; }
@@ -100,13 +105,19 @@ golive_plan() {
     local domain="$1" method="$2" mode ipv4="" ipv6="" pulls="" step=1
     mode="$(ep_get "$domain" CLOUDFLARE_MODE off)"
     printf 'Go live: %s (%s %s, access %s)\n\n' "$domain" "$(ep_get "$domain" TYPE)" "$(ep_get "$domain" KIND)" "$(ep_get "$domain" ACCESS_MODE)"
-    if nginx_cert_exists "$domain"; then
+    if nginx_external_tls; then
+        printf '  %d. Use externally managed TLS; certificate issuance and renewal belong to the reverse proxy.\n' "$step"
+    elif nginx_cert_exists "$domain"; then
         printf "  %d. Keep the existing Let's Encrypt certificate (expires %s).\n" "$step" "$(certs_expiry "$domain")"
     else
         printf "  %d. Request a Let's Encrypt certificate: %s.\n" "$step" "$(certs_method_description "$method")"
     fi
     step=$((step + 1))
-    printf '  %d. Render HTTPS with that certificate, validate and reload nginx.\n' "$step"
+    if nginx_external_tls; then
+        printf '  %d. Render the complete HTTP origin on port %s, validate and reload nginx.\n' "$step" "$(nginx_origin_http_port)"
+    else
+        printf '  %d. Render HTTPS with that certificate, validate and reload nginx.\n' "$step"
+    fi
     step=$((step + 1))
     if golive_cloudflare_managed "$domain"; then
         ipv4="$(cf_public_ipv4)"; ipv6="$(cf_public_ipv6)"
@@ -122,7 +133,11 @@ golive_plan() {
     fi
     step=$((step + 1))
     printf '  %d. Confirm public routing and HTTPS, retrying for up to %s seconds; report the result.\n\n' "$step" "$GOLIVE_VERIFY_TIMEOUT"
-    printf 'Nothing changes until step 1 has succeeded; a failure before the switch leaves %s staged.\n' "$domain"
+    if nginx_external_tls; then
+        printf 'The local origin is checked before DNS changes. Public HTTPS verification checks the external certificate after activation.\n'
+    else
+        printf 'Nothing changes until step 1 has succeeded; a failure before the switch leaves %s staged.\n' "$domain"
+    fi
 }
 
 # golive_run DOMAIN [METHOD]: the switch itself. Prompts nothing: run it
@@ -139,13 +154,18 @@ golive_run() {
     if [[ "$GOLIVE_PREFLIGHT_DONE" != true ]]; then
         golive_preflight "$domain" "$method" || { gb_warn "$domain stays staged."; return 1; }
     fi
-    if nginx_cert_exists "$domain"; then cert_note="its existing certificate"; else cert_note="a $method certificate"; fi
+    if nginx_external_tls; then cert_note="externally managed TLS"
+    elif nginx_cert_exists "$domain"; then cert_note="its existing certificate"; else cert_note="a $method certificate"; fi
     if [[ "$GB_DRY_RUN" == true ]]; then
-        gb_log "(dry-run) would issue the certificate ($method), mark $domain live, apply the live configuration and verify it."
+        if nginx_external_tls; then
+            gb_log "(dry-run) would activate the HTTP origin, mark $domain live, apply the live configuration and verify public HTTPS."
+        else
+            gb_log "(dry-run) would issue the certificate ($method), mark $domain live, apply the live configuration and verify it."
+        fi
         return 0
     fi
     gb_step "Go live: $domain"
-    if ! certs_obtain "$domain" "$method"; then
+    if ! nginx_external_tls && ! certs_obtain "$domain" "$method"; then
         gb_warn "No certificate was issued; $domain stays staged. Fix the cause and choose 'Go live' again."
         tg_notify fail "Go-live failed: $domain" "The certificate could not be issued ($method); the domain stays staged."
         return 1
@@ -159,7 +179,11 @@ golive_run() {
             cf_failed=true
         else
             ep_set "$domain" LIVE false || true
-            gb_warn "Activation failed; $domain is staged again. The certificate is kept for the next attempt."
+            if nginx_external_tls; then
+                gb_warn "Activation failed; $domain is staged again. Fix the reported origin error before retrying."
+            else
+                gb_warn "Activation failed; $domain is staged again. The certificate is kept for the next attempt."
+            fi
             tg_notify fail "Go-live failed: $domain" "The live configuration could not be applied; the domain is staged again."
             return 1
         fi
@@ -251,7 +275,9 @@ golive_interactive() {
             GOLIVE_ALLOW_UNPUBLISHED=true
         fi
     fi
-    if nginx_cert_exists "$domain"; then
+    if nginx_external_tls; then
+        method=external
+    elif nginx_cert_exists "$domain"; then
         # Nothing to validate: the certificate is reused.
         method=auto
     elif [[ -n "$requested" ]]; then
@@ -312,9 +338,13 @@ golive_row() { printf '  %-30s %-5s %s\n' "$1" "$2" "$3"; }
 # golive_probe DOMAIN PATH INSECURE -> HTTP status through 127.0.0.1:443 with
 # the real host name, so DNS plays no part.
 golive_probe() {
-    local domain="$1" path="$2" insecure="$3" code=000 deadline remaining
+    local domain="$1" path="$2" insecure="$3" code=000 deadline remaining port=443 scheme=https
     local -a flags=()
-    [[ "$insecure" == true ]] && flags+=(--insecure)
+    if nginx_external_tls; then
+        port="$(nginx_origin_http_port)"; scheme=http
+    elif [[ "$insecure" == true ]]; then
+        flags+=(--insecure)
+    fi
     # nginx reload signals its master before new workers accept connections.
     # An immediate TLS handshake can still see the staged placeholder. Retry
     # connection/TLS failures within one deadline, with the same trust policy
@@ -324,7 +354,8 @@ golive_probe() {
         remaining=$((deadline - SECONDS))
         (( remaining > 0 )) || break
         code="$(curl --silent --output /dev/null --max-time "$remaining" --write-out '%{http_code}' \
-            --resolve "$domain:443:127.0.0.1" "${flags[@]+"${flags[@]}"}" "https://$domain$path" 2>/dev/null || true)"
+            --noproxy '*' --resolve "$domain:$port:127.0.0.1" --header "Host: $domain" \
+            "${flags[@]+"${flags[@]}"}" "$scheme://$domain:$port$path" 2>/dev/null || true)"
         code="${code:-000}"
         [[ "$code" == 000 ]] || break
         (( SECONDS < deadline )) || break
@@ -333,12 +364,34 @@ golive_probe() {
     printf '%s' "$code"
 }
 
+# Unlike HTTP-01, this marker must be served by this installation through
+# public HTTPS. The firewall may handle ACME paths itself. Its random filename
+# and no-store response prevent a cached health response proving the wrong
+# origin. The marker is removed after every attempt.
+golive_origin_identity_probe() {
+    local domain="$1" timeout="${2:-10}" dir="$GB_VAR/origin-probes" token body
+    [[ -z "$GB_PREFIX" ]] || return 0
+    gb_have curl || return 1
+    gb_ensure_dir "$dir" 0755 || return 1
+    token="getbible-probe-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+    printf '%s\n' "$token" > "$dir/$token" || return 1
+    chmod 0644 "$dir/$token" || { rm -f -- "$dir/$token"; return 1; }
+    body="$(curl --silent --max-time "$timeout" --header 'Cache-Control: no-cache' \
+        "https://$domain/.well-known/getbible-origin/$token" 2>/dev/null || true)"
+    rm -f -- "$dir/$token"
+    [[ "$body" == "$token" ]]
+}
+
 # Confirm the public route reaches this server despite resolver caches or
 # incorrect DNS records. The existing ACME directory supplies a fresh
 # random marker; no API requests, tokens or runtime work are involved.
 golive_public_probe() {
     local domain="$1" timeout="$2" deadline="$3" code remaining
-    certs_http_probe "$domain" "$timeout" || return 1
+    if nginx_external_tls; then
+        golive_origin_identity_probe "$domain" "$timeout" || return 1
+    else
+        certs_http_probe "$domain" "$timeout" || return 1
+    fi
     remaining=$((deadline - SECONDS))
     (( remaining > 0 )) || return 1
     (( timeout <= remaining )) || timeout="$remaining"
@@ -398,7 +451,7 @@ golive_wait_public() {
 # before go-live (through the placeholder certificate) and after. Prints a
 # report and returns 1 when something that must work does not.
 golive_verify() {
-    local domain="$1" scope="${2:-all}" failed=0 source unit socket label code path insecure=false
+    local domain="$1" scope="${2:-all}" failed=0 source unit socket label code path insecure=false probe_label="HTTPS probe"
     local -a paths=(/ /healthz)
     ep_load "$domain"
     endpoint_source_type "$EP_TYPE"
@@ -439,6 +492,9 @@ golive_verify() {
     fi
     source="$(certs_source "$domain")"
     case "$source" in
+        external)
+            golive_row "Certificate" info "external reverse proxy; checked through public HTTPS when live"
+            probe_label="HTTP origin probe" ;;
         letsencrypt) golive_row "Certificate" ok "$(certs_status_line "$domain")" ;;
         placeholder)
             if ep_is_live "$domain"; then
@@ -452,7 +508,7 @@ golive_verify() {
     if [[ "$source" == none ]]; then
         golive_row "HTTPS probe" skip "no certificate"
     elif [[ -n "$GB_PREFIX" || "$NG_AVAILABLE" != true ]] || ! gb_have curl; then
-        golive_row "HTTPS probe" skip "nginx is not running here"
+        golive_row "$probe_label" skip "nginx is not running here"
     elif grep -q '^[[:space:]]*ssl_verify_client on;' "$(nginx_site_file "$domain")" 2>/dev/null; then
         golive_row "HTTPS probe" skip "origin pulls require Cloudflare's client certificate"
     else

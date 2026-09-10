@@ -10,6 +10,9 @@
 set -uo pipefail
 
 CONF="${GB_TELEGRAM_CONF:-/etc/getbible/telegram.conf}"
+if [[ "$CONF" == /etc/getbible/telegram.conf && -f /run/getbible/telegram.conf ]]; then
+    CONF=/run/getbible/telegram.conf
+fi
 LEVEL="${1:-info}"
 TITLE="${2:-getBible}"
 BODY="${3:-}"

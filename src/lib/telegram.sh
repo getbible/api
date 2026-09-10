@@ -17,14 +17,20 @@ tg_notify() {
 }
 
 tg_configure() {
-    local enabled token chat
+    local enabled token chat key
+    for key in TELEGRAM_ENABLED TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID; do
+        if declare -F gb_environment_managed >/dev/null && gb_environment_managed "$GB_TELEGRAM_CONF" "$key"; then
+            ui_msg "Telegram" "$key is controlled by GETBIBLE_$key. Change the deployment environment and recreate the container."
+            return 1
+        fi
+    done
     enabled="$(cfg_get "$GB_TELEGRAM_CONF" TELEGRAM_ENABLED false)"
     if ui_yesno "Telegram" "Enable Telegram notifications for every endpoint on this server?" "$([[ "$enabled" == true ]] && echo yes || echo no)"; then
         token="$(ui_password "Telegram" "Bot token (leave empty to keep the stored one)")" || return 1
-        [[ -n "$token" ]] && cfg_set "$GB_TELEGRAM_CONF" TELEGRAM_BOT_TOKEN "$token"
         chat="$(ui_input "Telegram" "Chat id" "$(cfg_get "$GB_TELEGRAM_CONF" TELEGRAM_CHAT_ID)")" || return 1
-        cfg_set "$GB_TELEGRAM_CONF" TELEGRAM_CHAT_ID "$chat"
-        cfg_set "$GB_TELEGRAM_CONF" TELEGRAM_ENABLED true
+        [[ -z "$token" ]] || cfg_set "$GB_TELEGRAM_CONF" TELEGRAM_BOT_TOKEN "$token" || return 1
+        cfg_set "$GB_TELEGRAM_CONF" TELEGRAM_CHAT_ID "$chat" || return 1
+        cfg_set "$GB_TELEGRAM_CONF" TELEGRAM_ENABLED true || return 1
         tg_install_helper
         tg_notify ok "Telegram connected" "Notifications are enabled on $(hostname -f 2>/dev/null || hostname)."
         ui_msg "Telegram" "Telegram notifications are enabled. A test message was sent."

@@ -1,7 +1,45 @@
 # Security model
 
-Every path, parameter, header and body is untrusted. nginx is the only
-process that faces the network; everything behind it is isolated.
+Every request path, parameter, header and body is untrusted. nginx is the
+application's network-facing process; its runtime services use Unix sockets.
+Native managed TLS terminates there. The Docker external-TLS profile places
+Cloudflare and OPNsense HAProxy in front of nginx.
+
+## Container and proxy boundaries
+
+Docker mode retains systemd and the existing per-service users, restricted
+write paths and service hardening. The root management process needs authority
+to create users and units. Running systemd's nested mount namespaces also
+requires the explicitly documented system-container permissions in
+[DOCKER.md](DOCKER.md); this is a trusted system image, not an unprivileged
+single-process container. Do not mount the Docker socket or host account files
+inside it. The container uses its own cgroup namespace, not writable access to
+the host's complete cgroup hierarchy.
+
+Persistent accounts are restored from recorded numeric UIDs/GIDs and group
+membership before mounted services start. Account collisions stop restoration
+for correction rather than changing corpus ownership. Configuration, SSH keys,
+token stores and backups under the host data parent retain their restricted
+permissions. Give host access to that parent only to authorized operators.
+
+HAProxy preserves the requested hostname and bearer authorization. It accepts
+Cloudflare client identity only from verified Cloudflare peers, then replaces
+forwarding headers with normalized values. nginx trusts only the specified
+HAProxy source addresses and creates the runtime token-ID header itself.
+The raw bearer secret never reaches the application or request logs. See
+[OPNSENSE_HAPROXY.md](OPNSENSE_HAPROXY.md) for exact responsibilities and tests.
+
+External TLS does not request local certificates. Cloudflare Full (strict)
+validates HAProxy's domain certificate; optional Authenticated Origin Pulls
+verification belongs on HAProxy. Restrict the plaintext origin port to the
+intended LAN proxy/operator paths. Public open/metered edge caching is
+deliberate; authorization-bearing requests bypass the edge cache, and
+token-only data bypasses shared caches at both layers.
+
+The GHCR pull credential belongs on the Docker host. It is separate from
+Cloudflare credentials and each endpoint's SSH deploy key, and is not needed
+inside the container. Native manager Git keys retain their existing purpose;
+the image's manager code is updated by replacing the image.
 
 ## Static domains
 
@@ -67,14 +105,14 @@ process that faces the network; everything behind it is isolated.
   or a failed purge aborts the protected transition.
 - nginx is only ever reloaded after `nginx -t`; every replaced file is
   backed up first; hand edits are detected and never silently overwritten.
-- Certificates come from certbot, validated over HTTP-01 in webroot mode or
+- In managed TLS mode, certificates come from certbot, validated over HTTP-01 in webroot mode or
   over DNS-01 through the Cloudflare token; renewal is certbot's own timer
   with a reload hook; the rendered vhosts are never edited by certbot. For
   DNS-01 the token is handed to certbot in a root-only ini file (0600)
   generated from `cloudflare.conf`.
 - A staged domain never requests a certificate or changes DNS on its own
   (an operator may issue its certificate explicitly); it serves a
-  self-signed placeholder certificate (root-only key under
+  self-signed placeholder certificate in managed TLS mode (root-only key under
   `/etc/getbible/placeholder-certs`) so its vhost can be verified before the
   switch, and the placeholder is deleted when the domain goes live or is
   removed. Go-live obtains the certificate first and leaves the domain

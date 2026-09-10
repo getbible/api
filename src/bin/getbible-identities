@@ -1,0 +1,191 @@
+#!/usr/bin/env python3
+"""Record and restore managed numeric identities without rewriting mounted data."""
+from __future__ import annotations
+
+import argparse
+import fcntl
+import grp
+import json
+import os
+from pathlib import Path
+import pwd
+import re
+import subprocess
+import sys
+import tempfile
+from datetime import datetime, timezone
+
+
+class IdentityError(ValueError):
+    pass
+
+
+def validate(state):
+    if not isinstance(state, dict) or state.get("version") != 1:
+        raise IdentityError("Unsupported identity registry version")
+    names = re.compile(r"[a-z_][a-z0-9_-]{0,63}\$?\Z")
+    for collection, number in (("groups", "gid"), ("users", "uid")):
+        values = state.get(collection)
+        if not isinstance(values, dict):
+            raise IdentityError(f"Missing {collection} registry")
+        seen = set()
+        for name, item in values.items():
+            if not names.fullmatch(name) or not isinstance(item, dict):
+                raise IdentityError(f"Invalid {collection} identity {name!r}")
+            value = item.get(number)
+            if type(value) is not int or not 0 < value < 2**32 - 1 or value in seen:
+                raise IdentityError(f"Invalid or duplicate {number}: {name}")
+            seen.add(value)
+    for name, item in state["users"].items():
+        if item.get("group") not in state["groups"]:
+            raise IdentityError(f"Missing primary group: {name}")
+        extra = item.get("supplementary_groups")
+        if not isinstance(extra, list) or any(g not in state["groups"] for g in extra):
+            raise IdentityError(f"Invalid supplementary groups: {name}")
+        for field in ("home", "shell"):
+            value = item.get(field)
+            if not isinstance(value, str) or not value.startswith("/") or any(c in value for c in "\n\r\0:"):
+                raise IdentityError(f"Invalid {field}: {name}")
+    return state
+
+
+def load(path):
+    if not path.exists():
+        return {"version": 1, "groups": {}, "users": {}}
+    return validate(json.loads(path.read_text()))
+
+
+def save(path, state):
+    validate(state)
+    fd, temporary = tempfile.mkstemp(prefix=".identities-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            json.dump(state, handle, sort_keys=True, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def record_group(state, name):
+    current = grp.getgrnam(name)
+    value = {"gid": current.gr_gid}
+    if name in state["groups"] and state["groups"][name] != value:
+        raise IdentityError(f"Group {name} no longer has recorded GID {state['groups'][name]['gid']}")
+    state["groups"][name] = value
+
+
+def record_user(state, name):
+    current = pwd.getpwnam(name)
+    primary = grp.getgrgid(current.pw_gid).gr_name
+    extra = sorted(g.gr_name for g in grp.getgrall() if name in g.gr_mem and g.gr_name != primary)
+    for group in [primary, *extra]:
+        record_group(state, group)
+    value = {"uid": current.pw_uid, "group": primary, "home": current.pw_dir,
+             "shell": current.pw_shell, "supplementary_groups": extra}
+    if name in state["users"] and state["users"][name]["uid"] != current.pw_uid:
+        raise IdentityError(f"User {name} no longer has recorded UID {state['users'][name]['uid']}")
+    state["users"][name] = value
+
+
+def restore_plan(state):
+    """Check every collision before issuing any account-changing command."""
+    validate(state)
+    groups_by_name = {g.gr_name: g for g in grp.getgrall()}
+    groups_by_id = {g.gr_gid: g for g in groups_by_name.values()}
+    users_by_name = {u.pw_name: u for u in pwd.getpwall()}
+    users_by_id = {u.pw_uid: u for u in users_by_name.values()}
+    commands = []
+    for name, item in sorted(state["groups"].items()):
+        gid = item["gid"]
+        if name in groups_by_name:
+            if groups_by_name[name].gr_gid != gid:
+                raise IdentityError(f"GID conflict for {name}: recorded {gid}, image uses {groups_by_name[name].gr_gid}")
+        elif gid in groups_by_id:
+            raise IdentityError(f"GID {gid} needed by {name} is occupied by {groups_by_id[gid].gr_name}")
+        else:
+            commands.append(["groupadd", "--system", "--gid", str(gid), name])
+    for name, item in sorted(state["users"].items()):
+        uid = item["uid"]
+        gid = state["groups"][item["group"]]["gid"]
+        if name in users_by_name:
+            current = users_by_name[name]
+            if (current.pw_uid, current.pw_gid, current.pw_dir, current.pw_shell) != (uid, gid, item["home"], item["shell"]):
+                raise IdentityError(f"Account conflict for {name}: recorded UID/GID {uid}/{gid}; restore the matching image or resolve the account explicitly")
+        elif uid in users_by_id:
+            raise IdentityError(f"UID {uid} needed by {name} is occupied by {users_by_id[uid].pw_name}")
+        else:
+            commands.append(["useradd", "--system", "--uid", str(uid), "--gid", str(gid),
+                             "--home-dir", item["home"], "--no-create-home", "--shell", item["shell"], name])
+        if item["supplementary_groups"]:
+            commands.append(["usermod", "--append", "--groups", ",".join(item["supplementary_groups"]), name])
+    return commands
+
+
+def append_log(path, message):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(fd, "a") as handle:
+        handle.write(f"{datetime.now(timezone.utc).isoformat()} {message}\n")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--registry", type=Path, default=Path("/var/lib/getbible/identities.json"))
+    parser.add_argument("--log", type=Path, default=Path("/var/lib/getbible/identities.log"))
+    sub = parser.add_subparsers(dest="action", required=True)
+    record = sub.add_parser("record")
+    record.add_argument("--user", action="append", default=[])
+    record.add_argument("--group", action="append", default=[])
+    forget = sub.add_parser("forget-user")
+    forget.add_argument("name")
+    sub.add_parser("restore")
+    sub.add_parser("show")
+    args = parser.parse_args()
+    if os.geteuid() != 0 and args.action != "show":
+        parser.error("Identity changes require root")
+    if args.action == "show":
+        print(json.dumps(load(args.registry), indent=2, sort_keys=True))
+        return
+    args.registry.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(args.registry) + ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        state = load(args.registry)
+        if args.action == "restore":
+            commands = restore_plan(state)
+            for command in commands:
+                subprocess.run(command, check=True)
+                append_log(args.log, "restored: " + " ".join(command))
+            append_log(args.log, f"restore complete: {len(state['users'])} users, {len(state['groups'])} groups")
+        elif args.action == "record":
+            for name in args.group:
+                record_group(state, name)
+            for name in args.user:
+                record_user(state, name)
+            save(args.registry, state)
+            for name in args.group:
+                append_log(args.log, f"record group {name}: GID {state['groups'][name]['gid']}")
+            for name in args.user:
+                value = state["users"][name]
+                append_log(args.log, f"record user {name}: UID {value['uid']}, primary {value['group']}, supplementary {','.join(value['supplementary_groups']) or '-'}")
+        elif args.action == "forget-user":
+            state["users"].pop(args.name, None)
+            save(args.registry, state)
+            append_log(args.log, f"removed user record {args.name}; group IDs remain reserved")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (ValueError, OSError, KeyError, subprocess.CalledProcessError) as error:
+        print(f"Identity restoration: {error}", file=sys.stderr)
+        sys.exit(1)

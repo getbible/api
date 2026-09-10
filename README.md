@@ -2,7 +2,7 @@
 
 One script that deploys and maintains every public getBible API domain on a
 server, securely and at high volume. A **domain** is a host name with one
-vhost and one certificate; its **endpoints** are its version folders
+vhost and TLS at its selected terminator; its **endpoints** are its version folders
 (`/v2/`, `/v3/`), or the domain root itself when it has none.
 
 - **Static domains**: each endpoint a tree of JSON, checksum and text files
@@ -34,13 +34,42 @@ vhost and one certificate; its **endpoints** are its version folders
   notifications for every change, Cloudflare integration, manager updates
   from the menu or one command, application updates and generation rollback.
 - **Staged deployments**: a domain can be installed and verified on a
-  server its DNS does not point to yet, with a placeholder certificate and
+  server its DNS does not point to yet, with a placeholder certificate in
+  managed TLS mode or the HTTP origin in external TLS mode, and
   no automatic public change; **Go live** later takes it over one domain at
   a time (certificate, Cloudflare DNS, HTTPS). **Stage again** suspends
   automatic public DNS changes while keeping the deployment available.
-  Certificates come from Let's Encrypt over
+  In native managed TLS, certificates come from Let's Encrypt over
   HTTP-01 or, with the stored Cloudflare token, DNS-01 before any DNS
-  change. New domains can be checked before public launch.
+  change. With external TLS, HAProxy owns certificate issuance and renewal.
+  New domains can be checked before public launch.
+
+## Choose native or Docker deployment
+
+The Docker deployment pulls the private prebuilt image from GitHub Container
+Registry. It runs systemd, nginx, static synchronization, query/search and the
+existing management menu in one container. Multiple domains share one HTTP
+port behind OPNsense HAProxy and Cloudflare; HAProxy owns external TLS. The
+host needs only [compose.yaml](compose.yaml) and the settings described in
+[Docker deployment](docs/DOCKER.md), not a repository clone or local build.
+
+After registry authentication and configuration:
+
+```sh
+docker compose pull
+docker compose up -d
+docker compose exec --user root getbible getbible
+```
+
+`getbible` is a real executable command linked to the same manager. Add its
+existing arguments to run any action directly, for example
+`docker compose exec --user root getbible getbible list`. Persistent data lives
+under one host directory with recorded service-account identities. Native
+deployment remains available with the workflow below. The reasons for both
+paths and the public-cache policy are recorded in
+[Deployment decisions](docs/DEPLOYMENT_DECISIONS.md).
+
+## Native deployment
 
 Install as root over SSH with a read-only deploy key for **this manager
 repository**, so that key serves every later manager update. Static endpoints
@@ -97,6 +126,9 @@ Documentation:
 
 | Document | Contents |
 | --- | --- |
+| [docs/DOCKER.md](docs/DOCKER.md) | private prebuilt image, Compose, configuration, commands, persistence and recovery |
+| [docs/OPNSENSE_HAPROXY.md](docs/OPNSENSE_HAPROXY.md) | external TLS, multiple domains on one port, headers, JSON errors and acceptance |
+| [docs/DEPLOYMENT_DECISIONS.md](docs/DEPLOYMENT_DECISIONS.md) | objectives, constraints and reasons for deployment and caching behavior |
 | [docs/INSTALL.md](docs/INSTALL.md) | first setup, where things live |
 | [docs/NEW_SERVER.md](docs/NEW_SERVER.md) | fresh server setup: endpoint keys, staged domains, go-live and maintenance |
 | [docs/STATIC_ENDPOINTS.md](docs/STATIC_ENDPOINTS.md) | static domains: endpoints, synchronisation, serving |

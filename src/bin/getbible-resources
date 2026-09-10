@@ -1,0 +1,339 @@
+#!/usr/bin/env python3
+"""Plan memory across local runtimes; never load or scan the Bible corpus.
+
+Cache settings are entry counts, not measured byte budgets. The cgroup and
+systemd ceilings enforce memory; this planner conservatively chooses worker,
+concurrency and public librarian cache settings inside those ceilings.
+"""
+from __future__ import annotations
+
+import argparse
+from decimal import Decimal
+import json
+import math
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import time
+
+MIB = 1024 ** 2
+MINIMUM = {"query": 192 * MIB, "search": 512 * MIB}
+WEIGHT = {"query": 1, "search": 4}
+
+
+def memory_bytes(value: str) -> int:
+    match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([kmgt]?)(?:i?b)?\s*", value.lower())
+    if not match:
+        raise ValueError(f"Invalid memory size {value!r}; use bytes or K/M/G/T, for example 4G.")
+    amount = int(Decimal(match[1]) * (1024 ** ("kmgt".index(match[2]) + 1) if match[2] else 1))
+    if amount <= 0:
+        raise ValueError("Memory budget must be greater than zero.")
+    return amount
+
+
+def config(path: Path) -> dict[str, str]:
+    if not path.is_file():
+        return {}
+    return dict(line.split("=", 1) for line in path.read_text().splitlines()
+                if re.match(r"^[A-Z][A-Z0-9_]*=", line))
+
+
+def cgroup_limits(proc: Path, override: Path | None = None) -> dict:
+    """Read this process's cgroup and every ancestor visible in its namespace.
+
+    Mount roots can differ from membership paths (a subtree mount); never
+    substitute host MemTotal for the container's actual memory.max.
+    """
+    result = {"memory": None, "memory_path": None,
+              "cpus": float(len(os.sched_getaffinity(0))) if hasattr(os, "sched_getaffinity") else float(os.cpu_count() or 1)}
+    membership = proc / "self/cgroup"
+    if not membership.is_file():
+        return result
+    member = next((line[3:] for line in membership.read_text().splitlines() if line.startswith("0::")), None)
+    if member is None:
+        return result
+    mounts = []
+    mountinfo = proc / "self/mountinfo"
+    if mountinfo.is_file():
+        for line in mountinfo.read_text().splitlines():
+            before, sep, after = line.partition(" - ")
+            if not sep or after.split()[0] != "cgroup2":
+                continue
+            fields = before.split()
+            unescape = lambda text: re.sub(r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), text)
+            root, target = Path(unescape(fields[3])), Path(unescape(fields[4]))
+            if Path(member).is_relative_to(root):
+                mounts.append((root, target))
+    if not mounts:
+        if override is None:
+            return result
+        mounts = [(Path("/"), override)]
+    root, target = max(mounts, key=lambda item: len(item[0].parts))
+    if override is not None:
+        target = override
+    current = target / Path(member).relative_to(root)
+    if not current.is_dir():
+        return result
+    while True:
+        maximum = current / "memory.max"
+        if maximum.is_file():
+            raw = maximum.read_text().strip()
+            if raw != "max":
+                value = int(raw)
+                if result["memory"] is None or value < result["memory"]:
+                    result.update(memory=value, memory_path=str(maximum))
+        cpu = current / "cpu.max"
+        if cpu.is_file():
+            quota, period = cpu.read_text().split()
+            if quota != "max":
+                result["cpus"] = min(result["cpus"], int(quota) / int(period))
+        if current == target:
+            break
+        current = current.parent
+    return result
+
+
+def inventory(registry: Path, runtime: Path) -> list[dict]:
+    entries = []
+    for domain_file in sorted(registry.glob("*/endpoint.conf")):
+        domain = config(domain_file)
+        if domain.get("TYPE") != "runtime" or domain.get("ENABLED", "true") != "true":
+            continue
+        kind = domain.get("KIND", "")
+        if kind not in MINIMUM:
+            raise ValueError(f"No memory sizing policy is declared for runtime kind {kind!r}.")
+        for version_file in sorted((domain_file.parent / "versions").glob("*.conf")):
+            version = config(version_file)
+            if version.get("ENABLED", "true") != "true":
+                continue
+            label = version_file.stem
+            entries.append({"domain": domain_file.parent.name, "label": label, "kind": kind,
+                            "config": version, "root": str(runtime / kind / label)})
+    return entries
+
+
+def allocated(entries: list[dict], extra: int) -> tuple[list[int], int]:
+    sizes = [MINIMUM[item["kind"]] + extra * WEIGHT[item["kind"]] for item in entries]
+    domains: dict[str, int] = {}
+    for item, size in zip(entries, sizes):
+        domains[item["domain"]] = domains.get(item["domain"], 0) + size
+    return sizes, max(domains.values(), default=0)
+
+
+def selected_ceiling(item: dict) -> int:
+    limits = Path(item["root"]) / "active/limits.conf"
+    if not limits.is_file():
+        return 0
+    raw = next((line.split("=", 1)[1] for line in limits.read_text().splitlines()
+                if line.startswith("MemoryMax=")), "")
+    return memory_bytes(raw) if raw and raw != "infinity" else 0
+
+
+def domain_changes(result: dict, decreases_only: bool = False, exclude: str = "") -> list[str]:
+    """Apply decreases first so adding endpoints cannot strand update capacity."""
+    domains: dict[str, list[int]] = {}
+    for item in result["endpoints"]:
+        totals = domains.setdefault(item["domain"], [0, 0])
+        totals[0] += item["selected_memory_max_bytes"]
+        totals[1] += item["settings"]["MEMORY_MAX"]
+    changed = [(domain, old - new) for domain, (old, new) in domains.items()
+               if domain != exclude and old and (old > new if decreases_only else old != new)]
+    return [domain for domain, _ in sorted(changed, key=lambda item: (-item[1], item[0]))]
+
+
+def endpoint_settings(item: dict, size: int, cpus: float) -> dict:
+    kind, saved = item["kind"], item["config"]
+    requested_workers = int(saved.get("WORKERS") or (4 if kind == "query" else 2))
+    requested_threads = int(saved.get("THREADS") or 4)
+    if not 1 <= requested_workers <= 64 or not 1 <= requested_threads <= 64:
+        raise ValueError(f"Invalid worker/thread configuration for {item['domain']} {item['label']}.")
+    per_worker_floor = (128 if kind == "query" else 512) * MIB
+    workers = max(1, min(requested_workers, math.ceil(cpus), size // per_worker_floor))
+    per_worker = size // workers
+    threads = max(1, min(requested_threads, 4, per_worker // ((32 if kind == "query" else 256) * MIB)))
+    # Never use zero: the dependency may interpret it as an unlimited cache.
+    corpus = max(1, min(4, (per_worker - 256 * MIB) // (128 * MIB)))
+    warm = list(dict.fromkeys(code.strip() for code in saved.get("WARM_TRANSLATIONS", "").split(",") if code.strip()))
+    effective_warm = warm[:corpus] if kind == "search" else warm
+    return {
+        "WORKERS": workers, "THREADS": threads,
+        "MEMORY_HIGH": size * 85 // 100, "MEMORY_MAX": size,
+        "WARM_TRANSLATIONS": ",".join(effective_warm),
+        "SEARCH_MAX_CONCURRENT": threads,
+        "EXPENSIVE_CONCURRENT": max(1, threads // 2),
+        "TRANSLATION_CACHE_LIMIT": corpus, "SEARCH_CORPUS_LIMIT": corpus,
+        "REFERENCE_CACHE_LIMIT": max(256, min(5000, per_worker // (64 * 1024))),
+        "CHAPTER_CACHE_LIMIT": max(32, min(2048, per_worker // (512 * 1024))),
+    }
+
+
+def running_memory(entries: list[dict], ctl: str, offline: bool) -> tuple[int, list[dict]]:
+    if offline:
+        return 0, []
+    candidates = {}
+    for item in entries:
+        for path in Path(item["root"]).glob("deployments/*/limits.conf"):
+            unit = f"getbible-{item['kind']}-{item['label']}-{path.parent.name}.service"
+            candidates[unit] = path
+    if not candidates:
+        return 0, []
+    # A single systemd query includes active, retiring and interrupted candidates.
+    # Active symlinks alone would miss still-serving workers during nginx drain.
+    run = subprocess.run([ctl, "show", "--property=Id,ActiveState,MemoryMax", *sorted(candidates)],
+                         capture_output=True, text=True, timeout=20, check=False)
+    if run.returncode:
+        raise ValueError("Cannot inspect running runtime memory ceilings; ensure systemd is running before applying resources.")
+    live = []
+    for block in run.stdout.strip().split("\n\n"):
+        props = dict(line.split("=", 1) for line in block.splitlines() if "=" in line)
+        if props.get("ActiveState") not in {"active", "activating", "reloading", "deactivating"}:
+            continue
+        maximum = props.get("MemoryMax", "infinity")
+        if not maximum.isdigit() or int(maximum) >= 2 ** 63:
+            raise ValueError(f"Running runtime {props.get('Id', '?')} has no finite memory ceiling; apply its limits before budgeting more services.")
+        live.append({"unit": props.get("Id", "?"), "memory_max": int(maximum)})
+    return sum(item["memory_max"] for item in live), live
+
+
+def wait_drain(args) -> None:
+    """Wait for the existing retirement mechanism; never kill live generations."""
+    if args.offline:
+        return
+    entries = [item for item in inventory(Path(args.registry), Path(args.runtime_root))
+               if item["domain"] == args.wait_drain]
+    selected = set()
+    for item in entries:
+        active = Path(item["root"]) / "active"
+        if active.is_dir():
+            selected.add(f"getbible-{item['kind']}-{item['label']}-{active.resolve().name}.service")
+    deadline = time.monotonic() + args.drain_timeout
+    while True:
+        _, live = running_memory(entries, args.systemctl, False)
+        pending = [item["unit"] for item in live if item["unit"] not in selected]
+        if not pending:
+            return
+        if time.monotonic() >= deadline:
+            raise ValueError("Previous runtime generations are still draining; they were kept serving. "
+                             "Retry resource application when requests finish: " + ", ".join(pending))
+        time.sleep(min(2, max(0, deadline - time.monotonic())))
+
+
+def plan(args) -> dict:
+    enabled = args.mode == "docker" or args.budget not in {"", "auto", "off"}
+    if args.mode == "docker" and args.budget == "off":
+        raise ValueError("Docker resource adaptation cannot be disabled; configure a finite Compose memory limit.")
+    if not enabled:
+        return {"enabled": False, "source": "native manifest and endpoint settings", "endpoints": []}
+    limits = cgroup_limits(Path(args.proc_root), Path(args.cgroup_root) if args.cgroup_root else None)
+    cap = limits["memory"]
+    if args.mode == "docker" and cap is None:
+        raise ValueError("Docker requires a finite cgroup v2 memory.max; set the Compose memory limit before starting getBible.")
+    requested = None if args.budget in {"", "auto"} else memory_bytes(args.budget)
+    budget = min(value for value in (cap, requested) if value is not None)
+    source = "cgroup" if requested is None else "configured budget"
+    if requested is not None and cap is not None and cap < requested:
+        source = "cgroup (lower than configured budget)"
+    reserve = max(256 * MIB, budget // 4)
+    available = budget - reserve
+    entries = inventory(Path(args.registry), Path(args.runtime_root))
+    sizes, overlap = allocated(entries, 0)
+    required = sum(sizes) + overlap
+    if available < required:
+        raise ValueError(f"Memory budget {budget // MIB} MiB cannot fit the configured endpoints: "
+                         f"need {required // MIB} MiB for minimum runtime ceilings and update overlap, "
+                         f"plus {reserve // MIB} MiB infrastructure reserve. Existing services were not changed.")
+    low, high = 0, max(0, available // MIB)
+    while low < high:
+        mid = (low + high + 1) // 2
+        trial, extra_overlap = allocated(entries, mid * MIB)
+        if sum(trial) + extra_overlap <= available:
+            low = mid
+        else:
+            high = mid - 1
+    sizes, overlap = allocated(entries, low * MIB)
+    effective = []
+    for item, size in zip(entries, sizes):
+        effective.append({"domain": item["domain"], "label": item["label"], "kind": item["kind"],
+                          "requested_warm": item["config"].get("WARM_TRANSLATIONS", ""),
+                          "selected_memory_max_bytes": selected_ceiling(item),
+                          "settings": endpoint_settings(item, size, limits["cpus"])})
+    running, live = running_memory(entries, args.systemctl, args.offline) if args.candidate_domain else (None, [])
+    candidate = sum(item["settings"]["MEMORY_MAX"] for item in effective if item["domain"] == args.candidate_domain)
+    if running is not None and running + candidate > available:
+        raise ValueError(f"Candidate admission needs {(running + candidate) // MIB} MiB but only {available // MIB} MiB "
+                         "is available after infrastructure reserve. A previous generation may still be draining, "
+                         "or the memory cap was reduced. Existing services were not changed; retry after drain "
+                         "or restore the previous memory budget.")
+    return {"enabled": True, "source": source, "budget_bytes": budget,
+            "configured_budget": args.budget, "cgroup_limit_bytes": cap,
+            "cgroup_limit_path": limits["memory_path"], "cpu_capacity": limits["cpus"],
+            "infrastructure_reserve_bytes": reserve, "steady_runtime_bytes": sum(sizes),
+            "candidate_reserve_bytes": overlap, "running_bytes": running, "running_generations": live,
+            "note": "Cache capacities are entry counts, not byte guarantees. Warm-set truncation does not disable translations. Minimum sizes are sizing floors; runtime readiness still decides whether a workload fits.",
+            "endpoints": effective}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mode", choices=("native", "docker"), default="native")
+    parser.add_argument("--budget", default="auto")
+    parser.add_argument("--registry", default="/etc/getbible/endpoints")
+    parser.add_argument("--runtime-root", default="/opt/getbible")
+    parser.add_argument("--proc-root", default="/proc")
+    parser.add_argument("--cgroup-root")
+    parser.add_argument("--systemctl", default="systemctl")
+    parser.add_argument("--offline", action="store_true", help="Bootstrap before systemd starts; no running generations exist.")
+    parser.add_argument("--candidate-domain")
+    parser.add_argument("--exclude-domain", default="")
+    parser.add_argument("--wait-drain", metavar="DOMAIN")
+    parser.add_argument("--drain-timeout", type=int, default=60)
+    parser.add_argument("--select", nargs=2, metavar=("DOMAIN", "ENDPOINT"))
+    parser.add_argument("--format", choices=("json", "text", "env", "domains", "reductions", "changes"), default="text")
+    args = parser.parse_args()
+    try:
+        if args.wait_drain:
+            wait_drain(args)
+            return 0
+        result = plan(args)
+        if args.format == "json":
+            print(json.dumps(result, indent=2))
+        elif args.format == "domains":
+            first = domain_changes(result, decreases_only=True)
+            rest = [item["domain"] for item in result["endpoints"] if item["domain"] not in first]
+            print("\n".join(dict.fromkeys(first + rest)))
+        elif args.format in {"reductions", "changes"}:
+            print("\n".join(domain_changes(result, args.format == "reductions", args.exclude_domain)))
+        elif args.format == "env":
+            if not args.select:
+                raise ValueError("--format env requires --select DOMAIN ENDPOINT")
+            print(f"RES_ENABLED={'true' if result['enabled'] else 'false'}")
+            if result["enabled"]:
+                item = next((item for item in result["endpoints"] if [item["domain"], item["label"]] == args.select), None)
+                if item is None:
+                    raise ValueError("The selected runtime endpoint is not enabled in the registry.")
+                for key, value in item["settings"].items():
+                    print(f"RES_{key}={value}")
+        else:
+            print(f"Resource allocation: {result['source']}")
+            if result["enabled"]:
+                print(f"Total budget: {result['budget_bytes'] // MIB} MiB; infrastructure reserve: "
+                      f"{result['infrastructure_reserve_bytes'] // MIB} MiB; runtime ceilings: "
+                      f"{result['steady_runtime_bytes'] // MIB} MiB; update overlap: {result['candidate_reserve_bytes'] // MIB} MiB")
+                print(f"CPU capacity: {result['cpu_capacity']:g}; cgroup cap: {result['cgroup_limit_path'] or 'none'}")
+                for item in result["endpoints"]:
+                    settings = item["settings"]
+                    print(f"  {item['domain']} {item['label']} ({item['kind']}): "
+                          f"{settings['MEMORY_MAX'] // MIB} MiB, {settings['WORKERS']} workers x "
+                          f"{settings['THREADS']} threads; warm: {settings['WARM_TRANSLATIONS'] or '-'}")
+                print(result["note"])
+                print("These are calculated targets. Existing generations change on apply or container recreation.")
+        return 0
+    except (ValueError, OSError, subprocess.SubprocessError) as exc:
+        print(f"Resource configuration: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

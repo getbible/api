@@ -13,6 +13,8 @@
 
 [[ -n "${GB_TYPE_RUNTIME_LOADED:-}" ]] && return 0
 GB_TYPE_RUNTIME_LOADED=1
+# shellcheck source=../../lib/resources.sh
+source "$GB_LIB/resources.sh"
 
 # --- kinds and their implementations -----------------------------------------
 rt_manifest_files() { find "$GB_APPS" -mindepth 2 -maxdepth 2 -name manifest.conf | sort; }
@@ -212,6 +214,14 @@ rt_deployment_inputs() {
         for key in "${RT_VERSION_SETTINGS[@]}"; do
             printf '%s=%s\n' "$key" "$(ep_version_get "$domain" "$label" "$key")"
         done
+        # Resource decisions are generation inputs, not mutable environment
+        # underneath a serving process. A changed budget follows readiness,
+        # nginx reload and draining just like other runtime configuration.
+        for key in WORKERS THREADS MEMORY_HIGH MEMORY_MAX WARM_TRANSLATIONS SEARCH_MAX_CONCURRENT \
+                   EXPENSIVE_CONCURRENT TRANSLATION_CACHE_LIMIT SEARCH_CORPUS_LIMIT REFERENCE_CACHE_LIMIT CHAPTER_CACHE_LIMIT; do
+            local variable="RES_$key"
+            printf '%s=%s\n' "$variable" "${!variable}"
+        done
         sha256sum "$GB_TYPES/runtime/type.sh" "$GB_TYPES/runtime/templates/"*.tmpl "$GB_APPS/$RM_DIR/manifest.conf"
     } | sha256sum | cut -d' ' -f1
 }
@@ -232,6 +242,123 @@ rt_quote_env() {
     chmod 0600 "$target"
 }
 
+# Change only resource keys while no services are running during container
+# restoration. Keep comments, unrelated settings, ownership and file mode.
+rt_patch_resource_file() {
+    local file="$1" syntax="$2"
+    shift 2
+    "$GB_PYTHON" - "$file" "$syntax" "$@" <<'PY'
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+import tempfile
+
+path = Path(sys.argv[1])
+syntax = sys.argv[2]
+allowed = {"MemoryHigh", "MemoryMax"} if syntax == "limits" else {
+    "GETBIBLE_REFERENCE_CACHE_LIMIT", "GETBIBLE_CHAPTER_CACHE_LIMIT",
+    "GETBIBLE_TRANSLATION_CACHE_LIMIT", "GETBIBLE_SEARCH_CORPUS_LIMIT",
+    "SEARCH_MAX_CONCURRENT", "SEARCH_MAX_CONCURRENT_EXPENSIVE",
+}
+updates = {}
+for argument in sys.argv[3:]:
+    key, value = argument.split("=", 1)
+    if key not in allowed and not (syntax == "env" and re.fullmatch(r"[A-Z][A-Z0-9_]*_(WORKERS|THREADS|WARM_TRANSLATIONS)", key)):
+        raise SystemExit(f"Not a runtime resource setting: {key}")
+    if "\n" in value or "\r" in value:
+        raise SystemExit(f"Invalid runtime resource value: {key}")
+    rendered = '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"' if syntax == "env" else value
+    updates[key] = f"{key}={rendered}\n"
+original = path.read_text()
+pending = dict(updates)
+lines = []
+for line in original.splitlines(keepends=True):
+    key = line.split("=", 1)[0]
+    if key in updates:
+        lines.append(updates[key])
+        pending.pop(key, None)
+    else:
+        lines.append(line)
+if lines and not lines[-1].endswith("\n"):
+    lines[-1] += "\n"
+lines.extend(pending.values())
+result = "".join(lines)
+if result == original:
+    raise SystemExit(0)
+metadata = path.stat()
+fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+try:
+    with os.fdopen(fd, "w") as stream:
+        stream.write(result)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.chmod(temporary, stat.S_IMODE(metadata.st_mode))
+    if os.geteuid() == 0:
+        os.chown(temporary, metadata.st_uid, metadata.st_gid)
+    os.replace(temporary, path)
+finally:
+    if os.path.exists(temporary):
+        os.unlink(temporary)
+PY
+}
+
+# Reapply the container's current cap before PID 1 launches saved services.
+# This is deliberately not endpoint_apply: the old generation keeps its app,
+# interpreter, access policy, scripture path and other configuration. Only its
+# resource settings change while it is stopped; previous releases stay intact.
+rt_restore_resource_settings() {
+    local domain label active release manifest found key prefix unit limits
+    local -a environment=()
+    gb_is_docker && [[ "${GB_RESOURCES_BOOTSTRAP:-false}" == true ]] \
+        || { gb_warn "Runtime resource restoration is only available during container initialization."; return 1; }
+    resources_plan --format json > "$(gb_tmpdir)/resources-restore.json" || return 1
+    while IFS= read -r domain; do
+        [[ -n "$domain" ]] || continue
+        while IFS= read -r label; do
+            [[ -n "$label" && "$(ep_version_get "$domain" "$label" ENABLED true)" == true ]] || continue
+            active="$(rt_active_generation "$domain" "$label")"
+            [[ -n "$active" ]] || continue
+            [[ -f "$active/.release" && -f "$active/runtime.env" && -f "$active/limits.conf" ]] \
+                || { gb_warn "Active runtime generation is incomplete: $domain $label"; return 1; }
+            release="$(cat "$active/.release")"
+            [[ -x "$release/.venv/bin/python" ]] || { gb_warn "Active runtime release is unavailable: $release"; return 1; }
+            ep_load "$domain"
+            ep_version_load "$domain" "$label"
+            found=false
+            for manifest in "$release"/src/*/manifest.conf; do
+                [[ -f "$manifest" && "$(cfg_get "$manifest" KIND)" == "$EP_KIND" ]] || continue
+                for key in WORKERS THREADS MEMORY_HIGH MEMORY_MAX ENV_PREFIX; do
+                    printf -v "RM_$key" '%s' "$(cfg_get "$manifest" "$key")"
+                done
+                found=true
+                break
+            done
+            [[ "$found" == true ]] || { gb_warn "Saved runtime manifest is unavailable: $domain $label"; return 1; }
+            prefix="$RM_ENV_PREFIX"
+            [[ "$prefix" =~ ^[A-Z][A-Z0-9_]*$ ]] || { gb_warn "Invalid saved runtime environment prefix: $domain $label"; return 1; }
+            resources_context "$domain" "$label" || return 1
+            environment=("${prefix}_WORKERS=$RES_WORKERS" "${prefix}_THREADS=$RES_THREADS" "${prefix}_WARM_TRANSLATIONS=$RES_WARM_TRANSLATIONS"
+                "GETBIBLE_REFERENCE_CACHE_LIMIT=$RES_REFERENCE_CACHE_LIMIT" "GETBIBLE_CHAPTER_CACHE_LIMIT=$RES_CHAPTER_CACHE_LIMIT"
+                "GETBIBLE_TRANSLATION_CACHE_LIMIT=$RES_TRANSLATION_CACHE_LIMIT" "GETBIBLE_SEARCH_CORPUS_LIMIT=$RES_SEARCH_CORPUS_LIMIT")
+            if [[ "$EP_KIND" == search ]]; then
+                environment+=("SEARCH_MAX_CONCURRENT=$RES_SEARCH_MAX_CONCURRENT" "SEARCH_MAX_CONCURRENT_EXPENSIVE=$RES_EXPENSIVE_CONCURRENT")
+            fi
+            rt_patch_resource_file "$active/runtime.env" env "${environment[@]}" || return 1
+            # This human-readable copy is not the unit's EnvironmentFile.
+            gb_install_file "$active/runtime.env" "$(rt_env_file "$domain" "$label")" 0600 || return 1
+            rt_patch_resource_file "$active/limits.conf" limits "MemoryHigh=$RES_MEMORY_HIGH" "MemoryMax=$RES_MEMORY_MAX" || return 1
+            unit="$(rt_generation_unit "$domain" "$label" "$active")"
+            limits="$GB_SYSTEMD/$unit.service.d/10-limits.conf"
+            if [[ -f "$limits" ]]; then
+                rt_patch_resource_file "$limits" limits "MemoryHigh=$RES_MEMORY_HIGH" "MemoryMax=$RES_MEMORY_MAX" || return 1
+            fi
+            gb_log "Restored resource settings for $domain $label in its retained runtime generation."
+        done < <(ep_versions "$domain")
+    done < <(ep_list_by_type runtime)
+}
+
 # --- pipeline hooks ----------------------------------------------------------
 type_runtime_prepare() {
     local domain="$1" kind user label
@@ -239,6 +366,7 @@ type_runtime_prepare() {
     RT_DOMAIN="$domain"; RT_COMMITTED=false; RT_LABELS=()
     RT_NGINX_SNAPSHOT=""; RT_SWITCH_PREPARED=false; RT_ABORT_NGINX_SNAPSHOT=""
     RT_CANDIDATES=(); RT_OLD_GENERATIONS=(); RT_OLD_RELEASES=(); RT_OLD_UNITS=(); RT_OLD_SOCKETS=()
+    resources_preflight "$domain" || return 1
     ep_load "$domain"
     kind="$EP_KIND"
     rt_manifest_load "$kind"
@@ -279,6 +407,7 @@ rt_prepare_endpoint() {
     ep_version_load "$domain" "$label"
     rt_validate_settings "$domain" "$label" || return 1
     rt_manifest_load "$kind" "$(rt_app_version "$domain" "$label")"
+    resources_context "$domain" "$label" || return 1
     gb_ensure_dir "$(rt_cache_root "$domain" "$label")" 0750 "$user:$user" || return 1
     gb_ensure_dir "$(rt_cache_root "$domain" "$label")/releases" 0750 "$user:$user" || return 1
     gb_ensure_dir "$root" 0755 || return 1
@@ -362,15 +491,18 @@ rt_render_env() {
     release="$(cat "$generation/.release")" || return 1
     [[ "$EP_KIND" == query ]] && is_query=true
     [[ "$EP_KIND" == search ]] && is_search=true
-    threads="${EV_THREADS:-$RM_THREADS}"
-    expensive=$(( threads / 2 )); (( expensive < 1 )) && expensive=1
+    threads="$RES_THREADS"
+    expensive="$RES_EXPENSIVE_CONCURRENT"
     gb_render "$GB_TYPES/runtime/templates/env.tmpl" "$stage" \
         "KIND=$EP_KIND" "DOMAIN=$domain" "LABEL=$label" "REPOSITORY=$EV_REPOSITORY" "VERSION=$(rt_app_version "$domain" "$label")" \
         "CACHE_DIR=$(rt_cache_dir "$domain" "$label" "$release")" "CACHE_TTL_SECONDS=900" \
         "APP_LOG=$(rt_app_log "$domain" "$label")" "ENV_PREFIX=$RM_ENV_PREFIX" "ACCESS_MODE=$EP_ACCESS_MODE" \
         "DEFAULT_TRANSLATION=${EV_DEFAULT_TRANSLATION:-kjv}" "ALLOWED_TRANSLATIONS=$EV_ALLOWED_TRANSLATIONS" \
-        "CACHE_SECONDS=${EV_CACHE_TTL:-$RM_CACHE_SECONDS}" "WORKERS=${EV_WORKERS:-$RM_WORKERS}" \
-        "THREADS=$threads" "WARM_TRANSLATIONS=$EV_WARM_TRANSLATIONS" \
+        "CACHE_SECONDS=${EV_CACHE_TTL:-$RM_CACHE_SECONDS}" "WORKERS=$RES_WORKERS" \
+        "THREADS=$threads" "WARM_TRANSLATIONS=$RES_WARM_TRANSLATIONS" \
+        "SEARCH_MAX_CONCURRENT=$RES_SEARCH_MAX_CONCURRENT" "TRANSLATION_CACHE_LIMIT=$RES_TRANSLATION_CACHE_LIMIT" \
+        "SEARCH_CORPUS_LIMIT=$RES_SEARCH_CORPUS_LIMIT" "REFERENCE_CACHE_LIMIT=$RES_REFERENCE_CACHE_LIMIT" \
+        "CHAPTER_CACHE_LIMIT=$RES_CHAPTER_CACHE_LIMIT" \
         "SOCKET=$(rt_generation_socket "$domain" "$label" "$generation")" "IS_QUERY=$is_query" "IS_SEARCH=$is_search" \
         "DEFAULT_REFERENCE=${EV_DEFAULT_REFERENCE:-Mat7:7}" "EXPENSIVE_CONCURRENT=$expensive" "EXTRA_ENV=" || return 1
     rt_quote_env "$stage" "$generation/runtime.env"
@@ -381,7 +513,7 @@ rt_render_gunicorn() {
     [[ "$EP_KIND" == search ]] && timeout=30
     gb_render "$GB_TYPES/runtime/templates/gunicorn.conf.py.tmpl" "$generation/gunicorn.conf.py" \
         "KIND=$EP_KIND" "ENV_PREFIX=$RM_ENV_PREFIX" "SOCKET=$(rt_generation_socket "$domain" "$label" "$generation")" \
-        "WORKERS=${EV_WORKERS:-$RM_WORKERS}" "THREADS=${EV_THREADS:-$RM_THREADS}" \
+        "WORKERS=$RES_WORKERS" "THREADS=$RES_THREADS" \
         "WORKER_TIMEOUT=$timeout" "PACKAGE=$RM_PACKAGE" || return 1
     chmod 0644 "$generation/gunicorn.conf.py"
 }
@@ -400,7 +532,7 @@ rt_render_units() {
         "CHECK=$RM_CHECK" "WSGI=$RM_WSGI" "TIMEOUT_START=$RM_TIMEOUT_START" "TIMEOUT_STOP=$RM_TIMEOUT_STOP" \
         "CACHE_SUBDIR=$(rt_cache_subdir "$domain" "$label")" "LOGS_SUBDIR=getbible/$domain/app" || return 1
     gb_render "$GB_TYPES/runtime/templates/limits.conf.tmpl" "$generation/limits.conf" \
-        "KIND=$EP_KIND" "MEMORY_HIGH=$RM_MEMORY_HIGH" "MEMORY_MAX=$RM_MEMORY_MAX" \
+        "KIND=$EP_KIND" "MEMORY_HIGH=$RES_MEMORY_HIGH" "MEMORY_MAX=$RES_MEMORY_MAX" \
         "CPU_QUOTA=$RM_CPU_QUOTA" "TASKS_MAX=$RM_TASKS_MAX" "NOFILE=$RM_NOFILE" || return 1
     sd_install_unit "$generation/socket.unit" "$unit.socket" || return 1
     sd_install_unit "$generation/service.unit" "$unit.service" || return 1
@@ -692,7 +824,9 @@ type_runtime_remove() {
     sd_daemon_reload
     if [[ "$purge" == true ]]; then
         rm -rf -- "${GB_OPT:?}/${kind:?}" "${GB_CACHE:?}/${kind:?}" "$GB_PREFIX/var/cache/nginx/getbible/$(gb_slug "$domain")"
-        if gb_user_exists "$user" && [[ -z "$GB_PREFIX" && "$GB_DRY_RUN" != true ]]; then userdel "$user" 2>/dev/null || true; fi
+        if gb_user_exists "$user" && [[ -z "$GB_PREFIX" && "$GB_DRY_RUN" != true ]]; then
+            if userdel "$user" 2>/dev/null; then gb_identity_forget_user "$user" || return 1; fi
+        fi
     fi
 }
 
@@ -808,9 +942,16 @@ type_runtime_render_docs() {
 # rt_record_endpoint DOMAIN LABEL VERSION REPOSITORY WARM [PYTHON]: write the
 # endpoint's record with the implementation's defaults (versioned layout).
 rt_record_endpoint() {
-    local domain="$1" label="$2" version="$3" repository="$4" warm="$5" python="${6:-}" conf
+    local domain="$1" label="$2" version="$3" repository="$4" warm="$5" python="${6:-}" conf workers threads cache
     rt_manifest_load "$(ep_get "$domain" KIND)" "$version"
     rt_validate_repository "$repository" "$version" || return 1
+    python="$(py_resolve_version "${python:-auto}")" || return 1
+    workers="$(gb_global "DEFAULT_${RM_KIND^^}_WORKERS" "$RM_WORKERS")"
+    threads="$(gb_global "DEFAULT_${RM_KIND^^}_THREADS" "$RM_THREADS")"
+    cache="$(gb_global "DEFAULT_${RM_KIND^^}_CACHE_TTL" "$RM_CACHE_SECONDS")"
+    [[ "$workers" =~ ^[1-9][0-9]?$ && "$threads" =~ ^[1-9][0-9]?$ ]] && (( 10#$workers <= 64 && 10#$threads <= 64 )) \
+        || { gb_warn "Runtime worker and thread defaults must be between 1 and 64."; return 1; }
+    [[ "$cache" =~ ^[0-9]{1,7}$ ]] || { gb_warn "Runtime cache TTL default must be a nonnegative integer."; return 1; }
     conf="$(ep_version_conf "$domain" "$label")"
     gb_ensure_dir "$(ep_versions_dir "$domain")" 0750 || return 1
     cfg_set "$conf" LABEL "$label"
@@ -818,14 +959,14 @@ rt_record_endpoint() {
     cfg_set "$conf" CREATED "$(gb_timestamp)"
     cfg_set "$conf" APP_VERSION "$version"
     cfg_set "$conf" REPOSITORY "$repository"
-    cfg_set "$conf" WORKERS "$RM_WORKERS"
-    cfg_set "$conf" THREADS "$RM_THREADS"
+    cfg_set "$conf" WORKERS "$workers"
+    cfg_set "$conf" THREADS "$threads"
     cfg_set "$conf" WARM_TRANSLATIONS "$warm"
     cfg_set "$conf" DEFAULT_TRANSLATION kjv
     cfg_set "$conf" DEFAULT_REFERENCE "Mat7:7"
     cfg_set "$conf" ALLOWED_TRANSLATIONS ""
-    cfg_set "$conf" CACHE_TTL "$RM_CACHE_SECONDS"
-    cfg_set "$conf" PYTHON_VERSION "$(py_resolve_version "${python:-auto}")"
+    cfg_set "$conf" CACHE_TTL "$cache"
+    cfg_set "$conf" PYTHON_VERSION "$python"
     chmod 0640 "$conf" 2>/dev/null || true
 }
 
@@ -877,6 +1018,7 @@ rt_add_endpoint() {
     [[ -z "$warm" || "$warm" =~ ^[a-z0-9_-]+(,[a-z0-9_-]+)*$ ]] || { gb_warn "Invalid warm-up translation list: $warm"; return 1; }
     [[ -z "$translation" ]] || gb_valid_translation "$translation" || { gb_warn "Invalid default translation: $translation"; return 1; }
     rt_manifest_load "$(ep_get "$domain" KIND)" "$version"
+    # shellcheck disable=SC2153 # RM_* are populated from the implementation manifest.
     [[ -n "$warm" ]] || warm="$RM_WARM_TRANSLATIONS"
     rt_record_endpoint "$domain" "$version" "$version" "$repository" "$warm" "$python" || return 1
     [[ -z "$translation" ]] || ep_version_set "$domain" "$version" DEFAULT_TRANSLATION "$translation"
@@ -1228,7 +1370,7 @@ type_runtime_menu_action() {
         rebuild) ui_run "Update $domain" rt_update "$domain" ;;
         python)
             label="$(rt_pick_endpoint "$domain")" || return 0
-            selector="$(ui_input "Python for $domain $label" "Managed Python version (3.12, 3.13, 3.14 or a catalog patch)" "$(ep_version_get "$domain" "$label" PYTHON_VERSION)")" || return 0
+            selector="$(ui_input "Python for $domain $label" "$(py_selection_prompt)" "$(ep_version_get "$domain" "$label" PYTHON_VERSION)")" || return 0
             ui_run "Update Python for $domain $label" rt_update "$domain" "$label" --python "$selector" ;;
         rollback)
             label="$(rt_pick_endpoint "$domain")" || return 0
