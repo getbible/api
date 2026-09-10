@@ -494,7 +494,10 @@ echo "-- local TLS waits for reloaded nginx within one deadline --"
 (
     # shellcheck source=../../src/lib/golive.sh
     source "$ROOT/src/lib/golive.sh"
-    # The clock advances only between attempts: no network or real sleeps.
+    # Assignment alone leaves Bash's SECONDS wall clock active. Unsetting it
+    # removes that special behavior in this subshell, so slow CI execution
+    # cannot consume extra deadline seconds between our simulated sleeps.
+    unset SECONDS
     SECONDS=0
     sleep() { SECONDS=$((SECONDS + $1)); }
     : > "$SB/local-probe-attempts"
@@ -553,7 +556,9 @@ echo "-- public propagation waits, then verifies HTTPS --"
     GOLIVE_VERIFY_TIMEOUT=6
     GOLIVE_VERIFY_INTERVAL=1
     probe_count=0
+    # Use an ordinary variable, not Bash's automatically advancing clock.
     # Deterministic time and requests: no real DNS, network or sleeps.
+    unset SECONDS
     SECONDS=0
     sleep() { SECONDS=$((SECONDS + $1)); }
     certs_http_probe() { probe_count=$((probe_count + 1)); (( probe_count >= 2 )); }

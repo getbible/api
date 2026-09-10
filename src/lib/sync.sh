@@ -189,9 +189,16 @@ sync_force_now() (
     # Serialize with an existing sync before placing this version's marker.
     # A manager-wide environment flag affects unrelated services and is not
     # inherited by system services without PassEnvironment.
-    exec 9>"$home/lock-$label"
-    flock 9
-    touch "$home/state/$label.force"
+    exec 9<>"$home/lock-$label" || return 1
+    # A first forced sync creates this file as root. The service must be able
+    # to open it afterwards as the sync user. Repair ownership on the opened
+    # inode, without replacing a lock another sync may already hold.
+    if gb_is_root && [[ -z "$GB_PREFIX" ]]; then
+        chown "$(sync_user "$domain"):$GB_READERS_GROUP" /proc/self/fd/9 || return 1
+    fi
+    chmod 0600 /proc/self/fd/9 || return 1
+    flock 9 || return 1
+    touch "$home/state/$label.force" || return 1
     flock -u 9
     exec 9>&-
     sync_run_now "$domain" "$label"

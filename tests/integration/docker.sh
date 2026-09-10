@@ -92,7 +92,11 @@ container bash -Eeuo pipefail -c 'for kind in query search; do
     test "$(systemctl show -p ProtectSystem --value "$unit")" = strict
     test "$(systemctl show -p PrivateDevices --value "$unit")" = yes
     test "$(systemctl show -p NoNewPrivileges --value "$unit")" = yes
-    test "$(systemctl show -p MemoryMax --value "$unit")" != infinity
+    memory_max=$(systemctl show -p MemoryMax --value "$unit")
+    [[ "$memory_max" =~ ^[0-9]+$ && "$memory_max" -gt 0 ]]
+    control_group=$(systemctl show -p ControlGroup --value "$unit")
+    [[ "$control_group" == /* ]]
+    test "$(cat "/sys/fs/cgroup$control_group/memory.max")" = "$memory_max"
     process=$(systemctl show -p MainPID --value "$unit")
     test "$(sed -n "s/^Uid:[[:space:]]*\([0-9]*\).*/\1/p" "/proc/$process/status")" = "$(id -u "getbible-$kind")"
     test "$(sed -n "s/^CapEff:[[:space:]]*//p" "/proc/$process/status")" = 0000000000000000
