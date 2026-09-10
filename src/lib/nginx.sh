@@ -312,15 +312,69 @@ nginx_test() {
     "$GB_NGINX_BIN" -t
 }
 
+# Resolve the same nginx master that reload targets. Other nginx masters (for
+# example, containers) must not delay this instance's reload or retirement.
+nginx_master_matches() {
+    local pid="$1" title=""
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    IFS= read -r -d '' title 2>/dev/null < "/proc/$pid/cmdline" || true
+    [[ "$title" == 'nginx: master process'* ]]
+}
+
+nginx_master_pid() {
+    local pid pid_file build prefix
+    pid="$("$GB_SYSTEMCTL" show --property=MainPID --value nginx 2>/dev/null)" || pid=""
+    if nginx_master_matches "$pid"; then printf '%s\n' "$pid"; return 0; fi
+    # When nginx is running outside systemd, -s reload uses the effective pid
+    # directive, falling back to the binary's compiled --pid-path.
+    pid_file="$("$GB_NGINX_BIN" -T 2>/dev/null | awk '!found && $1 == "pid" {
+        sub(/^[[:space:]]*pid[[:space:]]+/, ""); sub(/[[:space:]]*;[[:space:]]*(#.*)?$/, "");
+        gsub(/^["\047]|["\047]$/, ""); print; found=1
+    }')" || pid_file=""
+    if [[ "$pid_file" != /* ]]; then
+        build="$("$GB_NGINX_BIN" -V 2>&1)" || return 1
+        if [[ -z "$pid_file" && "$build" =~ --pid-path=([^[:space:]]+) ]]; then
+            pid_file="${BASH_REMATCH[1]//\'/}"; pid_file="${pid_file//\"/}"
+        fi
+        if [[ -n "$pid_file" && "$pid_file" != /* && "$build" =~ --prefix=([^[:space:]]+) ]]; then
+            prefix="${BASH_REMATCH[1]//\'/}"; prefix="${prefix//\"/}"
+            pid_file="$prefix/$pid_file"
+        fi
+    fi
+    [[ "$pid_file" == /* ]] || return 1
+    IFS= read -r pid 2>/dev/null < "$pid_file" || return 1
+    nginx_master_matches "$pid" || return 1
+    printf '%s\n' "$pid"
+}
+
 nginx_reload() {
+    local snapshot master active=false
     nginx_detect
     [[ "$NG_AVAILABLE" == true && -z "$GB_PREFIX" ]] || return 0
     [[ "$GB_DRY_RUN" == true ]] && return 0
-    if "$GB_SYSTEMCTL" is-active --quiet nginx 2>/dev/null; then
+    snapshot="$(mktemp "$(gb_tmpdir)/nginx-reload.XXXXXX")" || return 1
+    "$GB_SYSTEMCTL" is-active --quiet nginx 2>/dev/null && active=true
+    if ! master="$(nginx_master_pid)"; then
+        [[ "$active" == false ]] || {
+            gb_warn "Could not identify the active managed nginx master; reload was not requested."
+            return 1
+        }
+        master=0
+    fi
+    sd_snapshot_nginx_workers "$snapshot" "$master" || return 1
+    if [[ "$active" == true ]]; then
         "$GB_SYSTEMCTL" reload nginx || return 1
     else
         "$GB_NGINX_BIN" -s reload 2>/dev/null || "$GB_SYSTEMCTL" start nginx || return 1
     fi
+    # systemctl/nginx acknowledge sending HUP before nginx finishes loading
+    # the configuration. Serialize successive HTTP, TLS and rollback reloads
+    # without waiting for requests held by gracefully shutting-down workers.
+    master="$(nginx_master_pid)" || { gb_warn "Could not identify the managed nginx master after reload."; return 1; }
+    sd_wait_nginx_workers_reloaded "$snapshot" 15 true "$master" || {
+        gb_warn "nginx did not finish its configuration switch; retaining existing backends."
+        return 1
+    }
     gb_log "nginx reloaded."
 }
 

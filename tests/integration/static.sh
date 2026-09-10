@@ -62,6 +62,18 @@ it_check "docs page at root"         "200"              "$(it_status "$DOMAIN" /
 it_check "docs page is html"         "text/html"        "$(it_header "$DOMAIN" / content-type)"
 it_check "docs csp"                  "style-src"        "$(it_header "$DOMAIN" / content-security-policy)"
 it_check "health"                    '{"status":"ok"}'  "$(it_body "$DOMAIN" /healthz)"
+it_check "health not cacheable"      "no-store"         "$(it_header "$DOMAIN" /healthz cache-control)"
+it_check "health cors remains open" "access-control-allow-origin: *" "$(it_header "$DOMAIN" /healthz access-control-allow-origin)"
+it_check "health retains security headers" "nosniff" "$(it_header "$DOMAIN" /healthz x-content-type-options)"
+
+echo "-- conditional requests --"
+CHAPTER_ETAG="$(it_header "$DOMAIN" /v2/kjv/1/1.json etag | sed 's/^[^:]*: *//')"
+CHAPTER_MODIFIED="$(it_header "$DOMAIN" /v2/kjv/1/1.json last-modified | sed 's/^[^:]*: *//')"
+it_check "unchanged etag gives 304" "304" "$(it_status "$DOMAIN" /v2/kjv/1/1.json -H "If-None-Match: $CHAPTER_ETAG")"
+it_check "unchanged date gives 304" "304" "$(it_status "$DOMAIN" /v2/kjv/1/1.json -H "If-Modified-Since: $CHAPTER_MODIFIED")"
+it_check "304 carries cache lifetime" "max-age=3600" "$(it_headers "$DOMAIN" /v2/kjv/1/1.json -H "If-None-Match: $CHAPTER_ETAG" | grep -i '^cache-control')"
+it_check "304 carries validator" "$CHAPTER_ETAG" "$(it_headers "$DOMAIN" /v2/kjv/1/1.json -H "If-None-Match: $CHAPTER_ETAG" | grep -i '^etag')"
+it_check "HEAD carries validator" "$CHAPTER_ETAG" "$(it_headers "$DOMAIN" /v2/kjv/1/1.json -I | grep -i '^etag')"
 
 echo "-- pages, OpenAPI documents, favicon --"
 it_check "endpoint page 200"         "200"              "$(it_status "$DOMAIN" /v2/)"
@@ -87,6 +99,13 @@ it_check "unknown image"             "404"              "$(it_status "$DOMAIN" /
 
 echo "-- headers --"
 it_check "cors open"                 "access-control-allow-origin: *" "$(it_header "$DOMAIN" /v2/kjv/1/1.json access-control-allow-origin)"
+for resource in /v2/kjv/1/1.json /v2/kjv/1/1.sha /v2/openapi.json /versions.json / /v2/ /healthz; do
+    EXPOSED="$(it_header "$DOMAIN" "$resource" access-control-expose-headers)"
+    it_check "cache policy exposed: $resource" "Cache-Control" "$EXPOSED"
+    it_check "cache validator exposed: $resource" "ETag" "$EXPOSED"
+    it_check "cache date exposed: $resource" "Last-Modified" "$EXPOSED"
+    it_check "CDN cache status exposed: $resource" "CF-Cache-Status" "$EXPOSED"
+done
 it_check "nosniff"                   "nosniff"          "$(it_header "$DOMAIN" /v2/kjv/1/1.json x-content-type-options)"
 it_check "csp locked"                "default-src 'none'" "$(it_header "$DOMAIN" /v2/kjv/1/1.json content-security-policy)"
 it_check "hsts"                      "max-age=31536000" "$(it_header "$DOMAIN" /v2/kjv/1/1.json strict-transport-security)"
@@ -122,6 +141,8 @@ it_nginx_reload
 it_check "no token -> 401"           "401"              "$(it_status "$DOMAIN" /v2/kjv/1/1.json)"
 it_check "401 www-authenticate"      "bearer"           "$(it_header "$DOMAIN" /v2/kjv/1/1.json www-authenticate)"
 it_check "401 problem body"          '"code":"unauthorized"' "$(it_body "$DOMAIN" /v2/kjv/1/1.json)"
+it_check "unauthorized response not cacheable" "no-store" "$(it_header "$DOMAIN" /v2/kjv/1/1.json cache-control)"
+it_check "conditional request still needs token" "401" "$(it_status "$DOMAIN" /v2/kjv/1/1.json -H "If-None-Match: $CHAPTER_ETAG")"
 it_check "valid token -> 200"        "200"              "$(it_status "$DOMAIN" /v2/kjv/1/1.json -H "Authorization: Bearer $TOKEN")"
 it_check "protected JSON is not shared-cacheable" "private, no-store" "$(it_headers "$DOMAIN" /v2/kjv/1/1.json -H "Authorization: Bearer $TOKEN" | grep -i '^cache-control')"
 it_check "protected SHA is not shared-cacheable" "private, no-store" "$(it_headers "$DOMAIN" /v2/kjv/1/1.sha -H "Authorization: Bearer $TOKEN" | grep -i '^cache-control')"
@@ -156,6 +177,10 @@ MASTER_BEFORE="$(cat "$IT_SB/run/nginx.pid")"
 ) > "$IT_SB/rotation-probe.log" 2>&1 &
 PROBE_PID="$!"
 flip() { python3 -c 'import os, sys; os.rename(sys.argv[1], sys.argv[2])' "$1" "$2"; }
+ln -s "$NEXT_REL" "$IT_SB/srv/getbible/$DOMAIN/v2.next"
+flip "$IT_SB/srv/getbible/$DOMAIN/v2.next" "$IT_SB/srv/getbible/$DOMAIN/v2"
+it_check "changed release invalidates old etag" "200" "$(it_status "$DOMAIN" /v2/kjv/1/1.json -H "If-None-Match: $CHAPTER_ETAG")"
+it_check "changed release body is current" '"rotation":"complete"' "$(it_body "$DOMAIN" /v2/kjv/1/1.json -H "If-None-Match: $CHAPTER_ETAG")"
 for _ in $(seq 1 15); do
     ln -s "$NEXT_REL" "$IT_SB/srv/getbible/$DOMAIN/v2.next"
     flip "$IT_SB/srv/getbible/$DOMAIN/v2.next" "$IT_SB/srv/getbible/$DOMAIN/v2"

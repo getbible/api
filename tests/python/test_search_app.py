@@ -31,6 +31,38 @@ class SearchAppTest(EndpointCase, unittest.TestCase):
         self.assertEqual(body["query"]["translation"]["abbreviation"], "test")
         self.assertIn("max-age=60", response.headers["Cache-Control"])
 
+    def test_every_get_search_form_can_revalidate_its_response(self) -> None:
+        for path in ("/v2/test/beginning", "/v2/test?q=beginning", "/v2?q=beginning&translation=test",
+                     "/v2/test/Ge1:1"):
+            with self.subTest(path=path):
+                first = self.client.get(path)
+                second = self.client.get(path, headers={"If-None-Match": first.headers["ETag"]})
+                self.assertEqual(second.status_code, 304)
+                self.assertEqual(second.data, b"")
+                self.assertEqual(second.headers["ETag"], first.headers["ETag"])
+                self.assertEqual(second.headers["Cache-Control"], first.headers["Cache-Control"])
+
+    def test_search_filters_have_distinct_response_validators(self) -> None:
+        first = self.client.get("/v2/test/beginning?limit=1")
+        changed = self.client.get("/v2/test/beginning?limit=2", headers={"If-None-Match": first.headers["ETag"]})
+        self.assertEqual(changed.status_code, 200)
+        self.assertEqual(changed.get_json()["query"]["limit"], 2)
+        self.assertNotEqual(changed.headers["ETag"], first.headers["ETag"])
+
+    def test_token_searches_and_probes_never_advertise_shared_caching(self) -> None:
+        settings = self.app.extensions["settings"]
+        app = create_app(replace(settings, service=replace(settings.service, access_mode="token")))
+        self.addCleanup(app.extensions["getbible"].close)
+        client = app.test_client()
+        for method, path in (("get", "/v2/test/beginning"), ("get", "/v2/test/Ge1:1"),
+                             ("post", "/v2/test/beginning"), ("get", "/v2/test"),
+                             ("get", "/healthz"), ("get", "/readyz")):
+            with self.subTest(method=method, path=path):
+                response = getattr(client, method)(path)
+                self.assertEqual(response.headers["Cache-Control"], "private, no-store")
+                self.assertEqual(response.headers["CDN-Cache-Control"], "no-store")
+                self.assertIn("Authorization", response.vary)
+
     def test_filters_by_query_string_and_body(self) -> None:
         by_query = self.client.get("/v2/test/beginning?words=any&limit=5").get_json()
         self.assertEqual(by_query["query"]["criteria"]["words"], "any")
@@ -117,8 +149,12 @@ class SearchAppTest(EndpointCase, unittest.TestCase):
         self.assertEqual(self.client.get("/v2?q=beginning&translation=nope").status_code, 404)
 
     def test_post_is_never_cached(self) -> None:
-        response = self.client.post("/v2/test", json={"q": "beginning"})
-        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        for path in ("/v2/test/beginning", "/v2/test", "/v2"):
+            with self.subTest(path=path):
+                response = self.client.post(path, json={"q": "beginning", "translation": "test"})
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.headers["Cache-Control"], "no-store")
+                self.assertNotIn("ETag", response.headers)
 
     def test_root_and_methods(self) -> None:
         self.assertEqual(self.client.get("/").status_code, 404)

@@ -60,3 +60,69 @@ Clients send `Authorization: Bearer <token>`. Tokens are never accepted in
 the URL. CORS preflights, the documentation pages, the OpenAPI documents,
 `versions.json`, the favicon and the health routes are always open, so
 browsers can reach the `401`.
+
+## Response caching for browsers and API clients
+
+Every domain advertises its cache policy in HTTP response headers, whether
+Cloudflare proxying is enabled or callers connect directly. `Cache-Control`
+tells a browser, application cache or CDN how long it may reuse a response;
+it cannot force a caller to maintain a cache. Current defaults are:
+
+| Public resource or response | Fresh lifetime (`max-age`) |
+| --- | --- |
+| Static JSON and text data | 3,600 seconds |
+| Static `.sha` change tokens | 300 seconds |
+| Query GET/HEAD data | 300 seconds |
+| Search GET/HEAD data, including query-string filters | 60 seconds |
+| Documentation, OpenAPI and version discovery | 300 seconds |
+| Favicon and page images | 86,400 seconds |
+| nginx-generated not-found responses | 60 seconds |
+
+Static HTML data uses the 300-second documentation lifetime. Configured
+domain/endpoint lifetimes replace these defaults. Public static data also
+allows stale responses for 86,400 seconds while revalidating or during an
+origin error; `.sha` allows 3,600 seconds while revalidating and 86,400 during
+an error. Query/search responses allow 60 seconds while revalidating.
+These stale allowances favor availability and are additional to the fresh
+lifetime. nginx may also serve its existing public runtime cache during an
+upstream error or refresh.
+
+Cache the URL including its entire query string: different search filters
+must have separate entries. Retain the returned `ETag`, then send it as
+`If-None-Match` when revalidating. An unchanged representation returns `304`
+with no response body and its cache policy; reuse the stored body. Changed
+content returns `200` with its new body and ETag. Static files also provide
+`Last-Modified` and accept `If-Modified-Since`. An ETag represents the exact
+response; `.sha` files and search `query.sha` identify the underlying data.
+Response freshness still follows its cache lifetime, so token changes do
+not instantly invalidate copies already held by callers.
+
+For V2 consumers that persist scripture, HTTP freshness does not replace the
+[V2 scripture-cache policy](https://github.com/getbible/mcp/blob/main/site/v2/cache-policy.md).
+Store each payload with its exact translation/book/chapter scope hash and
+last successful check time; recheck at least weekly. Invalidate the changed
+scope and its cached descendants, then atomically replace the payload and
+hash. Grouped query results need every participating chapter hash. If a
+check fails, do not advance the check time or claim that the text is current.
+These hashes are opaque change tokens, not publisher identity or a
+cryptographic trust mechanism. This is a consumer caching contract; the
+deployment manager continues publishing the builder's files faithfully.
+
+nginx revalidates expired public runtime cache entries with the application's
+ETag. Revalidation still executes the runtime request to establish whether
+its representation changed; it saves response transfer, not that work.
+Conditional static requests avoid transferring unchanged files.
+
+Search POST responses, health/readiness, runtime problem responses and nginx
+errors other than generic not-found are `no-store`. Token-only data is
+`private, no-store` and bypasses shared caches; conditional requests must
+still pass authentication. Public documentation remains cacheable in every
+access mode. Access tokens on open/metered domains do not make the public
+Bible data private.
+
+Cross-origin browser code can read `Cache-Control`, `ETag`, `Last-Modified`,
+`Date`, `Age`, `Expires`, `Retry-After` and the available cache status headers.
+`X-Cache-Status` describes nginx runtime caching; `CF-Cache-Status` and `Age`
+can describe Cloudflare caching when enabled. Headers are exposed when
+present, not synthesized when that cache is absent. See `CLOUDFLARE.md` for
+the optional domain-scoped proxy and cache setup.

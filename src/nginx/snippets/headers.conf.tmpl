@@ -4,7 +4,7 @@
 add_header Access-Control-Allow-Origin   "*" always;
 add_header Access-Control-Allow-Methods  "GET, HEAD, POST, OPTIONS" always;
 add_header Access-Control-Allow-Headers  "Accept, Accept-Encoding, Authorization, Content-Type, If-None-Match, If-Modified-Since, Range, X-Request-ID" always;
-add_header Access-Control-Expose-Headers "ETag, Content-Length, Content-Range, Retry-After, X-Request-ID" always;
+add_header Access-Control-Expose-Headers "Cache-Control, ETag, Last-Modified, Date, Age, Expires, Content-Length, Content-Range, Retry-After, X-Cache-Status, CF-Cache-Status, X-Request-ID" always;
 add_header Access-Control-Max-Age        "86400" always;
 add_header X-Content-Type-Options        "nosniff" always;
 add_header Content-Security-Policy       "default-src 'none'; frame-ancestors 'none'; sandbox" always;

@@ -1,6 +1,7 @@
     location = /healthz {
         access_log off;
         default_type application/json;
+        include snippets/getbible/headers.conf;
         add_header Cache-Control "no-store" always;
         return 200 '{"status":"ok"}\n';
     }

@@ -95,24 +95,71 @@ sd_journal() {
     journalctl --unit "$unit" --lines "$lines" --no-pager 2>/dev/null || true
 }
 
-# Record the identity of each nginx worker before a configuration reload.
-# Read /proc directly so this works without a particular nginx PID-file path.
+# Record worker identities, optionally restricted to one nginx master. A master
+# value of 0 records no workers (the managed nginx has not started yet).
 sd_snapshot_nginx_workers() {
-    local target="$1" entry title pid stat
+    local target="$1" master="${2:-}" entry title pid stat
     local -a fields
     : > "$target" || return 1
     for entry in /proc/[0-9]*/cmdline; do
         title=""
-        IFS= read -r -d '' title < "$entry" 2>/dev/null || true
+        IFS= read -r -d '' title 2>/dev/null < "$entry" || true
         [[ "$title" == 'nginx: worker process'* ]] || continue
         pid="${entry#/proc/}"; pid="${pid%/cmdline}"
         stat=""
-        IFS= read -r stat < "/proc/$pid/stat" 2>/dev/null || continue
+        IFS= read -r stat 2>/dev/null < "/proc/$pid/stat" || continue
         IFS=' ' read -r -a fields <<< "${stat##*) }"
+        [[ -z "$master" || "${fields[1]:-}" == "$master" ]] || continue
         [[ "${fields[19]:-}" =~ ^[0-9]+$ ]] || return 1
         printf '%s %s\n' "$pid" "${fields[19]}" >> "$target" || return 1
     done
     chmod 0600 "$target"
+}
+
+# nginx's reload command acknowledges a signal, not the completed reload.
+# A replacement worker cohort exists once the previous accepting workers have
+# exited or entered graceful shutdown. Do not wait for their requests to finish.
+sd_wait_nginx_workers_reloaded() {
+    local snapshot="$1" timeout="${2:-15}" accepting="${3:-false}" master="${4:-}" deadline pid started stat title waiting entry
+    local -a fields
+    [[ -f "$snapshot" ]] || return 1
+    deadline=$((SECONDS + timeout))
+    while true; do
+        waiting=false
+        while IFS=' ' read -r pid started; do
+            [[ "$pid" =~ ^[0-9]+$ && "$started" =~ ^[0-9]+$ ]] || return 1
+            stat=""
+            IFS= read -r stat 2>/dev/null < "/proc/$pid/stat" || continue
+            IFS=' ' read -r -a fields <<< "${stat##*) }"
+            [[ "${fields[19]:-}" == "$started" && "${fields[0]:-}" != Z ]] || continue
+            title=""
+            IFS= read -r -d '' title 2>/dev/null < "/proc/$pid/cmdline" || true
+            if [[ "$title" == 'nginx: worker process'* && "$title" != 'nginx: worker process is shutting down'* ]]; then
+                waiting=true; break
+            fi
+        done < "$snapshot"
+        if [[ "$waiting" == false ]]; then
+            [[ "$accepting" == true ]] || return 0
+            # On a first start there may be no previous workers. Confirm a
+            # worker exists before allowing another configuration switch.
+            for entry in /proc/[0-9]*/cmdline; do
+                title=""
+                IFS= read -r -d '' title 2>/dev/null < "$entry" || true
+                if [[ "$title" == 'nginx: worker process'* && "$title" != 'nginx: worker process is shutting down'* ]]; then
+                    if [[ -n "$master" ]]; then
+                        pid="${entry#/proc/}"; pid="${pid%/cmdline}"
+                        stat=""
+                        IFS= read -r stat 2>/dev/null < "/proc/$pid/stat" || continue
+                        IFS=' ' read -r -a fields <<< "${stat##*) }"
+                        [[ "${fields[1]:-}" == "$master" ]] || continue
+                    fi
+                    return 0
+                fi
+            done
+        fi
+        (( SECONDS < deadline )) || return 1
+        sleep 0.1
+    done
 }
 
 # Retirement runs independently of the CLI. No timeout can kill an old

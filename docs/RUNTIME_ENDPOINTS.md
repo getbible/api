@@ -99,12 +99,38 @@ versions later; a domain with version folders can.
   missing_search`. Unknown or repeated parameters answer `400`.
 - A search string that parses as a scripture reference returns that
   scripture in the same envelope with `query.kind = "reference"`.
-- Search work is bounded by the librarian's deadline (5 s) and work budget,
-  by a per-worker concurrency gate that answers `503 busy` at capacity (a
-  smaller share for expensive criteria), by gunicorn's worker timeout and by
-  nginx's proxy timeout.
+- Search execution has a librarian deadline (5 s) and work budget. Its
+  per-worker gate answers `503 busy` when a gate is occupied (a smaller
+  share for expensive criteria); requests may already have queued in
+  gunicorn before reaching it. Corpus loading and shared index preparation
+  are separate from the execution deadline. A cold search can therefore
+  exceed nginx's 15 s response timeout even while preparation continues.
 - The translations named in the warm-up list (default `kjv`) are indexed
   before workers fork, so the first search after a restart is fast.
+
+### Retaining every translation
+
+The local V2 `<translation>.json` is one complete translation; book and
+chapter files are overlapping views, not additional search corpora. The
+matching `<translation>.sha` is its content-version token. An unchanged SHA
+reuses the index when freshness is checked; changed text needs a replacement
+index. These reads remain local. The [V2 cache contract](https://github.com/getbible/mcp/blob/main/site/v2/cache-policy.md)
+describes the scope hashes separately from HTTP validators and cache lifetimes.
+
+A long `WARM_TRANSLATIONS` list alone does not keep every translation warm.
+The pinned librarian retains four decoded translations and four client
+corpora by default, with a separate process-wide corpus registry of eight.
+All retention capacities must cover the intended set. Warm-up prepares the
+default case/diacritics policy; other index variants may still build lazily.
+The current search service has a 3 GiB ceiling and a 180 s startup timeout.
+
+Budget memory for decoded text and search indexes, worker-private refreshes,
+temporary search work and overlapping deployment generations. Pre-fork pages
+are shared initially, so adding worker RSS values overcounts shared pages;
+service memory or proportional set size is the useful measure. The source
+catalog and MCP schema contain no measured resident-memory sizes. Do not
+treat compressed JSON sizes or the MCP response-size cap as an all-warm RAM
+estimate, or raise the warm list without sizing these resources together.
 
 Both endpoints answer `/healthz` (liveness) and `/readyz` (the default
 translation's actual scripture can be read). Every endpoint publishes its

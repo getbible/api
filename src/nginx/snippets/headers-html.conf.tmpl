@@ -1,5 +1,6 @@
 # getBible API - response headers for the documentation page (HTML).
 add_header Access-Control-Allow-Origin   "*" always;
+add_header Access-Control-Expose-Headers "Cache-Control, ETag, Last-Modified, Date, Age, Expires, Content-Length, Retry-After, CF-Cache-Status" always;
 add_header X-Content-Type-Options        "nosniff" always;
 add_header Content-Security-Policy       "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'" always;
 add_header Referrer-Policy               "no-referrer" always;
