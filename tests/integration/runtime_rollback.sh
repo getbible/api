@@ -69,7 +69,9 @@ with tempfile.TemporaryDirectory(prefix="getbible-rollback-") as temporary:
             listener.bind(("127.0.0.1", 0))
             listener.listen()
             ports.append(listener.getsockname()[1])
-            process = multiprocessing.Process(target=backend, args=(listener, name))
+            # This stdin-run Linux fixture inherits its socket and handler;
+            # Python 3.14 otherwise defaults to an import-based forkserver.
+            process = multiprocessing.get_context("fork").Process(target=backend, args=(listener, name))
             process.start()
             processes.append(process)
             listener.close()
