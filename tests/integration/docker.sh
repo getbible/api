@@ -103,8 +103,10 @@ container bash -Eeuo pipefail -c 'for kind in query search; do
     "/opt/getbible/$kind/v2/current/.venv/bin/python" -m pip check
 done'
 container getbible resources --json | python3 -c 'import json,sys; p=json.load(sys.stdin); assert p["enabled"] and p["cgroup_limit_bytes"] == 4*1024**3 and p["budget_bytes"] <= 4*1024**3; assert len(p["endpoints"]) == 2'
-docker cp "$ROOT/tests/integration/infrastructure.py" "$CONTAINER:/tmp/getbible-infrastructure-ci.py"
-container env GB_CI_DISPOSABLE_HOST=1 /usr/bin/python3 /tmp/getbible-infrastructure-ci.py --mode docker
+# Write from inside the running mount namespace: systemd's private temporary
+# mounts must not hide a fixture copied through Docker's archive endpoint.
+container sh -c 'cat > /run/getbible/infrastructure-ci.py' < "$ROOT/tests/integration/infrastructure.py"
+container env GB_CI_DISPOSABLE_HOST=1 /usr/bin/python3 /run/getbible/infrastructure-ci.py --mode docker
 docker network connect "${PROJECT}_default" "$CONTAINER"
 
 # Real HAProxy HTTP forwarding: backend address never replaces request Host.
@@ -178,8 +180,8 @@ request query.example.test /v2/test/Ge1:1 --fail -H "Authorization: Bearer $TOKE
 [[ "$(request query.example.test /v2/test/Ge1:1 -o /dev/null -w '%{http_code}')" == 401 ]]
 request search.example.test /v2/test/beginning --fail >/dev/null
 request static.example.test /v2/test/1/1.json --fail >/dev/null
-docker cp "$ROOT/tests/integration/infrastructure.py" "$CONTAINER:/tmp/getbible-infrastructure-ci.py"
-container env GB_CI_DISPOSABLE_HOST=1 "GB_TEST_QUERY_TOKEN=$TOKEN" /usr/bin/python3 /tmp/getbible-infrastructure-ci.py \
+container sh -c 'cat > /run/getbible/infrastructure-ci.py' < "$ROOT/tests/integration/infrastructure.py"
+container env GB_CI_DISPOSABLE_HOST=1 "GB_TEST_QUERY_TOKEN=$TOKEN" /usr/bin/python3 /run/getbible/infrastructure-ci.py \
     --mode docker --collector-only --recreated-resources
 container /usr/share/getbible/api/docker/healthcheck.sh
 printf 'Docker acceptance passed: offline deployment, installed infrastructure, HAProxy routing, persistent state and changed resource settings on recreation.\n'

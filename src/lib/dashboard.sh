@@ -106,7 +106,7 @@ infrastructure_install() {
     gb_ensure_dir "$GB_LOG/management" 0750 root:getbible-dashboard || return 1
     gb_ensure_dir "$GB_LOG/management/app" 0750 root:getbible-dashboard || return 1
     gb_ensure_dir "$GB_LIBEXEC/apps" 0755 || return 1
-    for helper in getbible-admin-broker getbible-dashboard getbible-telemetry getbible-runtime-control getbible-adapt getbible-storage-guard; do
+    for helper in getbible-admin-broker getbible-dashboard getbible-telemetry getbible-runtime-control getbible-adapt getbible-resources getbible-storage-guard; do
         [[ ! -f "$GB_TOOLS/$helper" ]] || gb_install_file "$GB_TOOLS/$helper" "$GB_LIBEXEC/$helper" 0755 || return 1
     done
     for package in dashboard telemetry; do
