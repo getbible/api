@@ -133,6 +133,8 @@ Documentation:
 | [docs/NEW_SERVER.md](docs/NEW_SERVER.md) | fresh server setup: endpoint keys, staged domains, go-live and maintenance |
 | [docs/STATIC_ENDPOINTS.md](docs/STATIC_ENDPOINTS.md) | static domains: endpoints, synchronisation, serving |
 | [docs/RUNTIME_ENDPOINTS.md](docs/RUNTIME_ENDPOINTS.md) | runtime domains: the query and search services, one service per version |
+| [docs/RUNTIME_RESOURCES.md](docs/RUNTIME_RESOURCES.md) | automatic resource allocation, memory retention and translation warm-up |
+| [docs/DASHBOARD.md](docs/DASHBOARD.md) | private dashboard, Telegram sign-in, live reports and administrative operations |
 | [docs/PAGES.md](docs/PAGES.md) | documentation pages, OpenAPI documents, icons (favicon, logo), versions.json |
 | [docs/ACCESS_MODES.md](docs/ACCESS_MODES.md) | open, metered, token; budgets; tokens |
 | [docs/LOGGING.md](docs/LOGGING.md) | logs, rotation, analytics |

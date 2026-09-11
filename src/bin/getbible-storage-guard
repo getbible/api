@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""Conservative managed-storage admission; this is not a filesystem quota.
+
+A privileged sampler counts allocated blocks without reading corpus contents.
+Trusted sync accounts reserve estimated export space under one shared lock.
+Git fetches and unrelated writers still require host filesystem quotas when a
+hard physical storage limit is required.
+"""
+from __future__ import annotations
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+
+DEFAULT_ROOTS = ("/srv/getbible", "/opt/getbible", "/var/cache/getbible", "/var/cache/nginx/getbible",
+                 "/var/log/getbible", "/var/lib/getbible", "/var/backups/getbible", "/var/www/getbible", "/etc/getbible")
+
+
+def write_json(path, data, mode):
+    descriptor, temporary = tempfile.mkstemp(prefix=".storage-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w") as stream:
+            json.dump(data, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def snapshot(roots):
+    seen = set()
+    totals = []
+    for root in roots:
+        allocated = logical = files = 0
+        root = Path(root)
+        if root.exists() and not root.is_symlink():
+            for directory, names, filenames in os.walk(root, followlinks=False):
+                names[:] = [name for name in names if not (Path(directory) / name).is_symlink()]
+                for name in filenames:
+                    try:
+                        metadata = (Path(directory) / name).lstat()
+                    except FileNotFoundError:
+                        continue
+                    identity = (metadata.st_dev, metadata.st_ino)
+                    if identity in seen or not stat.S_ISREG(metadata.st_mode):
+                        continue
+                    seen.add(identity)
+                    allocated += metadata.st_blocks * 512
+                    logical += metadata.st_size
+                    files += 1
+        totals.append({"path": str(root), "allocated_bytes": allocated, "logical_bytes": logical, "files": files})
+    return {"generated_at": time.time(), "used_bytes": sum(item["allocated_bytes"] for item in totals),
+            "roots": totals, "measurement": "allocated_blocks_deduplicated_by_inode", "hard_quota": False}
+
+
+def estimate_export(checkout, revision):
+    result = subprocess.run(["git", "-C", checkout, "ls-tree", "-r", "-l", "-z", revision], capture_output=True, check=True)
+    total = 0
+    for entry in result.stdout.split(b"\0"):
+        fields = entry.partition(b"\t")[0].split()
+        if len(fields) == 4 and fields[1] == b"blob":
+            size = int(fields[3])
+            total += ((size + 4095) // 4096) * 4096 + 4096
+    # Both a new export and git-object overhead count toward admission. Existing
+    # hard-linked blobs get no speculative credit; preservation is conservative.
+    return total * 2
+
+
+def admission(args):
+    directory = Path(args.state)
+    lock_path = directory / "reservations.lock"
+    try:
+        descriptor = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o660)
+        os.fchmod(descriptor, 0o660)
+    except FileExistsError:
+        descriptor = os.open(lock_path, os.O_WRONLY)
+    with os.fdopen(descriptor, "a") as stream:
+        # Every sync domain has a different UID but the same trusted readers
+        # group. Only the creator may chmod the shared inode; later users need
+        # group write permission to open it, not ownership.
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        try:
+            reservations = json.loads((directory / "reservations.json").read_text())
+        except FileNotFoundError:
+            reservations = {}
+        if args.action == "release":
+            reservations.pop(args.id, None)
+            write_json(directory / "reservations.json", reservations, 0o660)
+            return {"released": args.id}
+        usage = json.loads((directory / "usage.json").read_text())
+        now = time.time()
+        if now - usage["generated_at"] > args.max_age or usage["generated_at"] > now + 5:
+            raise ValueError("Storage accounting is stale; keep the current publication and retry after the sampler runs.")
+        # A crashed sync's lease eventually expires; normal exits release it in
+        # their trap. Retained corpus generations themselves are never deleted.
+        reservations = {key: value for key, value in reservations.items() if now - value["created_at"] < 86400}
+        estimated = args.bytes
+        if args.checkout:
+            estimated = estimate_export(args.checkout, args.revision)
+        if args.action == "check":
+            estimated = int(reservations.get(args.id, {}).get("bytes", estimated))
+        others = sum(item["bytes"] for key, item in reservations.items() if key != args.id)
+        budget = int(args.max_gib * 1024**3)
+        if usage["used_bytes"] + others + estimated > budget:
+            raise ValueError("Managed storage admission exceeds STORAGE_MAX_GIB; the serving and rollback releases were retained.")
+        reservations[args.id] = {"bytes": estimated, "created_at": now}
+        write_json(directory / "reservations.json", reservations, 0o660)
+        return {"reserved_bytes": estimated, "used_bytes": usage["used_bytes"], "budget_bytes": budget, "hard_quota": False}
+
+
+def storage_budget(config_path, environment_path):
+    value = "0"
+    for path in (config_path, environment_path):
+        try:
+            lines = Path(path).read_text().splitlines()
+        except FileNotFoundError:
+            continue
+        for line in lines:
+            key, separator, configured = line.partition("=")
+            if separator and key in {"STORAGE_MAX_GIB", "GETBIBLE_STORAGE_MAX_GIB"} and configured:
+                value = configured
+    # Empty deployment values preserve saved settings, like the manager.
+    if os.environ.get("GETBIBLE_STORAGE_MAX_GIB"):
+        value = os.environ["GETBIBLE_STORAGE_MAX_GIB"]
+    budget = int(value)
+    if not 0 <= budget <= 999999:
+        raise ValueError("STORAGE_MAX_GIB must be between 0 and 999999.")
+    return budget
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("action", choices=("snapshot", "sample", "reserve", "check", "release"))
+    parser.add_argument("--state", default="/var/lib/getbible/storage")
+    parser.add_argument("--config", default="/etc/getbible/getbible.conf")
+    parser.add_argument("--environment", default="/run/getbible/environment.conf")
+    parser.add_argument("--root", action="append")
+    parser.add_argument("--id", default="")
+    parser.add_argument("--max-gib", type=float, default=0)
+    parser.add_argument("--max-age", type=int, default=120)
+    parser.add_argument("--bytes", type=int, default=0)
+    parser.add_argument("--checkout")
+    parser.add_argument("--revision", default="HEAD")
+    args = parser.parse_args()
+    try:
+        if args.action == "sample" and storage_budget(args.config, args.environment) == 0:
+            print(json.dumps({"status": "disabled", "reason": "STORAGE_MAX_GIB=0"}))
+            return 0
+        if args.action in {"snapshot", "sample"}:
+            report = snapshot(args.root or DEFAULT_ROOTS)
+            write_json(Path(args.state) / "usage.json", report, 0o640)
+        else:
+            if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,200}", args.id):
+                raise ValueError("Invalid reservation identifier.")
+            if args.max_gib <= 0 and args.action != "release":
+                return 0
+            report = admission(args)
+        print(json.dumps(report))
+        return 0
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+        print(f"Storage admission: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

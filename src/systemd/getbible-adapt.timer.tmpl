@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodically reconsider getBible runtime resource allocation
+
+[Timer]
+OnBootSec=60s
+OnUnitInactiveSec=15s
+AccuracySec=1s
+Unit=getbible-adapt.service
+
+[Install]
+WantedBy=timers.target

@@ -15,49 +15,12 @@ logs_ensure_endpoint_dir() {
 # Render /etc/getbible/logrotate.conf covering every endpoint, plus the
 # hourly timer that runs it with its own state file.
 logs_render_rotation() {
-    local size keep conf stage
-    size="$(gb_global LOG_ROTATE_SIZE 1G)"
-    keep="$(gb_global LOG_ROTATE_KEEP 30)"
+    local stage
     stage="$(gb_tmpdir)/logrotate.conf"
     cat > "$stage" <<CONF
-# getBible API log rotation, rendered by getbible.sh. Run hourly by
-# getbible-logrotate.timer with its own state file; the distribution's daily
-# logrotate never sees these files.
-
-"$GB_LOG/*/access.log" "$GB_LOG/*/error.log" {
-    size $size
-    rotate $keep
-    missingok
-    notifempty
-    compress
-    delaycompress
-    dateext
-    dateformat -%Y%m%d-%H%M%S
-    olddir archive
-    createolddir 0755 root root
-    create 0640 root adm
-    sharedscripts
-    postrotate
-        [ -f /run/nginx.pid ] && kill -USR1 "\$(cat /run/nginx.pid)" 2>/dev/null || true
-        $GB_LIBEXEC/getbible-logrotate-hook "$GB_LOG" "$keep" || true
-    endscript
-}
-
-"$GB_LOG/*/app/*.log" {
-    size $size
-    rotate $keep
-    missingok
-    notifempty
-    compress
-    delaycompress
-    dateext
-    dateformat -%Y%m%d-%H%M%S
-    olddir ../archive
-    sharedscripts
-    postrotate
-        $GB_LIBEXEC/getbible-logrotate-hook "$GB_LOG" "$keep" || true
-    endscript
-}
+# getBible telemetry owns traffic and diagnostic spool rotation.
+# Independent logrotate rules would delete unread records. Intentionally empty.
+# Retained history is managed by TELEMETRY_MAX_GIB and TELEMETRY_RETENTION_DAYS.
 CONF
     gb_install_file "$stage" "$GB_LOGROTATE_CONF" 0644
     gb_install_file "$GB_TOOLS/getbible-logrotate-hook" "$GB_LIBEXEC/getbible-logrotate-hook" 0755
@@ -72,7 +35,7 @@ Documentation=file:$GB_REPO_DIR/docs/LOGGING.md
 
 [Service]
 Type=oneshot
-ExecStart=/usr/sbin/logrotate -s $GB_VAR/logrotate.state $GB_LOGROTATE_CONF
+ExecStart=$GB_PYTHON $GB_LIBEXEC/getbible-telemetry rotate --db $GB_VAR/telemetry/traffic.sqlite3 --log-root $GB_LOG
 Nice=10
 IOSchedulingClass=idle
 UNIT
@@ -97,20 +60,20 @@ TIMER
 
 logs_rotate_now() {
     sd_available || gb_die "systemd is required to rotate now."
-    /usr/sbin/logrotate -f -s "$GB_VAR/logrotate.state" "$GB_LOGROTATE_CONF"
+    "$GB_PYTHON" "$GB_LIBEXEC/getbible-telemetry" rotate --db "$GB_VAR/telemetry/traffic.sqlite3" --log-root "$GB_LOG"
 }
 
 # logs_archives DOMAIN: list archived files with sizes.
 logs_archives() {
-    local dir
-    dir="$(ep_log_dir "$1")/archive"
-    [[ -d "$dir" ]] || { printf '(no archives)\n'; return 0; }
-    find "$dir" -maxdepth 1 -type f -printf '%10s  %TY-%Tm-%Td %TH:%TM  %f\n' | sort -k2,3
+    "$GB_PYTHON" "$GB_LIBEXEC/getbible-telemetry" storage --db "$GB_VAR/telemetry/traffic.sqlite3"
 }
 
 logs_tail() {
     # logs_tail FILE LINES
-    local file="$1" lines="${2:-200}"
-    [[ -f "$file" ]] || { printf '(no such log: %s)\n' "$file"; return 0; }
-    tail -n "$lines" -- "$file"
+    local file="$1" lines="${2:-200}" relative domain action=requests
+    relative="${file#"$GB_LOG/"}"
+    domain="${relative%%/*}"
+    [[ "$file" == */error.log ]] && action=events
+    "$GB_PYTHON" "$GB_LIBEXEC/getbible-telemetry" "$action" --db "$GB_VAR/telemetry/traffic.sqlite3" \
+        --endpoint "$domain" --from 0 --limit "$lines"
 }

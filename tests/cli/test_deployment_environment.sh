@@ -117,8 +117,8 @@ export GETBIBLE_EXECUTION_MODE=docker
 check gb_setting_validate DEFAULT_QUERY_WORKERS 64
 reject gb_setting_validate DEFAULT_QUERY_WORKERS 65
 reject gb_setting_validate DEFAULT_SEARCH_THREADS 128
-check gb_setting_validate DEFAULT_QUERY_CACHE_TTL 9999999
-reject gb_setting_validate DEFAULT_QUERY_CACHE_TTL 10000000
+check gb_setting_validate DEFAULT_QUERY_CACHE_TTL 31536000
+reject gb_setting_validate DEFAULT_QUERY_CACHE_TTL 31536001
 reject gb_setting_validate TRUSTED_PROXY_CIDRS 0.0.0.0/0
 reject gb_setting_validate ORIGIN_HTTP_PORT 65536
 
@@ -140,5 +140,5 @@ check test "$(gb_global DEFAULT_DEPLOY_MODE)" = staged
 check test "$(gb_global DEFAULT_CLOUDFLARE_MODE)" = proxied
 check test "$(gb_global DEFAULT_CLOUDFLARE_CACHE)" = respect
 check test "$(gb_global DEFAULT_QUERY_WORKERS)" = 3
-check test "$(cfg_get_raw "$GB_GLOBAL_CONF" DEFAULT_QUERY_WORKERS)" = 4
+check test "$(cfg_get_raw "$GB_GLOBAL_CONF" DEFAULT_QUERY_WORKERS)" = auto
 printf 'Deployment environment: %s assertions passed\n' "$passed"

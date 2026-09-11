@@ -102,7 +102,7 @@ type_runtime_create "$Q" query v2 "$REPO" metered ''
 mkdir -p "$SB/etc/letsencrypt/live/$Q" && touch "$SB/etc/letsencrypt/live/$Q/fullchain.pem" "$SB/etc/letsencrypt/live/$Q/privkey.pem"
 check "endpoint recorded"            "LABEL=v2"                "$(cat "$SB/etc/getbible/endpoints/$Q/versions/v2.conf")"
 check "app version recorded"         "APP_VERSION=v2"          "$(cat "$SB/etc/getbible/endpoints/$Q/versions/v2.conf")"
-check "settings live with endpoint"  "WORKERS=4"               "$(cat "$SB/etc/getbible/endpoints/$Q/versions/v2.conf")"
+check "settings live with endpoint"  "WORKERS=auto"               "$(cat "$SB/etc/getbible/endpoints/$Q/versions/v2.conf")"
 check "default endpoint"             "DEFAULT_ENDPOINT=v2"     "$(cat "$SB/etc/getbible/endpoints/$Q/endpoint.conf")"
 check "root under the version"       "$SB/opt/getbible/query/v2" "$(rt_root "$Q" v2)"
 check "unit prefix carries version"  "getbible-query-v2"       "$(rt_unit_prefix "$Q" v2)"

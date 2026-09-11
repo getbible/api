@@ -28,7 +28,7 @@ class QueryAppTest(EndpointCase, unittest.TestCase):
         chapter = response.get_json()["test_1_1"]
         self.assertEqual(chapter["ref"], ["Ge1:1"])
         self.assertEqual(chapter["verses"][0]["name"], "Genesis 1:1")
-        self.assertIn("max-age=300", response.headers["Cache-Control"])
+        self.assertIn("max-age=2592000", response.headers["Cache-Control"])
         self.assertIn("ETag", response.headers)
 
     def test_conditional_request_answers_304(self) -> None:

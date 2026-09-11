@@ -375,6 +375,7 @@ cloudflare_cli() {
     shift || true
     case "$command" in
         token) cloudflare_configure ;;
+        token-stdin) dashboard_cloudflare_token ;;
         verify) cf_cmd verify ;;
         apply) cloudflare_apply_and_render "${1:?domain}" ;;
         mode)

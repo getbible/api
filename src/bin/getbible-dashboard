@@ -1,0 +1,17 @@
+#!/usr/bin/env python3
+"""Launch the bundled dashboard without downloading dependencies."""
+
+from pathlib import Path
+import sys
+
+here = Path(__file__).resolve()
+for parent in (here.parent / "apps" / "dashboard", here.parent / "dashboard", here.parent.parent / "apps" / "dashboard"):
+    if (parent / "getbible_dashboard").is_dir():
+        sys.path.insert(0, str(parent))
+for parent in (here.parent / "apps" / "telemetry", here.parent / "telemetry", here.parent.parent / "apps" / "telemetry"):
+    if (parent / "getbible_telemetry").is_dir():
+        sys.path.insert(0, str(parent))
+
+from getbible_dashboard.cli import main
+
+raise SystemExit(main())

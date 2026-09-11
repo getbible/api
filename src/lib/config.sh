@@ -127,9 +127,9 @@ GB_GLOBAL_DEFAULTS=(
     "DEFAULT_QUOTA_HOUR=10000"
     "DEFAULT_QUOTA_DAY=100000"
     "DEFAULT_CONN_LIMIT=100"
-    "DEFAULT_CACHE_TTL=3600"
+    "DEFAULT_CACHE_TTL=2592000"
     "DEFAULT_SHA_CACHE_TTL=300"
-    "DEFAULT_SYNC_SCHEDULE=weekly"
+    "DEFAULT_SYNC_SCHEDULE=monthly"
     "DEFAULT_EXTENSIONS=json,sha,txt"
     "LOG_ROTATE_SIZE=1G"
     "LOG_ROTATE_KEEP=30"
@@ -145,12 +145,64 @@ GB_GLOBAL_DEFAULTS=(
     "DEFAULT_CLOUDFLARE_MODE=off"
     "DEFAULT_CLOUDFLARE_CACHE=bypass"
     "DEFAULT_CLOUDFLARE_FEATURES=free"
-    "DEFAULT_QUERY_CACHE_TTL=300"
-    "DEFAULT_SEARCH_CACHE_TTL=60"
-    "DEFAULT_QUERY_WORKERS=4"
+    "DEFAULT_QUERY_CACHE_TTL=2592000"
+    "DEFAULT_SEARCH_CACHE_TTL=2592000"
+    "DEFAULT_QUERY_WORKERS=auto"
     "DEFAULT_QUERY_THREADS=4"
-    "DEFAULT_SEARCH_WORKERS=2"
+    "DEFAULT_SEARCH_WORKERS=auto"
     "DEFAULT_SEARCH_THREADS=4"
+    "MEMORY_CACHE_TTL=2592000"
+    "CACHE_TTL_JITTER=0"
+    "QUERY_MEMORY_MIN=192M"
+    "SEARCH_MEMORY_MIN=512M"
+    "QUERY_MEMORY_MAX=auto"
+    "SEARCH_MEMORY_MAX=auto"
+    "RESOURCE_RESERVE_PERCENT=25"
+    "QUERY_CPU_QUOTA=auto"
+    "SEARCH_CPU_QUOTA=auto"
+    "QUERY_WORKERS_MIN=1"
+    "QUERY_WORKERS_MAX=12"
+    "SEARCH_WORKERS_MIN=1"
+    "SEARCH_WORKERS_MAX=12"
+    "QUERY_THREADS_MIN=1"
+    "QUERY_THREADS_MAX=16"
+    "SEARCH_THREADS_MIN=1"
+    "SEARCH_THREADS_MAX=8"
+    "QUERY_WARM_TRANSLATIONS=kjv"
+    "SEARCH_WARM_TRANSLATIONS=kjv"
+    "CACHE_MEMORY_PERCENT=50"
+    "SHARED_CORPUS_LIMIT=256"
+    "CHAPTER_CACHE_LIMIT=100000"
+    "TRANSLATION_CACHE_LIMIT=256"
+    "REFERENCE_CACHE_LIMIT=50000"
+    "ADAPTIVE_RESOURCES=true"
+    "ADAPTIVE_INTERVAL=15"
+    "ADAPTIVE_COOLDOWN=300"
+    "ADAPTIVE_HIGH_PERCENT=80"
+    "ADAPTIVE_LOW_PERCENT=20"
+    "ADAPTIVE_SUSTAINED_SAMPLES=4"
+    "TELEMETRY_ENABLED=true"
+    "TELEMETRY_MAX_GIB=10"
+    "TELEMETRY_RETENTION_DAYS=180"
+    "TELEMETRY_BATCH_SIZE=1000"
+    "TELEMETRY_FLUSH_SECONDS=1"
+    "TELEMETRY_METRICS_SECONDS=5"
+    "DASHBOARD_DOMAIN="
+    "DASHBOARD_ENABLED=false"
+    "DASHBOARD_SESSION_DAYS=30"
+    "DASHBOARD_IDLE_SECONDS=60"
+    "DASHBOARD_TOKEN_SECONDS=60"
+    "STORAGE_MAX_GIB=0"
+    "ADAPTIVE_ALLOW_IDLE_SHRINK=false"
+    "ALERT_SYNC_GRACE_SECONDS=3600"
+    "TELEMETRY_SPOOL_MAX_GIB=1"
+    "TELEMETRY_SPOOL_ROTATE_MIB=16"
+    "ALERT_COOLDOWN_SECONDS=900"
+    "ALERT_HOLD_SECONDS=60"
+    "ALERT_CPU_PERCENT=95"
+    "ALERT_MEMORY_PERCENT=90"
+    "ALERT_DISK_PERCENT=90"
+    "ALERT_MEMORY_PRESSURE_PERCENT=10"
 )
 
 gb_global_init() {
@@ -197,5 +249,17 @@ gb_global_set() {
         resources_plan --budget "$2" --format json >/dev/null || return 1
     fi
     cfg_set "$GB_GLOBAL_CONF" "$1" "$2" || return 1
+    # Existing services read their own effective snapshots. Refresh after the
+    # write, so a CLI/menu change is visible without an unrelated later command.
+    if [[ "${GB_CONFIG_INITIALIZING:-false}" != true && "${GB_REFRESHING_SERVICE_SETTINGS:-false}" != true \
+        && -n "${GB_SYSTEMD:-}" && -f "$GB_SYSTEMD/getbible-telemetry.service" ]] \
+        && declare -F infrastructure_environment >/dev/null; then
+        local GB_REFRESHING_SERVICE_SETTINGS=true
+        if ! infrastructure_environment; then
+            gb_warn "$1 was saved, but effective service settings could not be refreshed. Correct the reported error and apply the setting again."
+            if declare -F tg_notify >/dev/null; then tg_notify fail 'Service settings refresh failed' "$1 was saved; running services may still have the previous value."; fi
+            return 1
+        fi
+    fi
     if declare -F tg_notify >/dev/null; then tg_notify info "Setting changed" "$1 was updated."; fi
 }

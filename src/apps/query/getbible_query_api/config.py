@@ -12,8 +12,8 @@ class Settings:
     librarian: LibrarianSettings
     service: ServiceSettings
     default_reference: str = "Mat7:7"
-    reference_cache_limit: int = 5000
-    chapter_cache_limit: int = 2048
+    reference_cache_limit: int = 50000
+    chapter_cache_limit: int = 100000
     max_references: int = 8
     max_total_verses: int = 200
 
@@ -27,10 +27,10 @@ class Settings:
     def from_environment(cls) -> Settings:
         return cls(
             librarian=LibrarianSettings.from_environment("/var/cache/getbible/query/librarian"),
-            service=ServiceSettings.from_environment("QUERY", cache_seconds=300, max_input_length=512),
+            service=ServiceSettings.from_environment("QUERY", cache_seconds=2_592_000, max_input_length=512),
             default_reference=env_str("QUERY_DEFAULT_REFERENCE", "Mat7:7"),
-            reference_cache_limit=env_int("GETBIBLE_REFERENCE_CACHE_LIMIT", 5000, 0, 1_000_000),
-            chapter_cache_limit=env_int("GETBIBLE_CHAPTER_CACHE_LIMIT", 2048, 0, 100_000),
+            reference_cache_limit=env_int("GETBIBLE_REFERENCE_CACHE_LIMIT", 50000, 0, 1_000_000),
+            chapter_cache_limit=env_int("GETBIBLE_CHAPTER_CACHE_LIMIT", 100000, 0, 1_000_000),
             max_references=env_int("QUERY_MAX_REFERENCES", 8, 1, 64),
             max_total_verses=env_int("QUERY_MAX_TOTAL_VERSES", 200, 1, 200),
         )

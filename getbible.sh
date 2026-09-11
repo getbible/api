@@ -18,7 +18,7 @@ for lib in core platform ui config deployment registry resources users telegram 
     # shellcheck source=/dev/null
     source "$GB_REPO_DIR/src/lib/$lib.sh"
 done
-for extra in analytics cloudflare update doctor golive menu; do
+for extra in analytics cloudflare update doctor golive dashboard menu; do
     # shellcheck source=/dev/null
     [[ -f "$GB_REPO_DIR/src/lib/$extra.sh" ]] && source "$GB_REPO_DIR/src/lib/$extra.sh"
 done
@@ -104,6 +104,13 @@ Observability
   logs DOMAIN [access|error|app|journal] [ENDPOINT] [--lines N]
   logs archives DOMAIN | logs rotate
   analytics [--window today|24h|7d|30d|all] [--domain D] [--json]
+  dashboard status|enable DOMAIN|apply|disable
+  dashboard password set [--stdin]|reset
+  dashboard sessions [revoke ID|all] | blocks | unblock IP
+                                         private management dashboard; password and
+                                         Telegram sign-in, 30-day revocable sessions
+  runtime DOMAIN cache ENDPOINT info|warm|drop|reload|refresh-source [TRANSLATION]
+                                         inspect or manage resident translation data
 
 Platform
   self-update                            pull the manager script and supporting files
@@ -152,6 +159,7 @@ gb_system_init() {
     tg_install_helper
     sync_install_tools
     logs_render_rotation
+    infrastructure_ensure
 }
 
 # Internal first-boot/restore operation. It never creates endpoints, requests
@@ -168,6 +176,7 @@ cmd_container_init() {
         nginx_render_global "$stage" || return 1
         cp -a "$stage/." "$GB_NGINX/" || return 1
     fi
+    dashboard_restore_route || return 1
     if [[ -n "$(ep_list_by_type runtime)" ]]; then
         endpoint_source_type runtime
         rt_restore_resource_settings || return 1
@@ -322,6 +331,9 @@ cmd_runtime() {
     case "$action" in
         update) rt_update "$domain" ${label:+"$label"} "$@" ;;
         redeploy) [[ $# == 0 && -z "$label" ]] || gb_die "runtime DOMAIN redeploy (every endpoint)"; rt_redeploy "$domain" ;;
+        cache)
+            [[ -z "$label" && $# -ge 2 && $# -le 3 ]] || gb_die "runtime DOMAIN cache ENDPOINT info|warm|drop|reload|refresh-source [TRANSLATION]"
+            rt_cache_cli "$domain" "$@" ;;
         rollback)
             [[ $# == 0 ]] || gb_die "runtime DOMAIN [ENDPOINT] rollback"
             label="$(rt_resolve_label "$domain" "$label")" || exit 1
@@ -490,6 +502,7 @@ main() {
         menu) gb_system_init; ui_init; menu_main ;;
         container-init) cmd_container_init ;;
         resources) gb_system_init; resources_cli "$@" ;;
+        dashboard) gb_system_init; dashboard_cli "$@" ;;
         list) ep_list ;;
         status)
             if [[ -n "${1:-}" ]]; then endpoint_status_text "$1"; else
@@ -544,6 +557,7 @@ main() {
             gb_system_init
             case "${1:-}" in
                 enable) tg_configure ;;
+                configure) shift; dashboard_telegram_configure "$@" ;;
                 disable) cfg_set "$GB_TELEGRAM_CONF" TELEGRAM_ENABLED false; gb_log "Telegram disabled." ;;
                 test) tg_test ;;
                 *) gb_die "telegram enable|disable|test" ;;

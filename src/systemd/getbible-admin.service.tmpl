@@ -1,0 +1,30 @@
+[Unit]
+Description=getBible local management job broker
+After=local-fs.target
+OnFailure=getbible-alert@%n.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+Group=getbible-dashboard
+UMask=0077
+RuntimeDirectory=getbible-admin
+RuntimeDirectoryMode=0750
+ExecStart={{PYTHON}} {{LIBEXEC}}/getbible-admin-broker --socket {{PREFIX}}/run/getbible-admin/broker.sock --state-dir {{VAR}}/admin --manager {{MANAGER}} --runtime-control {{LIBEXEC}}/getbible-runtime-control
+Restart=on-failure
+RestartSec=3
+# This service runs the existing privileged manager, which must create service
+# identities, mount namespaces, certificates and validated configuration.
+# Its only input is a root-owned allowlist over a peer-credential Unix socket.
+PrivateTmp=true
+LimitNOFILE=4096
+TasksMax=256
+MemoryHigh=256M
+MemoryMax=512M
+TimeoutStopSec=300
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

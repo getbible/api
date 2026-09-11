@@ -70,13 +70,17 @@ class LibrarianSettings:
     repository: str = "/srv/getbible/api.getbible.net"
     version: str = "v2"
     cache_dir: str = "/var/cache/getbible/query/librarian"
-    cache_ttl_seconds: int = 900
-    cache_ttl_jitter: float = 0.1
+    cache_ttl_seconds: int = 2_592_000
+    cache_ttl_jitter: float = 0.0
     strict_freshness: bool = False
     request_connect_timeout: int = 3
     request_read_timeout: int = 30
     request_retries: int = 3
-    books_cache_limit: int = 64
+    books_cache_limit: int = 256
+    shared_corpus_limit: int = 256
+    shared_corpus_bytes: int = 512 * 1024 * 1024
+    chapter_cache_bytes: int = 256 * 1024 * 1024
+    translation_cache_bytes: int = 128 * 1024 * 1024
 
     def __post_init__(self) -> None:
         if not isinstance(self.repository, str) or not self.repository.startswith("/"):
@@ -84,11 +88,15 @@ class LibrarianSettings:
         if not valid_version(self.version):
             raise ValueError("GETBIBLE_VERSION must look like 'v2'.")
         bounds = (
-            ("GETBIBLE_CACHE_TTL_SECONDS", self.cache_ttl_seconds, 0, 2_592_000),
+            ("GETBIBLE_CACHE_TTL_SECONDS", self.cache_ttl_seconds, 0, 31_536_000),
             ("GETBIBLE_CONNECT_TIMEOUT", self.request_connect_timeout, 1, 60),
             ("GETBIBLE_READ_TIMEOUT", self.request_read_timeout, 1, 300),
             ("GETBIBLE_REQUEST_RETRIES", self.request_retries, 0, 10),
             ("GETBIBLE_BOOKS_CACHE_LIMIT", self.books_cache_limit, 0, 10_000),
+            ("GETBIBLE_SHARED_CORPUS_LIMIT", self.shared_corpus_limit, 1, 100_000),
+            ("GETBIBLE_SHARED_CORPUS_BYTES", self.shared_corpus_bytes, 1, 2**50),
+            ("GETBIBLE_CHAPTER_CACHE_BYTES", self.chapter_cache_bytes, 1, 2**50),
+            ("GETBIBLE_TRANSLATION_CACHE_BYTES", self.translation_cache_bytes, 1, 2**50),
         )
         for name, value, minimum, maximum in bounds:
             if not isinstance(value, int) or isinstance(value, bool) or not minimum <= value <= maximum:
@@ -107,12 +115,16 @@ class LibrarianSettings:
             repository=env_str("GETBIBLE_REPOSITORY", defaults.repository),
             version=env_str("GETBIBLE_VERSION", defaults.version).strip("/"),
             cache_dir=env_str("GETBIBLE_CACHE_DIR", default_cache_dir),
-            cache_ttl_seconds=env_int("GETBIBLE_CACHE_TTL_SECONDS", defaults.cache_ttl_seconds, 0, 2_592_000),
+            cache_ttl_seconds=env_int("GETBIBLE_CACHE_TTL_SECONDS", defaults.cache_ttl_seconds, 0, 31_536_000),
             cache_ttl_jitter=env_ratio("GETBIBLE_CACHE_TTL_JITTER", defaults.cache_ttl_jitter),
             strict_freshness=env_bool("GETBIBLE_STRICT_FRESHNESS", defaults.strict_freshness),
             request_connect_timeout=env_int("GETBIBLE_CONNECT_TIMEOUT", defaults.request_connect_timeout, 1, 60),
             request_read_timeout=env_int("GETBIBLE_READ_TIMEOUT", defaults.request_read_timeout, 1, 300),
             request_retries=env_int("GETBIBLE_REQUEST_RETRIES", defaults.request_retries, 0, 10),
+            shared_corpus_limit=env_int("GETBIBLE_SHARED_CORPUS_LIMIT", defaults.shared_corpus_limit, 1, 100_000),
+            shared_corpus_bytes=env_int("GETBIBLE_SHARED_CORPUS_BYTES", defaults.shared_corpus_bytes, 1, 2**50),
+            chapter_cache_bytes=env_int("GETBIBLE_CHAPTER_CACHE_BYTES", defaults.chapter_cache_bytes, 1, 2**50),
+            translation_cache_bytes=env_int("GETBIBLE_TRANSLATION_CACHE_BYTES", defaults.translation_cache_bytes, 1, 2**50),
             books_cache_limit=env_int("GETBIBLE_BOOKS_CACHE_LIMIT", defaults.books_cache_limit, 0, 10_000),
         )
 
@@ -128,7 +140,7 @@ class ServiceSettings:
     log_level: str = "INFO"
     app_log: str = ""
     trust_proxy: bool = True
-    cache_seconds: int = 300
+    cache_seconds: int = 2_592_000
     max_input_length: int = 512
     access_mode: str = "metered"
 
@@ -149,7 +161,7 @@ class ServiceSettings:
             raise ValueError(f"{self.prefix}_LOG_LEVEL is invalid.")
         if not 1 <= self.slow_request_milliseconds <= 300_000:
             raise ValueError(f"{self.prefix}_SLOW_REQUEST_MILLISECONDS is out of range.")
-        if not 0 <= self.cache_seconds <= 86_400:
+        if not 0 <= self.cache_seconds <= 31_536_000:
             raise ValueError(f"{self.prefix}_CACHE_SECONDS is out of range.")
         if not 32 <= self.max_input_length <= 4096:
             raise ValueError(f"{self.prefix}_MAX_INPUT_LENGTH is out of range.")
@@ -169,7 +181,7 @@ class ServiceSettings:
             log_level=env_str(f"{prefix}_LOG_LEVEL", defaults.log_level).upper(),
             app_log=env_str("GETBIBLE_APP_LOG", ""),
             trust_proxy=env_bool(f"{prefix}_TRUST_PROXY", True),
-            cache_seconds=env_int(f"{prefix}_CACHE_SECONDS", overrides.pop("cache_seconds", defaults.cache_seconds), 0, 86_400),
+            cache_seconds=env_int(f"{prefix}_CACHE_SECONDS", overrides.pop("cache_seconds", defaults.cache_seconds), 0, 31_536_000),
             max_input_length=env_int(f"{prefix}_MAX_INPUT_LENGTH", overrides.pop("max_input_length", defaults.max_input_length), 32, 4096),
         )
         values.update(overrides)

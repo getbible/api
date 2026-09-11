@@ -1,0 +1,745 @@
+#!/usr/bin/env python3
+"""Local, authenticated management jobs. This service never evaluates a shell.
+
+The dashboard may submit a named operation and its typed arguments. The root
+broker translates them to the same validated manager commands used by the CLI.
+Jobs outlive dashboard viewers; running jobs interrupted by a broker restart are
+reported as interrupted and are never silently replayed.
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import concurrent.futures
+from contextlib import contextmanager
+import grp
+import json
+import os
+from pathlib import Path
+import pwd
+import queue
+import re
+import secrets
+import stat
+import socket
+import socketserver
+import sqlite3
+import struct
+import subprocess
+import threading
+import time
+
+
+MAX_REQUEST = 2 * 1024 * 1024
+MAX_OUTPUT = 256 * 1024
+DOMAIN = r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?)+"
+RUNTIME_KEYS = "WORKERS|THREADS|WARM_TRANSLATIONS|DEFAULT_TRANSLATION|DEFAULT_REFERENCE|ALLOWED_TRANSLATIONS|REPOSITORY|CACHE_TTL|MEMORY_CACHE_TTL|MEMORY_MIN|MEMORY_MAX|CPU_QUOTA|WORKERS_MIN|WORKERS_MAX|THREADS_MIN|THREADS_MAX|CACHE_MEMORY_PERCENT|SHARED_CORPUS_LIMIT|CHAPTER_CACHE_LIMIT|TRANSLATION_CACHE_LIMIT|REFERENCE_CACHE_LIMIT"
+PATTERNS = {
+    "domain": DOMAIN, "endpoint": r"(?:v[0-9]+|root)",
+    "key": r"[A-Z][A-Z0-9_]*", "translation": r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}",
+    "translations": r"[A-Za-z0-9][A-Za-z0-9_, -]{0,4095}",
+    "date": r"[0-9]{4}-[0-9]{2}-[0-9]{2}", "id": r"[A-Za-z0-9_-]{1,128}",
+    "integer": r"[0-9]{1,12}", "path": r"(?:/|[A-Za-z0-9])[A-Za-z0-9_./ -]{0,4095}",
+}
+
+
+def field(name, kind="text", *, required=True, choices=None, default=None, secret=False, label=None, allow_empty=False):
+    result = {"name": name, "type": kind, "required": required, "label": label or name.replace("_", " ").title()}
+    if choices is not None:
+        result["choices"] = choices.split("|") if isinstance(choices, str) else choices
+    if default is not None:
+        result["default"] = default
+    if secret:
+        result["secret"] = True
+    if allow_empty:
+        result["allow_empty"] = True
+    return result
+
+
+D = field("domain", "domain")
+E = field("endpoint", "endpoint")
+EO = field("endpoint", "endpoint", required=False)
+OPS = {}
+
+
+def operation(name, title, command, fields=(), *, category="Domains", mutates=True, destructive=False, secret_output=False):
+    OPS[name] = {"id": name, "name": name, "title": title, "category": category,
+                 "fields": list(fields), "mutates": mutates, "destructive": destructive,
+                 "secret_output": secret_output, "_command": command}
+
+
+operation("domain.status", "Domain status", ["status", "{domain}"], [D], mutates=False)
+operation("domain.apply", "Apply domain configuration", ["apply", "{domain}"], [D])
+operation("domain.update", "Update domain services", ["update", "{domain}"], [D])
+operation("domain.verify", "Verify origin and public route", ["verify", "{domain}"], [D], mutates=False)
+operation("domain.go_live", "Activate a staged domain", ["go-live", "{domain}", ("--cert", "method")], [D, field("method", choices="auto|http|dns-cloudflare", default="auto")], destructive=True)
+operation("domain.stage", "Stage a domain", ["stage", "{domain}"], [D], destructive=True)
+operation("domain.remove", "Remove a domain", ["remove", "{domain}", ("--purge", "purge")], [D, field("purge", "boolean", default=False)], destructive=True)
+operation("domain.deploy_static", "Deploy a static domain", ["deploy", "static", "--domain", "{domain}", "--version", "{endpoint}", "--repo", "{repository}", ("--ref", "ref"), ("--path", "source_path"), ("--extensions", "extensions"), ("--access", "access"), ("--schedule", "schedule"), "--staged"], [D, E, field("repository"), field("ref", default="master"), field("source_path", default="."), field("extensions", default="json,sha,txt"), field("access", choices="open|metered|token", default="metered"), field("schedule", choices="daily|weekly|monthly", default="monthly")])
+operation("domain.deploy_runtime", "Deploy a runtime domain", ["deploy", "runtime", "--domain", "{domain}", "--kind", "{kind}", ("--version", "version"), ("--root", "root"), ("--repository", "repository"), ("--access", "access"), ("--warm", "warm"), ("--python", "python"), "--staged"], [D, field("kind", choices="query|search"), field("version", "endpoint", default="v2"), field("root", "boolean", default=False), field("repository", "path", required=False), field("access", choices="open|metered|token", default="metered"), field("warm", "translations", default="kjv"), field("python", default="auto")])
+operation("endpoint.add_static", "Add a static endpoint", ["version", "add", "{domain}", "{endpoint}", "--repo", "{repository}", ("--ref", "ref"), ("--path", "source_path")], [D, E, field("repository"), field("ref", default="master"), field("source_path", default=".")])
+operation("endpoint.add_runtime", "Add a runtime endpoint", ["version", "add", "{domain}", "{endpoint}", ("--repository", "repository"), ("--warm", "warm"), ("--python", "python")], [D, E, field("repository", "path", required=False), field("warm", "translations", default="kjv"), field("python", default="auto")])
+operation("endpoint.change_source", "Change a static repository", ["version", "change", "{domain}", "{endpoint}", ("--repo", "repository"), ("--ref", "ref"), ("--path", "source_path")], [D, E, field("repository", required=False), field("ref", required=False), field("source_path", required=False)])
+operation("endpoint.remove", "Remove an endpoint", ["version", "remove", "{domain}", "{endpoint}"], [D, E], destructive=True)
+operation("endpoint.default", "Select the default runtime endpoint", ["version", "default", "{domain}", "{endpoint}"], [D, E])
+operation("endpoint.sync", "Synchronize repository files", ["sync", "{domain}", "{endpoint?}", ("--force", "force")], [D, EO, field("force", "boolean", default=False)])
+operation("endpoint.deploy_key", "Show repository deploy key", ["deploy-key", "{domain}", "{endpoint}"], [D, E], mutates=False)
+operation("endpoint.repo_access", "Test repository access", ["repo-access", "{domain}", "{endpoint}"], [D, E], mutates=False)
+operation("endpoint.filetypes", "Set served static file types", ["filetypes", "{domain}", "{extensions}"], [D, field("extensions", default="json,sha,txt")])
+operation("access.mode", "Change API access mode", ["access", "{domain}", "{mode}"], [D, field("mode", choices="open|metered|token")], category="Access", destructive=True)
+operation("access.limits", "Configure anonymous origin limits", ["limits", "{domain}", ("--rate", "rate"), ("--burst", "burst"), ("--hour", "hour"), ("--day", "day"), ("--conn", "connections")], [D] + [field(n, "integer", required=False) for n in ("rate", "burst", "hour", "day", "connections")], category="Access")
+operation("token.list", "List API tokens", ["token", "{domain}", "list"], [D], category="Access", mutates=False)
+operation("token.add", "Issue an API token", ["token", "{domain}", "add", "{label}", ("--expires", "expires")], [D, field("label"), field("expires", "date", required=False)], category="Access", secret_output=True)
+operation("token.revoke", "Revoke an API token", ["token", "{domain}", "revoke", "{id}"], [D, field("id", "id")], category="Access", destructive=True)
+for action in ("update", "rollback"):
+    operation("runtime." + action, action.title() + " runtime endpoint", ["runtime", "{domain}", "{endpoint?}", action] + ([("--python", "python")] if action == "update" else []), [D, EO] + ([field("python", required=False)] if action == "update" else []), category="Runtime", destructive=action == "rollback")
+operation("runtime.redeploy", "Redeploy runtime services", ["runtime", "{domain}", "redeploy"], [D], category="Runtime")
+operation("runtime.set", "Set runtime endpoint configuration", ["runtime", "{domain}", "{endpoint?}", "set", "{key}", "{value}"], [D, EO, field("key", "key", choices=RUNTIME_KEYS), field("value", allow_empty=True)], category="Runtime")
+operation("runtime.versions", "List prepared Python versions", ["runtime", "versions"], category="Runtime", mutates=False)
+operation("runtime.cache", "Manage translation memory", ["runtime", "{domain}", "cache", "{endpoint}", "{action}", "{translation?}"], [D, E, field("action", choices="info|warm|drop|reload|refresh-source"), field("translation", "translation", required=False)], category="Runtime")
+operation("resources.show", "Show resource allocation", ["resources", "show", "--json"], category="Runtime", mutates=False)
+operation("resources.apply", "Apply resource allocation", ["resources", "apply"], category="Runtime")
+for action in ("status", "renew"):
+    operation("certificate." + action, action.title() + " certificate", ["cert", "{domain}", action], [D], category="Certificates", mutates=action != "status")
+operation("certificate.issue", "Issue a certificate", ["cert", "{domain}", "issue", ("--method", "method")], [D, field("method", choices="auto|http|dns-cloudflare", default="auto")], category="Certificates")
+for action in ("show", "publish"):
+    operation("pages." + action, action.title() + " domain pages", ["pages", "{domain}", action], [D], category="Pages", mutates=action != "show")
+for kind in ("docs", "openapi"):
+    operation("pages." + kind, "Configure " + kind, ["pages", "{domain}", kind, "{endpoint?}", "{action}", "{source?}"], [D, EO if kind == "docs" else E, field("action", choices="generated|custom|none|repository|from"), field("source", "path", required=False)], category="Pages")
+operation("pages.write", "Edit custom page or OpenAPI content", ["pages", "{domain}", "{kind}", "{endpoint?}", "from", "{source}"], [D, field("kind", choices="docs|openapi"), EO, field("content", "multiline")], category="Pages")
+operation("pages.upload_icon", "Upload a favicon or logo", ["{kind}", "{source}"], [field("domain", "domain", required=False), field("kind", choices="favicon|logo"), field("filename"), field("content", "file")], category="Pages")
+for kind in ("favicon", "logo"):
+    operation("pages." + kind, "Set domain " + kind, ["pages", "{domain}", kind, "{source}"], [D, field("source", "path", default="default")], category="Pages")
+    operation("system." + kind, "Set system " + kind, [kind, "{source}"], [field("source", "path", default="default")], category="Pages")
+operation("system.icons", "Show system icons", ["icons"], category="Pages", mutates=False)
+operation("settings.show", "Show effective settings", ["settings", "environment"], category="Settings", mutates=False)
+operation("settings.set", "Set a system configuration value", ["settings", "set", "{key}", "{value}"], [field("key", "key"), field("value", allow_empty=True)], category="Settings")
+operation("telegram.configure", "Configure Telegram delivery", ["telegram", "configure", "--chat", "{chat}", "--token-stdin"], [field("chat"), field("secret", secret=True)], category="Settings")
+for action in ("test", "disable"):
+    operation("telegram." + action, action.title() + " Telegram notifications", ["telegram", action], category="Settings", destructive=action == "disable")
+operation("cloudflare.token", "Set Cloudflare token", ["cloudflare", "token-stdin"], [field("secret", secret=True)], category="Cloudflare")
+for action in ("verify", "refresh-ips"):
+    operation("cloudflare." + action.replace("-", "_"), action.replace("-", " ").title(), ["cloudflare", action], category="Cloudflare", mutates=action != "verify")
+for action in ("check", "apply", "dns", "zone"):
+    operation("cloudflare." + action, "Cloudflare " + action, ["cloudflare", action, "{domain}"], [D], category="Cloudflare", mutates=action == "apply")
+for action, choices in (("mode", "off|dns|proxied"), ("cache", "bypass|respect"), ("features", "free|paid"), ("bot-fight", "on|off"), ("origin-pulls", "on|off")):
+    operation("cloudflare." + action.replace("-", "_"), "Set Cloudflare " + action.replace("-", " "), ["cloudflare", action, "{domain}", "{value}"], [D, field("value", choices=choices)], category="Cloudflare", destructive=True)
+operation("cloudflare.zone_settings", "Change zone-wide settings", ["cloudflare", "zone-settings", "{domain}"] + [("--" + key.replace("_", "-"), key) for key in ("cache_level", "http3", "brotli", "min_tls", "always_https", "tls13")], [D, field("cache_level", choices="basic|simplified|aggressive", required=False), field("http3", choices="on|off", required=False), field("brotli", choices="on|off", required=False), field("min_tls", choices="1.0|1.1|1.2|1.3", required=False), field("always_https", choices="on|off", required=False), field("tls13", choices="on|off|zrt", required=False)], category="Cloudflare", destructive=True)
+operation("logs.view", "View endpoint diagnostics", ["logs", "{domain}", "{kind}", "{endpoint?}", ("--lines", "lines")], [D, field("kind", choices="access|error|app|journal", default="error"), EO, field("lines", "integer", default="200")], category="Diagnostics", mutates=False)
+operation("logs.archives", "List retained log archives", ["logs", "archives", "{domain}"], [D], category="Diagnostics", mutates=False)
+operation("logs.rotate", "Rotate diagnostics", ["logs", "rotate"], category="Diagnostics")
+operation("analytics", "Traffic report", ["analytics", ("--window", "window"), ("--domain", "domain"), "--json"], [field("window", choices="today|24h|7d|30d|all", default="24h"), field("domain", "domain", required=False)], category="Diagnostics", mutates=False)
+operation("system.doctor", "Check this host", ["doctor"], category="System", mutates=False)
+operation("system.selftest", "Run manager tests", ["selftest"], category="System")
+operation("system.install_deps", "Install native host dependencies", ["install-deps"], category="System", destructive=True)
+operation("system.self_update", "Update native manager checkout", ["self-update"], category="System", destructive=True)
+operation("system.update", "Apply all configured domains", ["update"], category="System")
+operation("dashboard.status", "Dashboard status", ["dashboard", "status"], category="Dashboard", mutates=False)
+operation("dashboard.enable", "Configure dashboard domain", ["dashboard", "enable", "{domain}"], [D], category="Dashboard", destructive=True)
+operation("dashboard.disable", "Disable dashboard access", ["dashboard", "disable"], category="Dashboard", destructive=True)
+operation("dashboard.password", "Set dashboard password and revoke sessions", ["dashboard", "password", "set", "--stdin"], [field("secret", secret=True)], category="Dashboard", destructive=True)
+operation("dashboard.sessions", "List dashboard sessions", ["dashboard", "sessions"], category="Dashboard", mutates=False)
+operation("dashboard.revoke", "Revoke dashboard session", ["dashboard", "sessions", "revoke", "{id}"], [field("id", "id")], category="Dashboard", destructive=True)
+operation("dashboard.blocks", "List blocked dashboard addresses", ["dashboard", "blocks"], category="Dashboard", mutates=False)
+# Unblocking deliberately remains CLI-only; a browser session must never
+# override the explicitly requested out-of-band lockout recovery boundary.
+
+
+def validate_arguments(spec, supplied):
+    if not isinstance(supplied, dict):
+        raise ValueError("arguments must be an object")
+    fields = {item["name"]: item for item in spec["fields"]}
+    if supplied.keys() - fields.keys():
+        raise ValueError("Unknown operation arguments")
+    result = {}
+    for name, definition in fields.items():
+        value = supplied.get(name, definition.get("default", ""))
+        if value in ("", None) and not definition["required"]:
+            continue
+        if definition["type"] == "boolean":
+            if not isinstance(value, bool):
+                raise ValueError(f"{name} must be a boolean")
+            result[name] = value
+            continue
+        if not isinstance(value, (str, int)) or isinstance(value, bool):
+            raise ValueError(f"{name} must be text")
+        value = str(value)
+        if not value and definition["required"] and not definition.get("allow_empty"):
+            raise ValueError(f"{name} is required")
+        multiline = definition["type"] == "multiline"
+        maximum = 1500000 if definition["type"] == "file" else 131072 if multiline else 8192
+        if len(value) > maximum or any((ord(c) < 32 and not (multiline and c in "\r\n\t")) or ord(c) == 127 for c in value):
+            raise ValueError(f"{name} contains invalid characters or is too long")
+        if value.startswith("-") and name not in ("chat", "value", "secret"):
+            raise ValueError(f"{name} cannot start with a dash")
+        pattern = PATTERNS.get(definition["type"])
+        if pattern and not re.fullmatch(pattern, value):
+            raise ValueError(f"Invalid {name}")
+        if "choices" in definition and value not in definition["choices"]:
+            raise ValueError(f"Unsupported {name}")
+        result[name] = value
+    return result
+
+
+def command_arguments(spec, values):
+    command = []
+    for part in spec["_command"]:
+        if isinstance(part, tuple):
+            flag, key = part
+            value = values.get(key)
+            if value is True:
+                command.append(flag)
+            elif value not in (None, False, ""):
+                command.extend((flag, str(value)))
+        elif part.startswith("{"):
+            key = part[1:-1].rstrip("?")
+            if key in values:
+                command.append(str(values[key]))
+        else:
+            command.append(part)
+    return command + ["--yes"]
+
+
+def read_config(path):
+    values = {}
+    try:
+        for line in Path(path).read_text().splitlines():
+            key, sep, value = line.partition("=")
+            if sep and re.fullmatch(r"[A-Z][A-Z0-9_]*", key):
+                values[key] = value
+    except FileNotFoundError:
+        pass
+    return values
+
+
+def redact(text):
+    text = re.sub(r"\bgb[a-z2-7]{52}\b", "[bearer token hidden]", text)
+    text = re.sub(r"(?i)(Bearer\s+)\S+", r"\1[hidden]", text)
+    return re.sub(r"(?i)(token|password|secret)([\"']?\s*[:=]\s*[\"']?)([^\s\"']+)", r"\1\2[hidden]", text)
+
+
+class Broker:
+    def __init__(self, directory, manager, prefix="", runtime_control=None):
+        self.directory = Path(directory)
+        self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(self.directory, 0o700)
+        self.manager, self.prefix = str(manager), prefix
+        self.runtime_control = runtime_control or str(Path(manager).parent / "../lib/getbible/getbible-runtime-control")
+        self.database = self.directory / "jobs.sqlite3"
+        self.mutex = threading.RLock()
+        self.work = queue.Queue(maxsize=64)
+        self.secrets = {}
+        self.output_secrets = {}
+        self.storage_cache = (0, None)
+        self.inventory_cache = {}
+        self.inventory_lock = threading.Lock()
+        with self.connect() as db:
+            db.executescript("""
+                CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, operation TEXT NOT NULL,
+                    arguments TEXT NOT NULL, actor TEXT NOT NULL, status TEXT NOT NULL,
+                    created REAL NOT NULL, started REAL, finished REAL, exit_code INTEGER,
+                    output TEXT NOT NULL DEFAULT '');
+                CREATE INDEX IF NOT EXISTS jobs_created ON jobs(created);
+            """)
+            db.execute("UPDATE jobs SET status='interrupted',finished=?,output=output || '\nBroker restarted; inspect current system state before retrying.' WHERE status IN ('running','queued')", (time.time(),))
+        os.chmod(self.database, 0o600)
+        self.worker = threading.Thread(target=self.run_jobs, daemon=True, name="management-jobs")
+        self.worker.start()
+
+    def audit(self, event, **fields):
+        """Administrative events enter the same collector as request events."""
+        path = Path(self.prefix + "/var/log/getbible/management/app/admin.log")
+        record = {"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "event": event, **fields}
+        try:
+            descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o640)
+            try:
+                os.write(descriptor, (json.dumps(record, ensure_ascii=False) + "\n").encode())
+            finally:
+                os.close(descriptor)
+        except OSError:
+            # The durable job record still records who performed the action.
+            # Never substitute command arguments or secret output in diagnostics.
+            print(json.dumps({"event": "management.audit_delivery_failed", "job_id": fields.get("job_id")}), flush=True)
+
+    @contextmanager
+    def connect(self):
+        db = sqlite3.connect(self.database, timeout=15)
+        db.row_factory = sqlite3.Row
+        try:
+            yield db
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    def catalogue(self):
+        catalogue = json.loads(json.dumps([{key: value for key, value in spec.items() if not key.startswith("_")} for spec in OPS.values()]))
+        for operation in catalogue:
+            if operation["id"] == "settings.set":
+                try:
+                    operation["fields"][0]["choices"] = sorted(self.setting_keys())
+                except ValueError:
+                    operation["fields"][0]["choices"] = []
+        return catalogue
+
+    def setting_keys(self):
+        config_path = Path(self.manager).resolve().parent / "src/lib/config.sh"
+        try:
+            source = config_path.read_text()
+            array = source.split("GB_GLOBAL_DEFAULTS=(", 1)[1].split("\n)", 1)[0]
+            return {key for key in re.findall(r'^\s*"([A-Z][A-Z0-9_]*)=', array, re.MULTILINE) if key != "GB_SCHEMA" and not re.search(r"(?:^|_)TOKEN$|PASSWORD|SECRET|COOKIE", key)}
+        except (OSError, IndexError):
+            raise ValueError("The manager configuration catalogue is unavailable") from None
+
+    def submit(self, parameters, actor):
+        if not isinstance(parameters, dict) or parameters.keys() - {"operation", "arguments", "confirm", "actor"}:
+            raise ValueError("Invalid job submission")
+        name = parameters.get("operation")
+        if name not in OPS:
+            raise ValueError("Unknown management operation")
+        spec = OPS[name]
+        values = validate_arguments(spec, parameters.get("arguments", {}))
+        self.validate_file_access(name, values)
+        if spec["destructive"] and parameters.get("confirm") is not True:
+            raise ValueError("This operation requires explicit confirmation")
+        job = secrets.token_urlsafe(18)
+        safe = {key: ("[hidden]" if key == "secret" else f"[{len(value)} characters of custom content]" if key == "content" else redact(value) if isinstance(value, str) else value) for key, value in values.items()}
+        with self.mutex:
+            if self.work.full():
+                raise ValueError("Management queue is full; wait for an existing job")
+            if "secret" in values:
+                self.secrets[job] = values["secret"]
+            with self.connect() as db:
+                db.execute("INSERT INTO jobs(id,operation,arguments,actor,status,created) VALUES(?,?,?,?,?,?)", (job, name, json.dumps(safe), actor, "queued", time.time()))
+            self.work.put((job, spec, values))
+        self.audit("management.queued", job_id=job, operation=name, actor=actor)
+        return {"job_id": job, "id": job, "status": "queued"}
+
+    def safe_import(self, value, directory=False):
+        candidate = Path(value)
+        roots = [Path(self.prefix + "/var/lib/getbible/imports"), Path(self.prefix + "/var/www/getbible")]
+        if directory:
+            roots.append(Path(self.prefix + "/srv/getbible"))
+        if not candidate.is_absolute() or ".." in candidate.parts:
+            raise ValueError("Choose a file from the managed import directory")
+        try:
+            # Follow no operator-controlled symlink at any point. A symlink
+            # under a public tree must not turn the broker into a root reader.
+            for parent in [candidate, *candidate.parents]:
+                if not directory and parent.is_symlink():
+                    raise ValueError("Import paths cannot contain symlinks")
+            resolved = candidate.resolve(strict=True)
+            if not any(resolved.is_relative_to(root.resolve()) for root in roots):
+                raise ValueError("File is outside managed import/public roots")
+            mode = resolved.stat().st_mode
+            if directory and not stat.S_ISDIR(mode) or not directory and not stat.S_ISREG(mode):
+                raise ValueError("Choose a regular file or repository directory")
+        except OSError as exc:
+            raise ValueError("The selected import is unavailable") from exc
+        # A repository's publication symlink must remain the selected source;
+        # pinning it to one generation would hide later monthly publications.
+        return str(candidate if directory else resolved)
+
+    def validate_file_access(self, operation_id, values):
+        if operation_id == "settings.set":
+            key = values.get("key", "")
+            if key not in self.setting_keys():
+                raise ValueError("Use the dedicated credential operation for secrets; choose a documented system setting")
+        if operation_id in {"pages.docs", "pages.openapi"}:
+            if values["action"] == "from":
+                values["source"] = self.safe_import(values.get("source", ""))
+            elif values["action"] == "repository" and "source" in values:
+                path = Path(values["source"])
+                if path.is_absolute() or ".." in path.parts:
+                    raise ValueError("Repository content paths must be relative")
+        if operation_id in {"pages.favicon", "pages.logo", "system.favicon", "system.logo"}:
+            if values["source"] not in {"default", "none"}:
+                values["source"] = self.safe_import(values["source"])
+        if operation_id in {"domain.deploy_runtime", "endpoint.add_runtime"} and values.get("repository"):
+            values["repository"] = self.safe_import(values["repository"], directory=True)
+        if operation_id == "runtime.set" and values.get("key") == "REPOSITORY":
+            values["value"] = self.safe_import(values["value"], directory=True)
+        if operation_id == "settings.set" and values.get("key") == "LOGO_FILE" and values.get("value"):
+            values["value"] = self.safe_import(values["value"])
+        if operation_id == "pages.write" and values["kind"] == "openapi":
+            if not values.get("endpoint"):
+                raise ValueError("An OpenAPI endpoint is required")
+            try:
+                if not isinstance(json.loads(values["content"]), dict):
+                    raise ValueError("OpenAPI must be a JSON object")
+            except json.JSONDecodeError as exc:
+                raise ValueError("OpenAPI must be valid JSON") from exc
+        if operation_id == "pages.upload_icon":
+            filename = values["filename"]
+            extensions = {"favicon": {"ico", "png", "svg", "gif"}, "logo": {"png", "jpg", "jpeg", "svg", "gif", "webp"}}
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", filename) or filename.rsplit(".", 1)[-1].lower() not in extensions[values["kind"]]:
+                raise ValueError("Choose a supported favicon or logo file")
+            try:
+                data = base64.b64decode(values["content"], validate=True)
+            except ValueError as exc:
+                raise ValueError("The uploaded file must be valid base64") from exc
+            if not data or len(data) > 1024 * 1024:
+                raise ValueError("Uploaded icons must be between 1 byte and 1 MiB")
+
+    def run_jobs(self):
+        while True:
+            job, spec, values = self.work.get()
+            try:
+                self.run_job(job, spec, values)
+            except Exception:
+                with self.connect() as db:
+                    db.execute("UPDATE jobs SET status='failed',finished=?,output=output || '\nManagement worker failed; inspect diagnostics.' WHERE id=?", (time.time(), job))
+            finally:
+                self.secrets.pop(job, None)
+                if spec["id"] in {"pages.write", "pages.upload_icon"} and values.get("source"):
+                    candidate = Path(values["source"])
+                    if candidate.parent == Path(self.prefix + "/var/lib/getbible/imports") and candidate.name.startswith(job + "."):
+                        candidate.unlink(missing_ok=True)
+                values.pop("secret", None)
+                values.pop("content", None)
+                self.work.task_done()
+
+    def run_job(self, job, spec, values):
+        self.validate_file_access(spec["id"], values)
+        content_path = None
+        if spec["id"] in {"pages.write", "pages.upload_icon"}:
+            directory = Path(self.prefix + "/var/lib/getbible/imports")
+            directory.mkdir(mode=0o750, parents=True, exist_ok=True)
+            extension = values["filename"].rsplit(".", 1)[-1].lower() if spec["id"] == "pages.upload_icon" else "json" if values["kind"] == "openapi" else "html"
+            content_path = directory / (job + "." + extension)
+            descriptor = os.open(content_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(base64.b64decode(values["content"], validate=True) if spec["id"] == "pages.upload_icon" else values["content"].encode())
+            values["source"] = str(content_path)
+        command = [self.manager, *command_arguments(spec, values)]
+        if spec["id"] == "pages.upload_icon" and values.get("domain"):
+            command = [self.manager, "pages", values["domain"], values["kind"], values["source"], "--yes"]
+        with self.connect() as db:
+            db.execute("UPDATE jobs SET status='running',started=? WHERE id=?", (time.time(), job))
+        env = {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8", "GB_ADMIN_JOB_ID": job}
+        if self.prefix:
+            env["GB_PREFIX"] = self.prefix
+        # No descriptors, manager lock, arbitrary environment, or shell from
+        # the web process crosses this privilege boundary.
+        child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, close_fds=True)
+        if "secret" in values:
+            child.stdin.write((values["secret"] + "\n").encode())
+        child.stdin.close()
+        lines, size, last_flush = [], 0, 0.0
+        secret_result = []
+        while True:
+            raw = child.stdout.readline(MAX_OUTPUT + 1)
+            if not raw:
+                break
+            text = raw.decode("utf-8", "replace")
+            if values.get("secret"):
+                text = text.replace(values["secret"], "[hidden]")
+            if spec["secret_output"]:
+                if sum(map(len, secret_result)) < MAX_OUTPUT:
+                    secret_result.append(text)
+                text = redact(text)
+            else:
+                text = redact(text)
+            # Keep the most recent diagnostic output, with an explicit notice.
+            lines.append(text)
+            size += len(text)
+            while size > MAX_OUTPUT and lines:
+                size -= len(lines.pop(0))
+            if time.monotonic() - last_flush > 0.5:
+                with self.connect() as db:
+                    db.execute("UPDATE jobs SET output=? WHERE id=?", ("".join(lines), job))
+                last_flush = time.monotonic()
+        child.stdout.close()
+        exit_code = child.wait()
+        if content_path:
+            content_path.unlink(missing_ok=True)
+        if spec["secret_output"] and exit_code == 0:
+            with self.mutex:
+                self.output_secrets[job] = (time.time() + 300, "".join(secret_result))
+        with self.connect() as db:
+            db.execute("UPDATE jobs SET status=?,finished=?,exit_code=?,output=? WHERE id=?", ("succeeded" if exit_code == 0 else "failed", time.time(), exit_code, "".join(lines), job))
+        self.audit("management.completed", job_id=job, operation=spec["id"], exit_code=exit_code)
+
+    def job(self, job_id, actor, consume_secret=False):
+        if not isinstance(job_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", job_id):
+            raise ValueError("Invalid job id")
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if row is None:
+            raise ValueError("Unknown job")
+        result = dict(row)
+        result["job_id"] = result["id"]
+        result["arguments"] = json.loads(result["arguments"])
+        same_actor = result["actor"] == actor
+        if not same_actor:
+            try:
+                original_actor, current_actor = json.loads(result["actor"]), json.loads(actor)
+                same_actor = bool(original_actor.get("session_id")) and original_actor.get("session_id") == current_actor.get("session_id") and original_actor.get("uid") == current_actor.get("uid")
+            except (ValueError, TypeError, AttributeError):
+                pass
+        with self.mutex:
+            pending_secret = self.output_secrets.get(job_id)
+            result["secret_available"] = bool(same_actor and pending_secret and pending_secret[0] > time.time())
+        if consume_secret and same_actor:
+            with self.mutex:
+                value = self.output_secrets.pop(job_id, None)
+            if value and value[0] > time.time():
+                result["one_time_output"] = value[1]
+                result["secret_available"] = False
+        return result
+
+    def jobs(self):
+        with self.connect() as db:
+            rows = db.execute("SELECT id,operation,actor,status,created,started,finished,exit_code FROM jobs ORDER BY created DESC LIMIT 100").fetchall()
+        return [dict(row) for row in rows]
+
+    def endpoints(self):
+        rows = []
+        root = Path(self.prefix + "/etc/getbible/endpoints")
+        safe_keys = {"DOMAIN", "TYPE", "KIND", "LIVE", "ACCESS_MODE", "DEFAULT_VERSION", "RATE_PER_SECOND", "RATE_BURST", "QUOTA_HOUR", "QUOTA_DAY", "CONN_LIMIT", "CACHE_TTL", "CLOUDFLARE_MODE", "CLOUDFLARE_CACHE"}
+        for path in sorted(root.glob("*/endpoint.conf")):
+            config = read_config(path)
+            name = path.parent.name
+            if not re.fullmatch(DOMAIN, name):
+                continue
+            versions = []
+            for version in sorted((path.parent / "versions").glob("*.conf")):
+                values = read_config(version)
+                # A positive allowlist excludes credential fields by design.
+                allowed = {"LABEL", "VERSION", "APP_VERSION", "REPOSITORY", "REPO_URL", "REPO_REF", "REPO_PATH", "SCHEDULE", "WORKERS", "THREADS", "WARM_TRANSLATIONS", "CACHE_TTL", "PYTHON_VERSION", "DEFAULT_TRANSLATION", "DEFAULT_REFERENCE"}
+                versions.append({"label": version.stem, "settings": {k: v for k, v in values.items() if k in allowed}})
+            for version in versions:
+                values = version["settings"]
+                state_paths = list(Path(self.prefix + "/var/lib/getbible/sync").glob(f"*/state/{version['label']}.conf"))
+                state = {}
+                # State belongs to this domain's explicit sync identity.
+                for state_path in state_paths:
+                    if state_path.parent.parent.name == config.get("SYNC_USER"):
+                        state = read_config(state_path)
+                        break
+                rows.append({"domain": name, "label": version["label"], "type": config.get("TYPE"), "kind": config.get("KIND", "static"), "live": config.get("LIVE") == "true", "repository": values.get("REPOSITORY", values.get("REPO_URL")), "branch": values.get("REPO_REF"), "last_check": state.get("LAST_CHECK"), "last_sync": state.get("LAST_SYNC"), "last_error": state.get("LAST_ERROR"), "settings": {k: v for k, v in config.items() if k in safe_keys}, "endpoint_settings": values})
+        return {"endpoints": rows}
+
+    def storage(self, refresh=False):
+        now = time.monotonic()
+        if not refresh and self.storage_cache[1] is not None and now - self.storage_cache[0] < 60:
+            return self.storage_cache[1]
+        roots = {"files": "/srv/getbible", "runtime": "/opt/getbible", "state": "/var/lib/getbible", "cache": "/var/cache/getbible", "nginx_cache": "/var/cache/nginx/getbible", "logs": "/var/log/getbible", "pages": "/var/www/getbible", "backups": "/var/backups/getbible"}
+        seen = set()
+        def size(path):
+            total = 0
+            try:
+                for current, dirs, files in os.walk(path, followlinks=False):
+                    dirs[:] = [name for name in dirs if not Path(current, name).is_symlink()]
+                    for name in files:
+                        try:
+                            stat = Path(current, name).lstat()
+                            identity = (stat.st_dev, stat.st_ino)
+                            if identity not in seen:
+                                seen.add(identity)
+                                total += stat.st_blocks * 512
+                        except OSError:
+                            pass
+            except OSError:
+                pass
+            return total
+        items = []
+        for category, relative in roots.items():
+            path = Path(self.prefix + relative)
+            if not path.exists():
+                continue
+            for child in sorted(path.iterdir()):
+                if child.is_symlink():
+                    continue
+                if child.is_dir():
+                    used = size(child)
+                else:
+                    stat = child.stat()
+                    identity = (stat.st_dev, stat.st_ino)
+                    used = 0 if identity in seen else stat.st_blocks * 512
+                    seen.add(identity)
+                items.append({"category": category, "name": child.name, "path": relative + "/" + child.name, "allocated_bytes": used})
+        disk = os.statvfs(self.prefix or "/")
+        settings = read_config(self.prefix + "/etc/getbible/getbible.conf")
+        settings.update(read_config(self.prefix + "/run/getbible/environment.conf"))
+        maximum = settings.get("STORAGE_MAX_GIB", "0")
+        try:
+            limit = int(float(maximum) * 1024**3)
+        except ValueError:
+            limit = 0
+        result = {"components": [{"name": item["name"], "kind": item["category"], "bytes": item["allocated_bytes"], "path": item["path"]} for item in items], "total_bytes": sum(item["allocated_bytes"] for item in items), "limit_bytes": limit, "filesystem_available_bytes": disk.f_bavail * disk.f_frsize, "filesystem_total_bytes": disk.f_blocks * disk.f_frsize, "limit_type": "application admission policy; not a filesystem quota", "sampled_at": time.time()}
+        self.storage_cache = (now, result)
+        return result
+
+    def translations(self, parameters):
+        endpoints = [row for row in self.endpoints()["endpoints"] if row["type"] == "runtime" and (not parameters.get("domain") or row["domain"] == parameters["domain"]) and (not parameters.get("label", parameters.get("endpoint")) or row["label"] == parameters.get("label", parameters.get("endpoint")))]
+        def inspect(row):
+            try:
+                return self.translation_endpoint(row["domain"], row["label"])
+            except Exception:
+                return {"domain": row["domain"], "label": row["label"], "kind": row["kind"], "workers": [], "complete": False, "errors": ["Runtime cache information is temporarily unavailable"]}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            return {"endpoints": list(pool.map(inspect, endpoints))}
+
+    def translation_endpoint(self, domain, endpoint):
+        if not re.fullmatch(DOMAIN, domain) or not re.fullmatch(PATTERNS["endpoint"], endpoint):
+            raise ValueError("A valid runtime domain and endpoint are required")
+        domain_config = read_config(self.prefix + f"/etc/getbible/endpoints/{domain}/endpoint.conf")
+        if domain_config.get("TYPE") != "runtime":
+            raise ValueError("A runtime domain is required")
+        command = [self.runtime_control, "--runtime-root", self.prefix + "/opt/getbible", "--cache-root", self.prefix + "/var/cache/getbible", "--domain", domain, "--kind", domain_config.get("KIND", ""), "--label", endpoint, "--timeout", "10", "info"]
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=15, close_fds=True)
+            if result.returncode:
+                raise ValueError("Runtime cache information is temporarily unavailable")
+            report = json.loads(result.stdout)
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            report = {"domain": domain, "label": endpoint, "kind": domain_config.get("KIND"), "workers": [], "complete": False, "errors": ["Runtime cache information is temporarily unavailable"]}
+        settings = read_config(self.prefix + f"/etc/getbible/endpoints/{domain}/versions/{endpoint}.conf")
+        try:
+            report["available_translations"] = self.translation_inventory(settings.get("REPOSITORY", ""), settings.get("APP_VERSION", endpoint))
+        except OSError:
+            report["available_translations"] = []
+            report["inventory_error"] = "The configured local repository is unavailable"
+        return report
+
+    def translation_inventory(self, repository, version):
+        """Measure directory entries only; never parse or validate corpus data."""
+        if not repository or not re.fullmatch(r"v[1-9][0-9]*", version):
+            return []
+        path = (Path(repository) / version).resolve(strict=True)
+        metadata = path.stat()
+        key = (str(path), metadata.st_mtime_ns)
+        with self.inventory_lock:
+            if key in self.inventory_cache:
+                return self.inventory_cache[key]
+            rows = []
+            for directory in sorted(path.iterdir()):
+                if not directory.is_dir() or directory.is_symlink() or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", directory.name) or not (directory / "books.json").is_file():
+                    continue
+                seen = set()
+                allocated = logical = files = 0
+                def account(file):
+                    nonlocal allocated, logical, files
+                    try:
+                        item = file.lstat()
+                    except FileNotFoundError:
+                        return
+                    identity = (item.st_dev, item.st_ino)
+                    if stat.S_ISREG(item.st_mode) and identity not in seen:
+                        seen.add(identity)
+                        allocated += item.st_blocks * 512
+                        logical += item.st_size
+                        files += 1
+                for current, children, names in os.walk(directory, followlinks=False):
+                    children[:] = [name for name in children if not Path(current, name).is_symlink()]
+                    for name in names:
+                        account(Path(current, name))
+                for extension in ("json", "sha", "json.gz", "json.br"):
+                    account(path / (directory.name + "." + extension))
+                rows.append({"translation": directory.name, "allocated_bytes": allocated, "logical_bytes": logical, "files": files, "path": str(directory)})
+            # Keep only a small number of publication inventories. The immutable
+            # path changes at publication, so an old generation never stays live.
+            if len(self.inventory_cache) >= 8:
+                self.inventory_cache.pop(next(iter(self.inventory_cache)))
+            self.inventory_cache[key] = rows
+            return rows
+
+    def dispatch(self, request, uid):
+        with self.mutex:
+            for job_id, (expires, _) in list(self.output_secrets.items()):
+                if expires <= time.time():
+                    self.output_secrets.pop(job_id, None)
+        if not isinstance(request, dict) or request.keys() - {"id", "method", "params"}:
+            raise ValueError("Invalid broker request")
+        method, params = request.get("method"), request.get("params", {})
+        if not isinstance(params, dict):
+            raise ValueError("params must be an object")
+        actor_data = params.get("actor", {})
+        if not isinstance(actor_data, dict) or actor_data.keys() - {"session_id", "ip"}:
+            raise ValueError("Invalid actor")
+        if any(not isinstance(v, str) or len(v) > 128 or any(ord(c) < 32 for c in v) for v in actor_data.values()):
+            raise ValueError("Invalid actor")
+        actor = json.dumps({"uid": uid, **actor_data}, sort_keys=True)
+        if method == "operations":
+            return self.catalogue()
+        if method == "submit":
+            return self.submit(params, actor)
+        if method == "job":
+            return self.job(params.get("job_id", params.get("id")), actor, params.get("consume_secret") is True)
+        if method == "jobs":
+            return self.jobs()
+        if method == "endpoints":
+            return self.endpoints()
+        if method == "storage":
+            return self.storage(params.get("refresh") is True)
+        if method == "translations":
+            return self.translations(params)
+        raise ValueError("Unknown broker method")
+
+
+class RequestHandler(socketserver.StreamRequestHandler):
+    def handle(self):
+        self.connection.settimeout(30)
+        _, uid, _ = struct.unpack("3i", self.connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+        if uid not in self.server.allowed_uids:
+            return
+        request_id = None
+        try:
+            raw = self.rfile.readline(MAX_REQUEST + 1)
+            if len(raw) > MAX_REQUEST or not raw.endswith(b"\n"):
+                raise ValueError("Request is too large or incomplete")
+            request = json.loads(raw)
+            request_id = request.get("id") if isinstance(request, dict) else None
+            result = self.server.broker.dispatch(request, uid)
+            reply = {"id": request_id, "result": result}
+        except (ValueError, TypeError, json.JSONDecodeError):
+            reply = {"id": request_id, "error": {"code": "invalid_request", "message": "The requested operation or arguments are invalid."}}
+        except Exception:
+            reply = {"id": request_id, "error": {"code": "unavailable", "message": "The management operation is temporarily unavailable."}}
+        self.wfile.write(json.dumps(reply, ensure_ascii=False).encode() + b"\n")
+
+
+class Server(socketserver.ThreadingUnixStreamServer):
+    daemon_threads = True
+    request_queue_size = 16
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--socket", default="/run/getbible-admin/broker.sock")
+    parser.add_argument("--state-dir", default="/var/lib/getbible/admin")
+    parser.add_argument("--manager", default="/usr/local/bin/getbible")
+    parser.add_argument("--prefix", default="")
+    parser.add_argument("--user", default="getbible-dashboard")
+    parser.add_argument("--group", default="getbible-dashboard")
+    parser.add_argument("--runtime-control", default="/usr/local/lib/getbible/getbible-runtime-control")
+    parser.add_argument("--catalogue", action="store_true")
+    args = parser.parse_args()
+    if args.catalogue:
+        print(json.dumps([{key: value for key, value in spec.items() if not key.startswith("_")} for spec in OPS.values()]))
+        return
+    if os.geteuid() != 0:
+        parser.error("The management broker must run as root")
+    os.umask(0o077)
+    allowed = {0, pwd.getpwnam(args.user).pw_uid}
+    group = grp.getgrnam(args.group).gr_gid
+    path = Path(args.socket)
+    path.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+    os.chown(path.parent, 0, group)
+    os.chmod(path.parent, 0o750)
+    if path.exists():
+        path.unlink()
+    broker = Broker(args.state_dir, args.manager, args.prefix, args.runtime_control)
+    with Server(str(path), RequestHandler) as server:
+        server.allowed_uids = allowed
+        server.broker = broker
+        os.chown(path, 0, group)
+        os.chmod(path, 0o660)
+        server.serve_forever(poll_interval=0.5)
+
+
+if __name__ == "__main__":
+    main()

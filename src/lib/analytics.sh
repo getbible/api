@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Traffic analytics over the JSON access logs.
+# Traffic analytics over the canonical telemetry database.
 
 [[ -n "${GB_ANALYTICS_LOADED:-}" ]] && return 0
 GB_ANALYTICS_LOADED=1
@@ -8,7 +8,7 @@ GB_ANALYTICS_LOADED=1
 analytics_report() {
     local window="${1:-24h}" domain="${2:-}"
     shift 2 2>/dev/null || shift $# 
-    local -a args=(--log-root "$GB_LOG" --window "$window")
+    local -a args=(--db "$GB_VAR/telemetry/traffic.sqlite3" --window "$window")
     [[ -n "$domain" ]] && args+=(--endpoint "$domain")
     "$GB_PYTHON" "$GB_TOOLS/getbible-analytics" "${args[@]}" "$@"
 }

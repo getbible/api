@@ -88,7 +88,7 @@ rt_kind_deployed_on() {
 # Every endpoint has its own record and immutable APP_VERSION (the version
 # implemented, which can differ from the label only for a root endpoint).
 # Releases, generations, sockets, caches and units always carry its label.
-RT_VERSION_SETTINGS=(REPOSITORY WORKERS THREADS WARM_TRANSLATIONS DEFAULT_TRANSLATION DEFAULT_REFERENCE ALLOWED_TRANSLATIONS PYTHON_VERSION CACHE_TTL)
+RT_VERSION_SETTINGS=(REPOSITORY WORKERS THREADS WARM_TRANSLATIONS DEFAULT_TRANSLATION DEFAULT_REFERENCE ALLOWED_TRANSLATIONS PYTHON_VERSION CACHE_TTL MEMORY_CACHE_TTL MEMORY_MIN MEMORY_MAX CPU_QUOTA WORKERS_MIN WORKERS_MAX THREADS_MIN THREADS_MAX CACHE_MEMORY_PERCENT SHARED_CORPUS_LIMIT CHAPTER_CACHE_LIMIT TRANSLATION_CACHE_LIMIT REFERENCE_CACHE_LIMIT)
 
 type_runtime_endpoints() { ep_versions "$1"; }
 
@@ -185,11 +185,12 @@ rt_proxy_socket() {
 
 # rt_validate_settings DOMAIN LABEL
 rt_validate_settings() {
-    local domain="$1" label="$2" key value
+    local domain="$1" label="$2" key value upper lower
     for key in WORKERS THREADS; do
         value="$(ep_version_get "$domain" "$label" "$key")"
+        [[ "$value" == auto ]] && continue
         if ! [[ "$value" =~ ^[1-9][0-9]?$ ]] || (( 10#$value > 64 )); then
-            gb_warn "$key of $domain $label must be between 1 and 64"; return 1
+            gb_warn "$key of $domain $label must be auto or between 1 and 64"; return 1
         fi
     done
     for key in WARM_TRANSLATIONS ALLOWED_TRANSLATIONS; do
@@ -201,7 +202,28 @@ rt_validate_settings() {
     value="$(ep_version_get "$domain" "$label" REPOSITORY)"
     rt_validate_repository "$value" "$(rt_app_version "$domain" "$label")" || return 1
     value="$(ep_version_get "$domain" "$label" CACHE_TTL 300)"
-    [[ "$value" =~ ^[0-9]{1,7}$ ]] || { gb_warn "CACHE_TTL of $domain $label must be a nonnegative integer"; return 1; }
+    [[ "$value" =~ ^[0-9]{1,8}$ ]] && (( 10#$value <= 31536000 )) || { gb_warn "CACHE_TTL of $domain $label must be between 0 and 31536000 seconds"; return 1; }
+    value="$(ep_version_get "$domain" "$label" MEMORY_CACHE_TTL 2592000)"
+    [[ "$value" =~ ^[0-9]{1,8}$ ]] && (( 10#$value <= 31536000 )) || { gb_warn "MEMORY_CACHE_TTL must be between 0 and 31536000 seconds"; return 1; }
+    value="$(ep_version_get "$domain" "$label" CPU_QUOTA auto)"
+    [[ "$value" == auto || "$value" =~ ^[1-9][0-9]*([.][0-9]+)?%$ ]] || { gb_warn "CPU_QUOTA must be auto or a positive percentage"; return 1; }
+    for key in WORKERS_MIN WORKERS_MAX THREADS_MIN THREADS_MAX CACHE_MEMORY_PERCENT SHARED_CORPUS_LIMIT CHAPTER_CACHE_LIMIT TRANSLATION_CACHE_LIMIT REFERENCE_CACHE_LIMIT; do
+        value="$(ep_version_get "$domain" "$label" "$key")"
+        [[ -z "$value" ]] && continue
+        case "$key" in
+            WORKERS_MIN|WORKERS_MAX|THREADS_MIN|THREADS_MAX) lower=1; upper=64 ;;
+            CACHE_MEMORY_PERCENT) lower=5; upper=80 ;;
+            SHARED_CORPUS_LIMIT|TRANSLATION_CACHE_LIMIT) lower=1; upper=100000 ;;
+            *) lower=1; upper=1000000 ;;
+        esac
+        [[ "$value" =~ ^[1-9][0-9]{0,6}$ ]] && (( 10#$value >= lower && 10#$value <= upper )) \
+            || { gb_warn "$key must be between $lower and $upper"; return 1; }
+    done
+    for key in MEMORY_MIN MEMORY_MAX; do
+        value="$(ep_version_get "$domain" "$label" "$key")"
+        [[ -z "$value" || ( "$key" == MEMORY_MAX && "$value" == auto ) || "$value" =~ ^[1-9][0-9]*[KMGT]?$ ]] \
+            || { gb_warn "$key must be a positive memory size"; return 1; }
+    done
     gb_valid_version "$(rt_app_version "$domain" "$label")" || { gb_warn "APP_VERSION of $domain $label must be v1, v2, ..."; return 1; }
 }
 
@@ -218,7 +240,9 @@ rt_deployment_inputs() {
         # underneath a serving process. A changed budget follows readiness,
         # nginx reload and draining just like other runtime configuration.
         for key in WORKERS THREADS MEMORY_HIGH MEMORY_MAX WARM_TRANSLATIONS SEARCH_MAX_CONCURRENT \
-                   EXPENSIVE_CONCURRENT TRANSLATION_CACHE_LIMIT SEARCH_CORPUS_LIMIT REFERENCE_CACHE_LIMIT CHAPTER_CACHE_LIMIT; do
+                   EXPENSIVE_CONCURRENT TRANSLATION_CACHE_LIMIT SEARCH_CORPUS_LIMIT REFERENCE_CACHE_LIMIT CHAPTER_CACHE_LIMIT \
+                   CPU_QUOTA TASKS_MAX NOFILE MEMORY_CACHE_TTL CACHE_TTL_JITTER SHARED_CORPUS_LIMIT \
+                   SHARED_CORPUS_BYTES CHAPTER_CACHE_BYTES TRANSLATION_CACHE_BYTES WORKERS_MIN WORKERS_MAX; do
             local variable="RES_$key"
             printf '%s=%s\n' "$variable" "${!variable}"
         done
@@ -257,10 +281,12 @@ import tempfile
 
 path = Path(sys.argv[1])
 syntax = sys.argv[2]
-allowed = {"MemoryHigh", "MemoryMax"} if syntax == "limits" else {
+allowed = {"MemoryHigh", "MemoryMax", "CPUQuota", "TasksMax", "LimitNOFILE"} if syntax == "limits" else {
     "GETBIBLE_REFERENCE_CACHE_LIMIT", "GETBIBLE_CHAPTER_CACHE_LIMIT",
     "GETBIBLE_TRANSLATION_CACHE_LIMIT", "GETBIBLE_SEARCH_CORPUS_LIMIT",
     "SEARCH_MAX_CONCURRENT", "SEARCH_MAX_CONCURRENT_EXPENSIVE",
+    "GETBIBLE_CACHE_TTL_SECONDS", "GETBIBLE_CACHE_TTL_JITTER", "GETBIBLE_SHARED_CORPUS_LIMIT",
+    "GETBIBLE_SHARED_CORPUS_BYTES", "GETBIBLE_CHAPTER_CACHE_BYTES", "GETBIBLE_TRANSLATION_CACHE_BYTES",
 }
 updates = {}
 for argument in sys.argv[3:]:
@@ -329,7 +355,7 @@ rt_restore_resource_settings() {
             found=false
             for manifest in "$release"/src/*/manifest.conf; do
                 [[ -f "$manifest" && "$(cfg_get "$manifest" KIND)" == "$EP_KIND" ]] || continue
-                for key in WORKERS THREADS MEMORY_HIGH MEMORY_MAX ENV_PREFIX; do
+                for key in WORKERS THREADS MEMORY_HIGH MEMORY_MAX ENV_PREFIX CPU_QUOTA TASKS_MAX NOFILE; do
                     printf -v "RM_$key" '%s' "$(cfg_get "$manifest" "$key")"
                 done
                 found=true
@@ -341,18 +367,21 @@ rt_restore_resource_settings() {
             resources_context "$domain" "$label" || return 1
             environment=("${prefix}_WORKERS=$RES_WORKERS" "${prefix}_THREADS=$RES_THREADS" "${prefix}_WARM_TRANSLATIONS=$RES_WARM_TRANSLATIONS"
                 "GETBIBLE_REFERENCE_CACHE_LIMIT=$RES_REFERENCE_CACHE_LIMIT" "GETBIBLE_CHAPTER_CACHE_LIMIT=$RES_CHAPTER_CACHE_LIMIT"
-                "GETBIBLE_TRANSLATION_CACHE_LIMIT=$RES_TRANSLATION_CACHE_LIMIT" "GETBIBLE_SEARCH_CORPUS_LIMIT=$RES_SEARCH_CORPUS_LIMIT")
+                "GETBIBLE_TRANSLATION_CACHE_LIMIT=$RES_TRANSLATION_CACHE_LIMIT" "GETBIBLE_SEARCH_CORPUS_LIMIT=$RES_SEARCH_CORPUS_LIMIT"
+                "GETBIBLE_CACHE_TTL_SECONDS=$RES_MEMORY_CACHE_TTL" "GETBIBLE_CACHE_TTL_JITTER=$RES_CACHE_TTL_JITTER"
+                "GETBIBLE_SHARED_CORPUS_LIMIT=$RES_SHARED_CORPUS_LIMIT" "GETBIBLE_SHARED_CORPUS_BYTES=$RES_SHARED_CORPUS_BYTES"
+                "GETBIBLE_CHAPTER_CACHE_BYTES=$RES_CHAPTER_CACHE_BYTES" "GETBIBLE_TRANSLATION_CACHE_BYTES=$RES_TRANSLATION_CACHE_BYTES")
             if [[ "$EP_KIND" == search ]]; then
                 environment+=("SEARCH_MAX_CONCURRENT=$RES_SEARCH_MAX_CONCURRENT" "SEARCH_MAX_CONCURRENT_EXPENSIVE=$RES_EXPENSIVE_CONCURRENT")
             fi
             rt_patch_resource_file "$active/runtime.env" env "${environment[@]}" || return 1
             # This human-readable copy is not the unit's EnvironmentFile.
             gb_install_file "$active/runtime.env" "$(rt_env_file "$domain" "$label")" 0600 || return 1
-            rt_patch_resource_file "$active/limits.conf" limits "MemoryHigh=$RES_MEMORY_HIGH" "MemoryMax=$RES_MEMORY_MAX" || return 1
+            rt_patch_resource_file "$active/limits.conf" limits "MemoryHigh=$RES_MEMORY_HIGH" "MemoryMax=$RES_MEMORY_MAX" "CPUQuota=$RES_CPU_QUOTA" "TasksMax=$RES_TASKS_MAX" "LimitNOFILE=$RES_NOFILE" || return 1
             unit="$(rt_generation_unit "$domain" "$label" "$active")"
             limits="$GB_SYSTEMD/$unit.service.d/10-limits.conf"
             if [[ -f "$limits" ]]; then
-                rt_patch_resource_file "$limits" limits "MemoryHigh=$RES_MEMORY_HIGH" "MemoryMax=$RES_MEMORY_MAX" || return 1
+                rt_patch_resource_file "$limits" limits "MemoryHigh=$RES_MEMORY_HIGH" "MemoryMax=$RES_MEMORY_MAX" "CPUQuota=$RES_CPU_QUOTA" "TasksMax=$RES_TASKS_MAX" "LimitNOFILE=$RES_NOFILE" || return 1
             fi
             gb_log "Restored resource settings for $domain $label in its retained runtime generation."
         done < <(ep_versions "$domain")
@@ -495,7 +524,11 @@ rt_render_env() {
     expensive="$RES_EXPENSIVE_CONCURRENT"
     gb_render "$GB_TYPES/runtime/templates/env.tmpl" "$stage" \
         "KIND=$EP_KIND" "DOMAIN=$domain" "LABEL=$label" "REPOSITORY=$EV_REPOSITORY" "VERSION=$(rt_app_version "$domain" "$label")" \
-        "CACHE_DIR=$(rt_cache_dir "$domain" "$label" "$release")" "CACHE_TTL_SECONDS=900" \
+        "CACHE_DIR=$(rt_cache_dir "$domain" "$label" "$release")" "CACHE_TTL_SECONDS=$RES_MEMORY_CACHE_TTL" \
+        "CACHE_TTL_JITTER=$RES_CACHE_TTL_JITTER" "SHARED_CORPUS_LIMIT=$RES_SHARED_CORPUS_LIMIT" \
+        "SHARED_CORPUS_BYTES=$RES_SHARED_CORPUS_BYTES" "CHAPTER_CACHE_BYTES=$RES_CHAPTER_CACHE_BYTES" \
+        "TRANSLATION_CACHE_BYTES=$RES_TRANSLATION_CACHE_BYTES" \
+        "CONTROL_DIR=$(rt_cache_root "$domain" "$label")/control/$(basename -- "$generation")" \
         "APP_LOG=$(rt_app_log "$domain" "$label")" "ENV_PREFIX=$RM_ENV_PREFIX" "ACCESS_MODE=$EP_ACCESS_MODE" \
         "DEFAULT_TRANSLATION=${EV_DEFAULT_TRANSLATION:-kjv}" "ALLOWED_TRANSLATIONS=$EV_ALLOWED_TRANSLATIONS" \
         "CACHE_SECONDS=${EV_CACHE_TTL:-$RM_CACHE_SECONDS}" "WORKERS=$RES_WORKERS" \
@@ -533,7 +566,7 @@ rt_render_units() {
         "CACHE_SUBDIR=$(rt_cache_subdir "$domain" "$label")" "LOGS_SUBDIR=getbible/$domain/app" || return 1
     gb_render "$GB_TYPES/runtime/templates/limits.conf.tmpl" "$generation/limits.conf" \
         "KIND=$EP_KIND" "MEMORY_HIGH=$RES_MEMORY_HIGH" "MEMORY_MAX=$RES_MEMORY_MAX" \
-        "CPU_QUOTA=$RM_CPU_QUOTA" "TASKS_MAX=$RM_TASKS_MAX" "NOFILE=$RM_NOFILE" || return 1
+        "CPU_QUOTA=$RES_CPU_QUOTA" "TASKS_MAX=$RES_TASKS_MAX" "NOFILE=$RES_NOFILE" || return 1
     sd_install_unit "$generation/socket.unit" "$unit.socket" || return 1
     sd_install_unit "$generation/service.unit" "$unit.service" || return 1
     sd_install_dropin "$generation/limits.conf" "$unit.service" "10-limits.conf" || return 1
@@ -571,6 +604,7 @@ rt_render_proxy_body() {
     rt_manifest_load "$EP_KIND" "$(rt_app_version "$domain" "$label")"
     gb_render "$GB_TYPES/runtime/templates/proxy-body.conf.tmpl" "$output" \
         "DOMAIN=$domain" "SLUG=$EP_SLUG" "SOCKET=$(rt_proxy_socket "$domain" "$label")" "NGINX_GB_DIR=$GB_NGINX_GB" \
+        "LABEL=$label" "SOURCE_EPOCH=$(rt_source_epoch "$domain" "$label")" \
         "CACHE_TTL=$(ep_version_get "$domain" "$label" CACHE_TTL "$RM_CACHE_SECONDS")" "TOKEN_ACCESS=$(rt_token_required)" \
         "PROXY_PATH=$proxy_path"
 }
@@ -949,9 +983,10 @@ rt_record_endpoint() {
     workers="$(gb_global "DEFAULT_${RM_KIND^^}_WORKERS" "$RM_WORKERS")"
     threads="$(gb_global "DEFAULT_${RM_KIND^^}_THREADS" "$RM_THREADS")"
     cache="$(gb_global "DEFAULT_${RM_KIND^^}_CACHE_TTL" "$RM_CACHE_SECONDS")"
-    [[ "$workers" =~ ^[1-9][0-9]?$ && "$threads" =~ ^[1-9][0-9]?$ ]] && (( 10#$workers <= 64 && 10#$threads <= 64 )) \
-        || { gb_warn "Runtime worker and thread defaults must be between 1 and 64."; return 1; }
-    [[ "$cache" =~ ^[0-9]{1,7}$ ]] || { gb_warn "Runtime cache TTL default must be a nonnegative integer."; return 1; }
+    { [[ "$workers" == auto ]] || { [[ "$workers" =~ ^[1-9][0-9]?$ ]] && (( 10#$workers <= 64 )); }; } \
+        && { [[ "$threads" == auto ]] || { [[ "$threads" =~ ^[1-9][0-9]?$ ]] && (( 10#$threads <= 64 )); }; } \
+        || { gb_warn "Runtime worker and thread defaults must be auto or between 1 and 64."; return 1; }
+    [[ "$cache" =~ ^[0-9]{1,8}$ ]] && (( 10#$cache <= 31536000 )) || { gb_warn "Runtime cache TTL default must be between 0 and 31536000 seconds."; return 1; }
     conf="$(ep_version_conf "$domain" "$label")"
     gb_ensure_dir "$(ep_versions_dir "$domain")" 0750 || return 1
     cfg_set "$conf" LABEL "$label"
@@ -1019,7 +1054,7 @@ rt_add_endpoint() {
     [[ -z "$translation" ]] || gb_valid_translation "$translation" || { gb_warn "Invalid default translation: $translation"; return 1; }
     rt_manifest_load "$(ep_get "$domain" KIND)" "$version"
     # shellcheck disable=SC2153 # RM_* are populated from the implementation manifest.
-    [[ -n "$warm" ]] || warm="$RM_WARM_TRANSLATIONS"
+    [[ -n "$warm" ]] || warm="$(gb_global "${RM_KIND^^}_WARM_TRANSLATIONS" "$RM_WARM_TRANSLATIONS")"
     rt_record_endpoint "$domain" "$version" "$version" "$repository" "$warm" "$python" || return 1
     [[ -z "$translation" ]] || ep_version_set "$domain" "$version" DEFAULT_TRANSLATION "$translation"
     [[ -z "$reference" ]] || ep_version_set "$domain" "$version" DEFAULT_REFERENCE "$reference"
@@ -1109,7 +1144,7 @@ type_runtime_deploy_cli() {
     version="${version:-$RM_DEFAULT_VERSION}"
     [[ -n "$label" ]] || label="$version"
     mode="${mode:-$(gb_global DEFAULT_ACCESS_MODE metered)}"
-    [[ -n "$warm" ]] || warm="$RM_WARM_TRANSLATIONS"
+    [[ -n "$warm" ]] || warm="$(gb_global "${RM_KIND^^}_WARM_TRANSLATIONS" "$RM_WARM_TRANSLATIONS")"
     [[ -n "$repository" ]] || repository="$(rt_default_repository "$version")"
     [[ -n "$repository" ]] || gb_die "No synced local static endpoint provides $version; sync it first or pass --repository PATH containing $version/"
     [[ -z "$python" ]] || python="$(py_resolve_version "$python")"
@@ -1205,10 +1240,8 @@ type_runtime_deploy_interactive() {
     fi
     repository="$(rt_select_repository "$version")" || return 1
     mode="$(endpoint_prompt_access_mode)" || return 1
-    warm="$RM_WARM_TRANSLATIONS"
-    if [[ "$kind" == search ]]; then
-        warm="$(ui_input "Warm-up" "Translations to index at start (comma separated)" "$warm")" || return 1
-    fi
+    warm="$(gb_global "${RM_KIND^^}_WARM_TRANSLATIONS" "$RM_WARM_TRANSLATIONS")"
+    warm="$(ui_input "Warm-up" "Translations to warm at start (comma separated)" "$warm")" || return 1
     cfmode="$(endpoint_prompt_cloudflare_mode "$domain")" || return 1
     type_runtime_create "$domain" "$kind" "$version" "$repository" "$mode" "$warm" "$label" || return 1
     ep_set "$domain" CLOUDFLARE_MODE "$cfmode"
@@ -1289,7 +1322,7 @@ rt_update() {
 
 rt_setting_allowed() {
     case "$1" in
-        WORKERS|THREADS|WARM_TRANSLATIONS|DEFAULT_TRANSLATION|DEFAULT_REFERENCE|ALLOWED_TRANSLATIONS|REPOSITORY|CACHE_TTL) return 0 ;;
+        WORKERS|THREADS|WARM_TRANSLATIONS|DEFAULT_TRANSLATION|DEFAULT_REFERENCE|ALLOWED_TRANSLATIONS|REPOSITORY|CACHE_TTL|MEMORY_CACHE_TTL|MEMORY_MIN|MEMORY_MAX|CPU_QUOTA|WORKERS_MIN|WORKERS_MAX|THREADS_MIN|THREADS_MAX|CACHE_MEMORY_PERCENT|SHARED_CORPUS_LIMIT|CHAPTER_CACHE_LIMIT|TRANSLATION_CACHE_LIMIT|REFERENCE_CACHE_LIMIT) return 0 ;;
         *) gb_warn "Unsupported runtime setting: $1"; return 1 ;;
     esac
 }
@@ -1345,6 +1378,7 @@ type_runtime_menu_items() {
         python "Choose Python version and update an endpoint" \
         rollback "Restore an endpoint's previous release and settings" \
         settings "Workers, threads, warm-up and translation settings" \
+        cache "Inspect, warm, drop or reload translation memory" \
         versions "Endpoints: add or remove a version, choose the default"
 }
 
@@ -1378,6 +1412,9 @@ type_runtime_menu_action() {
         settings)
             label="$(rt_pick_endpoint "$domain")" || return 0
             rt_settings_menu "$domain" "$label" ;;
+        cache)
+            label="$(rt_pick_endpoint "$domain")" || return 0
+            rt_cache_menu "$domain" "$label" ;;
         versions) rt_versions_menu "$domain" ;;
     esac
 }
@@ -1389,7 +1426,8 @@ rt_settings_menu() {
     stage="$(mktemp "$(gb_tmpdir)/runtime-settings-new.XXXXXX")" || return 1
     cp -p -- "$conf" "$backup" || return 1
     cp -p -- "$backup" "$stage" || return 1
-    for key in WORKERS:"Gunicorn workers" THREADS:"Threads per worker" WARM_TRANSLATIONS:"Translations to warm at start (comma separated, search only)" \
+    for key in WORKERS:"Gunicorn workers" THREADS:"Threads per worker" WARM_TRANSLATIONS:"Translations to warm at start (comma separated)" \
+               CPU_QUOTA:"CPU quota (auto shares the container CPU allowance)" MEMORY_CACHE_TTL:"Resident cache lifetime in seconds" CACHE_TTL:"HTTP cache lifetime in seconds" \
                DEFAULT_TRANSLATION:"Default translation" DEFAULT_REFERENCE:"Default reference (query only)" \
                ALLOWED_TRANSLATIONS:"Allowed translations (comma separated, empty for all)"; do
         text="${key#*:}"; key="${key%%:*}"
@@ -1453,4 +1491,87 @@ rt_versions_menu() {
             back) return 0 ;;
         esac
     done
+}
+
+# Public CLI/menu controls share the exact private worker interface used by the dashboard.
+rt_cache_cli() {
+    local domain="$1" label="$2" action="${3:-info}" code="${4:-}" kind report epoch
+    gb_require_root
+    ep_version_exists "$domain" "$label" || { gb_warn "Unknown runtime endpoint"; return 1; }
+    kind="$(ep_get "$domain" KIND)"
+    report="$(gb_tmpdir)/runtime-control-report.json"
+    if ! "$GB_PYTHON" "$GB_TOOLS/getbible-runtime-control" --runtime-root "$GB_OPT" --cache-root "$GB_CACHE" \
+        --domain "$domain" --kind "$kind" --label "$label" --translation "$code" "$action" > "$report"; then
+        cat "$report"; return 1
+    fi
+    cat "$report"
+    if [[ "$action" == refresh-source ]]; then
+        epoch="$(rt_source_epoch "$domain" "$label")" || return 1
+        "$GB_PYTHON" - "$report" "$epoch" <<'PYACK' || return 1
+import json, sys
+with open(sys.argv[1]) as stream:
+    report = json.load(stream)
+if not report.get("complete") or not report.get("workers") or any(worker.get("source_revision") != sys.argv[2] for worker in report["workers"]):
+    raise SystemExit("Workers did not acknowledge the current publication; retry source refresh.")
+PYACK
+        rt_refresh_cache_epoch "$domain" "$label" "$epoch" || return 1
+    fi
+    if [[ "$action" != info ]]; then tg_notify ok "Runtime cache: $action" "$domain $label ${code:-source}"; fi
+}
+
+rt_cache_menu() {
+    local domain="$1" label="$2" action code
+    while true; do
+        action="$(ui_menu "Translation memory: $domain $label" "Operations apply to every serving worker" \
+            info "Show worker memory and resident translations" warm "Warm a translation" \
+            drop "Drop a translation from memory" reload "Reload a translation" \
+            refresh-source "Refresh the current published source")" || return 0
+        code=""
+        if [[ "$action" != info && "$action" != refresh-source ]]; then
+            code="$(ui_input "Translation" "Translation abbreviation" kjv)" || continue
+        fi
+        ui_run "Translation memory" rt_cache_cli "$domain" "$label" "$action" "$code" || true
+    done
+}
+
+# A publication-specific nginx cache namespace prevents old in-flight responses
+# from repopulating the current cache after a source transition.
+rt_source_epoch() {
+    local repository version
+    repository="$(ep_version_get "$1" "$2" REPOSITORY)"
+    version="$(rt_app_version "$1" "$2")"
+    "$GB_PYTHON" - "$repository" "$version" <<'PYEPOCH'
+import hashlib
+from pathlib import Path
+import sys
+target = (Path(sys.argv[1]) / sys.argv[2]).resolve()
+try:
+    metadata = target.stat()
+    identity = (str(target), metadata.st_dev, metadata.st_ino)
+except OSError:
+    identity = (str(target), None, None)
+print(hashlib.sha256(repr(identity).encode()).hexdigest())
+PYEPOCH
+}
+
+rt_refresh_cache_epoch() {
+    local domain="$1" label="$2" expected="${3:-}" source stage epoch
+    source="$(nginx_site_file "$domain")"
+    [[ -f "$source" ]] || { gb_warn "Runtime nginx configuration is unavailable"; return 1; }
+    epoch="$(rt_source_epoch "$domain" "$label")" || return 1
+    [[ -z "$expected" || "$epoch" == "$expected" ]] || { gb_warn "Source changed again while refreshing; retry the source refresh"; return 1; }
+    stage="$(mktemp -d "$(gb_tmpdir)/source-epoch.XXXXXX")" || return 1
+    mkdir -p "$stage/sites-available"
+    "$GB_PYTHON" - "$source" "$stage/sites-available/$domain.conf" "$label" "$epoch" <<'PYPATCH' || return 1
+from pathlib import Path
+import re
+import sys
+source, target, label, epoch = sys.argv[1:]
+pattern = re.compile(r'(^[ \t]*proxy_cache_key ")([0-9a-f]{64})(:[^"\n]+"; # getbible-source=' + re.escape(label) + r'[ \t]*$)', re.MULTILINE)
+text, count = pattern.subn(lambda match: match[1] + epoch + match[3], Path(source).read_text())
+if not count:
+    raise SystemExit("This runtime needs an explicit apply to install publication-aware cache keys.")
+Path(target).write_text(text)
+PYPATCH
+    nginx_apply_stage "$stage" "source-$(gb_slug "$domain")" || return 1
 }

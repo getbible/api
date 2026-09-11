@@ -38,7 +38,7 @@ server {
 {{/IF}}{{#IF REAL_IP}}
     include {{NGINX_GB_DIR}}/cloudflare-real-ip.conf;
 {{/IF}}
-    access_log {{LOG_DIR}}/access.log getbible_json buffer=64k flush=5s;
+    access_log {{LOG_DIR}}/access.log getbible_json buffer=64k flush=1s;
     error_log  {{LOG_DIR}}/error.log warn;
 
     # Also answer origin-identity challenges after an HTTP-to-HTTPS redirect.

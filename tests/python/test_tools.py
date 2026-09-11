@@ -65,13 +65,17 @@ class TokensTest(unittest.TestCase):
 class AnalyticsTest(unittest.TestCase):
     def test_totals_and_unique_callers(self) -> None:
         now = datetime.now(timezone.utc).isoformat()
+        request_number = 0
 
         def line(**fields):
+            nonlocal request_number
+            request_number += 1
             base = {"time": now, "host": "a", "endpoint": "a", "version": "v2", "remote_addr": "203.0.113.5", "method": "GET",
                     "uri": "/v2/kjv/1/1.json", "status": 200, "bytes": 512, "request_length": 100, "request_time": 0.01,
                     "upstream_time": "-", "cache": "-", "referer": "", "user_agent": "curl", "request_id": "x", "token": "",
                     "scheme": "https", "protocol": "HTTP/2.0", "tls": "TLSv1.3", "country": "-"}
             base.update(fields)
+            base["request_id"] = str(request_number)
             return json.dumps(base)
 
         with tempfile.TemporaryDirectory() as directory:
@@ -88,14 +92,16 @@ class AnalyticsTest(unittest.TestCase):
             (root / "b.test" / "access.log").write_text("\n".join([
                 line(endpoint="b"), line(endpoint="b", token="tk_1", remote_addr="198.51.100.2", cache="HIT"), line(endpoint="b", cache="MISS"),
             ]) + "\n")
-            report = json.loads(run("getbible-analytics", "--log-root", str(root), "--window", "24h", "--json").stdout)
+            database = str(root / "traffic.sqlite3")
+            run("getbible-telemetry", "collect", "--once", "--db", database, "--log-root", str(root))
+            report = json.loads(run("getbible-analytics", "--db", database, "--window", "24h", "--json").stdout)
             a, b, combined = report["endpoints"]["a.test"], report["endpoints"]["b.test"], report["combined"]
             self.assertEqual((a["total_calls"], a["unique_callers"], a["preflights"], a["rate_limited"], a["malformed_lines"]), (9, 5, 1, 1, 1))
             self.assertEqual(a["status"], {"2xx": 7, "4xx": 2})
             self.assertEqual(a["top_paths"][0], ["/v2/kjv/1/1.json", 8])
             self.assertEqual((b["total_calls"], b["unique_callers"], b["cache_hit_ratio"]), (3, 2, 0.5))
             self.assertEqual((combined["total_calls"], combined["unique_callers"], combined["unique_tokens"]), (12, 5, 1))
-            text = run("getbible-analytics", "--log-root", str(root), "--window", "7d").stdout
+            text = run("getbible-analytics", "--db", database, "--window", "7d").stdout
             self.assertIn("unique callers (union): 5", text)
             self.assertNotIn("203.0.113", text)
 

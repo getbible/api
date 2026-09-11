@@ -1,0 +1,18 @@
+[Unit]
+Description=Notify operators of a failed getBible service
+
+[Service]
+Type=oneshot
+User=root
+Group={{NOTIFY_GROUP}}
+Environment=GB_TELEGRAM_CONF={{RUN}}/telegram.conf
+ExecStart={{LIBEXEC}}/getbible-notify fail "Service failed: %I" "A managed getBible service failed. Inspect its journal and the dashboard before retrying."
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+TimeoutStartSec=20
+MemoryMax=64M
+TasksMax=16

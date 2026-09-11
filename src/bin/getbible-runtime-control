@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+"""Address every serving worker through private cache control sockets."""
+from __future__ import annotations
+import argparse
+from concurrent.futures import ThreadPoolExecutor
+import json
+import os
+from pathlib import Path
+import re
+import socket
+import sys
+
+
+def worker_request(path: Path, command: dict, timeout: float):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        connection.settimeout(timeout)
+        connection.connect(str(path))
+        connection.sendall(json.dumps(command).encode() + b"\n")
+        data = bytearray()
+        while b"\n" not in data:
+            chunk = connection.recv(65536)
+            if not chunk:
+                break
+            data.extend(chunk)
+            if len(data) > 16 * 1024 * 1024:
+                raise ValueError("Worker report exceeds 16 MiB.")
+        if b"\n" not in data:
+            raise ValueError("Worker disconnected without a complete report.")
+        report = json.loads(bytes(data).split(b"\n", 1)[0])
+        if not report.get("ok"):
+            raise ValueError(report.get("error", "Worker operation failed."))
+        return report["worker"]
+
+
+def run(args):
+    if not re.fullmatch(r"(?:root|v[1-9][0-9]*)", args.label):
+        raise ValueError("Invalid endpoint label.")
+    root = Path(args.runtime_root).resolve() / args.kind / args.label
+    active = root / "active"
+    if not active.is_symlink():
+        raise ValueError("The endpoint has no serving generation.")
+    generation = active.resolve(strict=True)
+    if not generation.is_relative_to(root / "deployments"):
+        raise ValueError("Serving generation escapes its deployment directory.")
+    directory = Path(args.cache_root) / args.kind / args.label / "control" / generation.name
+    paths = []
+    for path in sorted(directory.glob("*.sock")):
+        if not path.stem.isdigit():
+            continue
+        try:
+            os.kill(int(path.stem), 0)
+        except ProcessLookupError:
+            path.unlink(missing_ok=True)
+            continue
+        except PermissionError:
+            pass  # worker_request still enforces the socket peer identity
+        paths.append(path)
+    expected = None
+    try:
+        pattern = re.compile(rf"^{args.kind.upper()}_WORKERS=\"?([0-9]+)\"?$", re.MULTILINE)
+        match = pattern.search((generation / "runtime.env").read_text())
+        expected = int(match[1]) if match else None
+    except OSError:
+        pass
+    command = {"action": args.action, "translation": args.translation}
+    result = {"domain": args.domain, "kind": args.kind, "label": args.label,
+              "generation": generation.name, "expected_workers": expected, "workers": [], "errors": [],
+              "complete": bool(paths) and (expected is None or len(paths) == expected)}
+    def request(path):
+        try:
+            return worker_request(path, command, args.timeout), None
+        except (OSError, ValueError) as error:
+            return None, {"pid": int(path.stem), "error": str(error)}
+    with ThreadPoolExecutor(max_workers=min(16, max(1, len(paths)))) as executor:
+        for report, error in executor.map(request, paths):
+            if error:
+                result["errors"].append(error)
+                result["complete"] = False
+            else:
+                result["workers"].append(report)
+    if not paths:
+        result["errors"].append({"error": "No serving worker control sockets are available."})
+    elif expected is not None and len(paths) != expected:
+        result["errors"].append({"error": f"Expected {expected} workers; found {len(paths)} control sockets. A worker may be starting or recovering."})
+    return result
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--runtime-root", default="/opt/getbible")
+    parser.add_argument("--cache-root", default="/var/cache/getbible")
+    parser.add_argument("--domain", required=True)
+    parser.add_argument("--kind", required=True, choices=("query", "search"))
+    parser.add_argument("--label", required=True)
+    parser.add_argument("--translation", default="")
+    parser.add_argument("--timeout", type=float, default=300)
+    parser.add_argument("action", choices=("info", "warm", "drop", "reload", "refresh-source"))
+    args = parser.parse_args()
+    try:
+        result = run(args)
+        print(json.dumps(result, ensure_ascii=False))
+        return 0 if result["complete"] or args.action == "info" else 1
+    except (OSError, ValueError) as error:
+        print(json.dumps({"complete": False, "error": str(error)}))
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -21,8 +21,9 @@ check() { "$@" || { printf 'FAILED: %s\n' "$*" >&2; exit 1; }; }
 RESTORE_REAL_PYTHON="$(command -v "$GB_PYTHON")"
 export RESTORE_REAL_PYTHON
 export RESTORE_PROC_ROOT="$TEST_ROOT/proc" RESTORE_CGROUP_ROOT="$TEST_ROOT/cgroup"
-mkdir -p "$RESTORE_PROC_ROOT/self" "$RESTORE_CGROUP_ROOT/system.slice/getbible.scope"
+mkdir -p "$RESTORE_PROC_ROOT/1" "$RESTORE_PROC_ROOT/self" "$RESTORE_CGROUP_ROOT/system.slice/getbible.scope"
 printf '0::/system.slice/getbible.scope\n' > "$RESTORE_PROC_ROOT/self/cgroup"
+printf '0::/\n' > "$RESTORE_PROC_ROOT/1/cgroup"
 printf '10 9 0:2 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n' > "$RESTORE_PROC_ROOT/self/mountinfo"
 printf '4294967296\n' > "$RESTORE_CGROUP_ROOT/memory.max"
 printf '200000 100000\n' > "$RESTORE_CGROUP_ROOT/cpu.max"
@@ -116,7 +117,7 @@ check grep -Fq 'OPERATOR_VALUE="literal $value and \"quotes\""' "$active/runtime
 check grep -Fq 'GETBIBLE_TRANSLATION_CACHE_LIMIT=' "$active/runtime.env"
 check test "$(stat -c %a "$active/runtime.env")" = 600
 check test "$(cfg_get "$active/limits.conf" MemoryMax)" != 9G
-check grep -Fq 'CPUQuota=200%' "$active/limits.conf"
+check grep -Fxq 'CPUQuota=' "$active/limits.conf"
 check grep -Fq 'MemorySwapMax=0' "$active/limits.conf"
 check cmp "$active/limits.conf" "$GB_SYSTEMD/$unit.service.d/10-limits.conf"
 check cmp "$active/runtime.env" "$(rt_env_file "$domain" v2)"

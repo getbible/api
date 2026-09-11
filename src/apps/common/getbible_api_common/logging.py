@@ -1,4 +1,4 @@
-"""JSON line logging: one file the dashboards can read, journald as backup."""
+"""Append-only JSON transport spools consumed into canonical local telemetry."""
 
 from __future__ import annotations
 
@@ -15,6 +15,8 @@ EXTRA_FIELDS = (
     "token", "user_agent", "response_bytes", "operation", "version", "translation", "reference",
     "references", "verses", "search", "criteria", "kind", "total", "returned", "expensive",
     "cache_stale", "error_type", "problem", "dropped",
+    "auth_state", "worker_pid", "in_flight", "source_generation", "resident_bytes_estimate",
+    "books", "matched_books",
 )
 
 
@@ -36,8 +38,12 @@ class JsonFormatter(logging.Formatter):
 
 
 def configure_logging(name: str, level: str, path: str = "") -> logging.Logger:
-    """Log JSON lines to `path` (reopened after rotation) and, for warnings
-    and above, to stderr so journald keeps the failures too."""
+    """Append JSON for asynchronous collection; reopen after spool rotation.
+
+    Warnings also reach journald as an emergency diagnostic channel when the
+    telemetry disk or collector is unavailable. Request history lives in the
+    telemetry store; this spool is not a second retained analytics archive.
+    """
     logger = logging.getLogger(name)
     for handler in tuple(logger.handlers):
         logger.removeHandler(handler)

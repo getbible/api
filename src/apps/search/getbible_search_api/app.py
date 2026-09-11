@@ -23,6 +23,7 @@ from urllib.parse import quote
 from flask import Flask, Response, g, request
 from getbible import SEARCH_ENGINE_VERSION, SearchBible, SearchValidationError
 
+from getbible_api_common.control import install_control
 from getbible_api_common import detect
 from getbible_api_common.bible import search_client
 from getbible_api_common.health import register_health
@@ -79,6 +80,7 @@ def create_app(settings: Settings | None = None) -> Flask:
     )
     app.extensions["getbible"] = bible
     app.extensions["settings"] = settings
+    install_control(app, bible, settings.librarian, "search")
     gate = _Gate(settings.max_concurrent, settings.max_concurrent_expensive)
     version = settings.librarian.version
     default_translation = settings.service.default_translation
@@ -178,11 +180,12 @@ def create_app(settings: Settings | None = None) -> Flask:
 
     def perform(translation: str, text: str, values: dict[str, Any]) -> Response:
         g.search = text
-        cache_seconds = settings.service.cache_seconds
+        cache_seconds = app.extensions["getbible_control"].cache_seconds(settings.service.cache_seconds)
         if detect.is_reference(bible, text, translation, min(max_length, 200)):
             g.kind = "reference"
             g.operation = "reference"
             results = bible.select(text, translation)
+            g.books = sorted({chapter["book_nr"] for chapter in results.values() if "book_nr" in chapter})
             matches = [
                 {"reference": verse["name"], "book_nr": chapter["book_nr"], "chapter": chapter["chapter"], "verse": verse["verse"]}
                 for chapter in results.values() for verse in chapter["verses"]
@@ -208,6 +211,7 @@ def create_app(settings: Settings | None = None) -> Flask:
         g.operation = "search"
         criteria = parse_criteria(values)
         g.criteria = dataclasses.asdict(criteria)
+        g.books = list(criteria.books)
         g.expensive = criteria.expensive
         held = gate.acquire(criteria.expensive)
         try:
@@ -216,6 +220,7 @@ def create_app(settings: Settings | None = None) -> Flask:
             for semaphore in held:
                 semaphore.release()
         result["query"]["kind"] = "search"
+        g.matched_books = sorted({item["book_nr"] for item in result.get("matches", []) if "book_nr" in item})
         g.total = result["query"].get("total")
         g.returned = result["query"].get("returned")
         g.cache_stale = result["query"].get("cache", {}).get("stale")
