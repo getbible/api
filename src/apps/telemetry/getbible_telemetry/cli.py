@@ -11,10 +11,15 @@ import time
 
 from .collector import Collector
 from .store import TelemetryStore, timestamp
+from .settings import numeric_setting
 
 
 def _env(name: str, default: str) -> str:
     return os.environ.get("GETBIBLE_TELEMETRY_" + name, default)
+
+
+def _number(name: str):
+    return lambda value: numeric_setting("TELEMETRY_" + name, value)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -32,13 +37,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cursor", type=int)
     parser.add_argument("--bucket", type=int, default=60)
     parser.add_argument("--once", action="store_true")
-    parser.add_argument("--max-gib", type=float, default=float(_env("MAX_GIB", "10")))
-    parser.add_argument("--retention-days", type=float, default=float(_env("RETENTION_DAYS", "180")))
-    parser.add_argument("--spool-max-gib", type=float, default=float(_env("SPOOL_MAX_GIB", "1")))
-    parser.add_argument("--batch-size", type=int, default=int(_env("BATCH_SIZE", "1000")))
-    parser.add_argument("--flush-seconds", type=float, default=float(_env("FLUSH_SECONDS", "1")))
-    parser.add_argument("--metrics-seconds", type=float, default=float(_env("METRICS_SECONDS", "5")))
-    parser.add_argument("--rotate-mib", type=float, default=float(_env("SPOOL_ROTATE_MIB", "16")))
+    parser.add_argument("--max-gib", type=_number("MAX_GIB"), default=_env("MAX_GIB", "10"))
+    parser.add_argument("--retention-days", type=_number("RETENTION_DAYS"), default=_env("RETENTION_DAYS", "180"))
+    parser.add_argument("--spool-max-gib", type=_number("SPOOL_MAX_GIB"), default=_env("SPOOL_MAX_GIB", "1"))
+    parser.add_argument("--batch-size", type=_number("BATCH_SIZE"), default=_env("BATCH_SIZE", "1000"))
+    parser.add_argument("--flush-seconds", type=_number("FLUSH_SECONDS"), default=_env("FLUSH_SECONDS", "1"))
+    parser.add_argument("--metrics-seconds", type=_number("METRICS_SECONDS"), default=_env("METRICS_SECONDS", "5"))
+    parser.add_argument("--rotate-mib", type=_number("SPOOL_ROTATE_MIB"), default=_env("SPOOL_ROTATE_MIB", "16"))
     parser.add_argument("--nginx-pid", default="/run/nginx.pid")
     parser.add_argument("--notify", default="/usr/local/lib/getbible/getbible-notify")
     parser.add_argument("--cgroup-root", default="/sys/fs/cgroup")
@@ -46,11 +51,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-journal", action="store_true", help="Disable collection of getBible systemd service events")
     parser.add_argument("--systemctl", default="/usr/bin/systemctl")
     args = parser.parse_args(argv)
-    if min(args.max_gib, args.retention_days, args.spool_max_gib, args.flush_seconds,
-           args.metrics_seconds, args.rotate_mib, args.batch_size) <= 0:
-        parser.error("collector size, timing and retention values must be positive")
-    if args.max_gib < 1 / 1024 or args.batch_size > 100000:
-        parser.error("history budget must be at least 1 MiB and batch size at most 100000")
     end = timestamp(args.end) if args.end else time.time()
     start = timestamp(args.start) if args.start else end - 86400
     os.umask(0o027)

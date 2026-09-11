@@ -1,7 +1,9 @@
 [Unit]
+Requires=getbible-prepare.service
+After=getbible-prepare.service
 Description=getBible private management dashboard
 After=getbible-admin.service getbible-telemetry.service
-Requires=getbible-admin.service
+Wants=getbible-admin.service
 OnFailure=getbible-alert@%n.service
 StartLimitIntervalSec=300
 StartLimitBurst=5

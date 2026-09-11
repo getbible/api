@@ -71,7 +71,12 @@ cfg_set() {
     [[ "$replaced" == true ]] || printf '%s=%s\n' "$key" "$value" >> "$tmp"
     mv -f -- "$tmp" "$file" || return 1
     if [[ "${GB_CONFIG_INITIALIZING:-false}" != true && "$file" == "$GB_TELEGRAM_CONF" ]] && declare -F gb_environment_telegram >/dev/null; then
-        gb_environment_telegram || return 1
+        if [[ -n "${GB_SYSTEMD:-}" && -f "$GB_SYSTEMD/getbible-telemetry.service" ]] \
+            && declare -F infrastructure_environment >/dev/null; then
+            infrastructure_environment || return 1
+        else
+            gb_environment_telegram || return 1
+        fi
     fi
 }
 
@@ -181,7 +186,6 @@ GB_GLOBAL_DEFAULTS=(
     "ADAPTIVE_HIGH_PERCENT=80"
     "ADAPTIVE_LOW_PERCENT=20"
     "ADAPTIVE_SUSTAINED_SAMPLES=4"
-    "TELEMETRY_ENABLED=true"
     "TELEMETRY_MAX_GIB=10"
     "TELEMETRY_RETENTION_DAYS=180"
     "TELEMETRY_BATCH_SIZE=1000"

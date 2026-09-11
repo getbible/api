@@ -5,6 +5,7 @@ __pycache__/
 .venv/
 .venv-test/
 .pytest_cache/
+# Local deployment overrides and optional local data are never repository source.
 .env
 .env.*
 !.env.example

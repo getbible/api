@@ -1,4 +1,6 @@
 [Unit]
+Requires=getbible-prepare.service
+After=getbible-prepare.service
 Description=getBible traffic journal and health collector
 After=local-fs.target nginx.service
 OnFailure=getbible-alert@%n.service

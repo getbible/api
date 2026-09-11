@@ -24,17 +24,11 @@ from typing import Any
 from .metrics import MetricsSampler
 from .health import HealthInspector
 from .store import TelemetryStore
+from .settings import SETTING_NAMES, numeric_setting
 
 
-def read_settings(path: str) -> dict[str, float]:
+def read_settings(path: str) -> dict[str, int]:
     """Parse the manager's effective environment without evaluating shell."""
-    accepted = {
-        "TELEMETRY_MAX_GIB", "TELEMETRY_RETENTION_DAYS", "TELEMETRY_SPOOL_MAX_GIB",
-        "TELEMETRY_SPOOL_ROTATE_MIB", "TELEMETRY_BATCH_SIZE", "TELEMETRY_FLUSH_SECONDS",
-        "TELEMETRY_METRICS_SECONDS", "ALERT_COOLDOWN_SECONDS", "ALERT_HOLD_SECONDS",
-        "ALERT_CPU_PERCENT", "ALERT_MEMORY_PERCENT", "ALERT_DISK_PERCENT", "ALERT_MEMORY_PRESSURE_PERCENT",
-        "ALERT_SYNC_GRACE_SECONDS",
-    }
     result = {}
     for raw in Path(path).read_text(encoding="utf-8").splitlines():
         raw = raw.strip()
@@ -42,23 +36,12 @@ def read_settings(path: str) -> dict[str, float]:
             continue
         key, separator, value = raw.removeprefix("export ").partition("=")
         key = key.strip().removeprefix("GETBIBLE_")
-        if not separator or key not in accepted:
+        if not separator or key not in SETTING_NAMES:
             continue
         parsed = shlex.split(value, comments=True)
         if len(parsed) != 1:
             raise ValueError("invalid effective setting: " + key)
-        number = float(parsed[0])
-        if not 0 < number < 10**12:
-            raise ValueError("setting must be positive and finite: " + key)
-        if key.endswith("PERCENT") and number > 100:
-            raise ValueError("percentage must be <=100: " + key)
-        if key == "TELEMETRY_BATCH_SIZE" and (number != int(number) or number > 100000):
-            raise ValueError("batch size must be an integer between 1 and 100000")
-        if key == "TELEMETRY_MAX_GIB" and number < 1 / 1024:
-            raise ValueError("history budget must be at least 1 MiB")
-        if key in {"TELEMETRY_SPOOL_MAX_GIB", "TELEMETRY_SPOOL_ROTATE_MIB"} and number < 1 / 1024:
-            raise ValueError("spool size is below the supported minimum")
-        result[key] = number
+        result[key] = numeric_setting(key, parsed[0])
     return result
 
 
@@ -69,7 +52,7 @@ class Collector:
                  notify: str = "/usr/local/lib/getbible/getbible-notify") -> None:
         self.store = store
         self.root = Path(log_root)
-        self.batch_size = max(1, min(int(batch_size), 100_000))
+        self.batch_size = numeric_setting("TELEMETRY_BATCH_SIZE", batch_size)
         self.max_line_bytes = max(1024, int(max_line_bytes))
         self.rotate_bytes = max(1024, int(rotate_bytes))
         self.spool_max_bytes = max(1024, int(spool_max_bytes))
@@ -86,6 +69,8 @@ class Collector:
             "ALERT_DISK_PERCENT": 90, "ALERT_MEMORY_PRESSURE_PERCENT": 10,
             "ALERT_SYNC_GRACE_SECONDS": 3600,
         }
+        self.alert_settings = {key: numeric_setting(key, os.environ.get("GETBIBLE_" + key, value))
+                               for key, value in self.alert_settings.items()}
 
     def lock(self) -> None:
         path = self.store.path.with_suffix(".collector.lock")
@@ -436,14 +421,18 @@ class Collector:
         with self.store.db:
             self.store.set_metadata("health_alerts", alerts)
 
-    def run(self, *, flush_seconds: float = 1, metrics_seconds: float = 5,
-            max_bytes: int = 10 * 1024 ** 3, retention_days: float = 180,
+    def run(self, *, flush_seconds: int = 1, metrics_seconds: int = 5,
+            max_bytes: int = 10 * 1024 ** 3, retention_days: int = 180,
             once: bool = False, cgroup_root: str = "/sys/fs/cgroup", settings: str = "", journal: bool = True,
             systemctl: str = "/usr/bin/systemctl") -> None:
+        flush_seconds = numeric_setting("TELEMETRY_FLUSH_SECONDS", flush_seconds)
+        metrics_seconds = numeric_setting("TELEMETRY_METRICS_SECONDS", metrics_seconds)
+        retention_days = numeric_setting("TELEMETRY_RETENTION_DAYS", retention_days)
         self.lock()
         sampler = MetricsSampler(cgroup_root=cgroup_root, disks=[str(self.root), str(self.store.path.parent)])
         inspector = HealthInspector(systemctl)
         next_metric = next_prune = next_cleanup = next_settings = 0.0
+        next_ingest = 0.0
         try:
             while self.running:
                 began = time.monotonic()
@@ -455,6 +444,7 @@ class Collector:
                             max_bytes = int(current.get("TELEMETRY_MAX_GIB", max_bytes / 1024**3) * 1024**3)
                             retention_days = current.get("TELEMETRY_RETENTION_DAYS", retention_days)
                             flush_seconds = current.get("TELEMETRY_FLUSH_SECONDS", flush_seconds)
+                            next_ingest = min(next_ingest, began + flush_seconds)
                             metrics_seconds = current.get("TELEMETRY_METRICS_SECONDS", metrics_seconds)
                             self.batch_size = int(current.get("TELEMETRY_BATCH_SIZE", self.batch_size))
                             self.rotate_bytes = int(current.get("TELEMETRY_SPOOL_ROTATE_MIB", self.rotate_bytes / 1024**2) * 1024**2)
@@ -467,8 +457,13 @@ class Collector:
                             with self.store.db:
                                 self.store.set_metadata("settings_error", {"time": time.time(), "error": str(exc)})
                         next_settings = began + 30
-                    for path, endpoint, source, rotated in self.files():
-                        work += self.ingest_file(path, endpoint, source, rotated=rotated)
+                    if began >= next_ingest:
+                        for path, endpoint, source, rotated in self.files():
+                            work += self.ingest_file(path, endpoint, source, rotated=rotated)
+                        # A full batch indicates backlog. Drain it promptly in
+                        # bounded transactions; otherwise honor the configured
+                        # ingestion interval independently of housekeeping.
+                        next_ingest = time.monotonic() + (.01 if work >= self.batch_size else flush_seconds)
                     now = time.monotonic()
                     if now >= next_metric:
                         if journal:
@@ -487,9 +482,6 @@ class Collector:
                         next_prune = now + 60
                     if now >= next_cleanup:
                         self.rotate()
-                        for path, endpoint, source, rotated in self.files():
-                            if rotated:
-                                self.ingest_file(path, endpoint, source, rotated=True)
                         self.cleanup()
                         next_cleanup = now + 10
                 except (sqlite3.Error, OSError) as exc:
@@ -504,9 +496,10 @@ class Collector:
                         raise
                 if once:
                     break
-                # Backlog drains continuously in bounded transactions. Yield
-                # between batches instead of waiting a full second per batch.
-                delay = .01 if work >= self.batch_size else max(.01, flush_seconds - (time.monotonic() - began))
-                time.sleep(min(delay, 1.0))
+                # Wake for metrics/settings/shutdown at least once per second
+                # without accidentally ingesting every time this loop wakes.
+                deadline = min(next_ingest, next_metric, next_prune, next_cleanup,
+                               next_settings if settings else float("inf"))
+                time.sleep(min(1.0, max(.01, deadline - time.monotonic())))
         finally:
             self.close()

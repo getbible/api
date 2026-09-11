@@ -500,6 +500,7 @@ main() {
     [[ $# -gt 0 ]] && shift
     case "$command" in
         menu) gb_system_init; ui_init; menu_main ;;
+        infrastructure-prepare) gb_require_root; infrastructure_prepare ;;
         container-init) cmd_container_init ;;
         resources) gb_system_init; resources_cli "$@" ;;
         dashboard) gb_system_init; dashboard_cli "$@" ;;

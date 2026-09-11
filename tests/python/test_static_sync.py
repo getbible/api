@@ -124,6 +124,36 @@ class StaticSyncTest(unittest.TestCase):
         self.assertEqual(self.live.resolve(), first)
         self.assertEqual(len(list((self.data / "releases/v2").iterdir())), 1)
 
+    def test_effective_storage_limit_overrides_installed_limit(self) -> None:
+        import time
+        state = self.root / "storage"
+        state.mkdir()
+        (state / "usage.json").write_text(json.dumps({"generated_at": time.time(), "used_bytes": 1024**3}))
+        settings = {"GB_SYNC_STORAGE_STATE": str(state), "GB_STORAGE_GUARD": str(BIN / "getbible-storage-guard")}
+        # An increased effective cap immediately permits this existing endpoint.
+        self.sync(GB_SYNC_STORAGE_MAX_GIB="1", GETBIBLE_STORAGE_MAX_GIB="000002", **settings)
+        first = self.live.resolve()
+        self.payload("replacement")
+        self.commit()
+        # A decreased cap is honored without reinstalling the endpoint unit.
+        self.sync(success=False, GB_SYNC_STORAGE_MAX_GIB="2", GETBIBLE_STORAGE_MAX_GIB="1", **settings)
+        self.assertEqual(self.live.resolve(), first)
+        self.sync(success=False, GB_SYNC_STORAGE_MAX_GIB="1", GETBIBLE_STORAGE_MAX_GIB="", **settings)
+        self.assertEqual(self.live.resolve(), first)
+        # Explicit zero disables the guard even when the installed cap is set.
+        self.sync(GB_SYNC_STORAGE_MAX_GIB="1", GETBIBLE_STORAGE_MAX_GIB="000000", **settings)
+        self.assertNotEqual(self.live.resolve(), first)
+
+    def test_invalid_storage_limit_fails_before_creating_sync_directories(self) -> None:
+        for value in ("-1", "1.5", "nan", "1000000", "1e2", "1;true", ""):
+            with self.subTest(value=value):
+                overrides = {"GETBIBLE_STORAGE_MAX_GIB": value, "GB_SYNC_STORAGE_MAX_GIB": "invalid"}
+                result = self.sync(success=False, **overrides)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("Invalid storage limit", result.stderr)
+                self.assertFalse(self.home.exists())
+                self.assertFalse(self.data.exists())
+
     def test_same_second_forced_exports_never_reuse_or_modify_release(self) -> None:
         self.sync()
         first = self.live.resolve()

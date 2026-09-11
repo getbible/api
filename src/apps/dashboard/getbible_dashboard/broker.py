@@ -17,7 +17,7 @@ class BrokerClient:
         self.timeout = timeout
 
     def call(self, method, params=None):
-        if method not in {"operations", "submit", "job", "jobs", "endpoints", "storage", "translations"}:
+        if method not in {"state", "operations", "submit", "job", "jobs", "endpoints", "storage", "translations"}:
             raise BrokerError("Unsupported management request", "invalid_method")
         request_id = secrets.token_hex(16)
         encoded = json.dumps({"id": request_id, "method": method, "params": params or {}},

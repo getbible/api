@@ -18,6 +18,7 @@ const heartbeatRequests = [];
 const requests = [];
 let authenticated = false;
 let secretRevealed = false;
+let managementState = {refresh: {state: 'current', pending: false}, pending_jobs: 0, accepting_jobs: true};
 const now = Math.floor(Date.now() / 1000);
 const metric = {stamp: now, cpu: {capacity: 2, used_fraction: 0.34, counters: {throttled_usec: 500}}, memory: {current_bytes: 3 * 1073741824, limit_bytes: 4 * 1073741824, events: {oom_kill: 0}}, temperatures: [{sensor: 'fixture', celsius: 45}]};
 const summary = {calls: 12000, requests_per_second: 13.4, unique_ips: 86, bytes: 73400320, errors: 24, rate_limited: 7, cache_hits: 9300, cache_hit_ratio: 0.775, latency_ms: {p50: 5, p95: 25, p99: 100, approximate: true}, latest_metrics: metric, retention: {first_request: now - 604800}, breakdowns: Object.fromEntries(Object.entries({auth: ['anonymous', 'valid', 'rejected'], endpoint: ['query.example.test', 'search.example.test'], translation: ['kjv', 'asv'], search: ['faith hope'], reference: ['John 3:16'], book: ['43'], ip: ['192.0.2.10'], status: ['200', '429']}).map(([key, values]) => [key, values.map((value, i) => ({value, calls: 6000 / (i + 1), bytes: 1048576, errors: i}))]))};
@@ -48,6 +49,7 @@ await page.route('**/*', async route => {
     else if (name === 'translations') value = {endpoints: [{domain: 'query.example.test', label: 'v2', kind: 'query', generation: 'fixture', complete: true, workers: [worker]}]};
     else if (name === 'storage') value = {components: [{name: 'Bibles', kind: 'files', bytes: 1000000000, path: '/srv/getbible'}], total_bytes: 1000000000, filesystem_available_bytes: 800000000000};
     else if (name === 'operations') value = operations;
+    else if (name === 'management/state') value = managementState;
     else if (name === 'jobs') value = [{id: 'job-fixture', operation: 'token.add', status: 'succeeded', created: now}];
     else if (name === 'jobs/job-fixture') value = {id: 'job-fixture', operation: 'token.add', status: 'succeeded', created: now, output: 'Token created. Secret is available once.', secret_available: !secretRevealed};
     else if (name === 'jobs/job-fixture/reveal') {secretRevealed = true; value = {one_time_output: 'synthetic-token-do-not-use'};}
@@ -104,6 +106,11 @@ try {
   await page.getByLabel('domain', {exact: true}).fill('query.example.test');
   await page.getByLabel('kind', {exact: true}).selectOption('docs');
   await page.getByLabel('content', {exact: true}).fill('<h1>Fixture page</h1>');
+  managementState = {refresh: {state: 'waiting', pending: true}, pending_jobs: 1, accepting_jobs: false};
+  await page.getByText('Management services are updating', {exact: true}).waitFor();
+  assert.equal(await page.getByRole('button', {name: 'Review operation'}).isDisabled(), true);
+  managementState = {refresh: {state: 'current', pending: false}, pending_jobs: 0, accepting_jobs: true};
+  await page.getByText('Management services are updating', {exact: true}).waitFor({state: 'hidden'});
   await page.getByRole('button', {name: 'Review operation'}).click();
   await page.getByRole('button', {name: 'Run operation'}).click();
   assert.equal(actions.at(-1).arguments.content, '<h1>Fixture page</h1>');

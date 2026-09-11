@@ -70,7 +70,7 @@ gb_setting_validate() {
         DEFAULT_CLOUDFLARE_MODE) [[ "$value" == off || "$value" == dns || "$value" == proxied ]] ;;
         DEFAULT_CLOUDFLARE_CACHE) [[ "$value" == bypass || "$value" == respect ]] ;;
         DEFAULT_CLOUDFLARE_FEATURES) [[ "$value" == free || "$value" == paid ]] ;;
-        HSTS_INCLUDE_SUBDOMAINS|CLOUDFLARE_ENABLED|TELEGRAM_ENABLED|ADAPTIVE_RESOURCES|ADAPTIVE_ALLOW_IDLE_SHRINK|TELEMETRY_ENABLED|DASHBOARD_ENABLED) [[ "$value" == true || "$value" == false ]] ;;
+        HSTS_INCLUDE_SUBDOMAINS|CLOUDFLARE_ENABLED|TELEGRAM_ENABLED|ADAPTIVE_RESOURCES|ADAPTIVE_ALLOW_IDLE_SHRINK|DASHBOARD_ENABLED) [[ "$value" == true || "$value" == false ]] ;;
         DEFAULT_SYNC_SCHEDULE) [[ "$value" == daily || "$value" == weekly || "$value" == monthly ]] ;;
         DEFAULT_EXTENSIONS) [[ "$value" =~ ^[a-z0-9]+(,[a-z0-9]+)*$ ]] ;;
         DEFAULT_QUERY_WORKERS|DEFAULT_SEARCH_WORKERS)
@@ -91,7 +91,9 @@ gb_setting_validate() {
             [[ "$value" =~ ^[0-9]{1,2}$ ]] && (( 10#$value >= 5 && 10#$value <= 80 )) ;;
         ADAPTIVE_HIGH_PERCENT|ADAPTIVE_LOW_PERCENT|ALERT_CPU_PERCENT|ALERT_MEMORY_PERCENT|ALERT_DISK_PERCENT|ALERT_MEMORY_PRESSURE_PERCENT)
             [[ "$value" =~ ^[0-9]{1,2}$ ]] && (( 10#$value >= 1 && 10#$value <= 95 )) ;;
-        ADAPTIVE_INTERVAL|ADAPTIVE_COOLDOWN|ADAPTIVE_SUSTAINED_SAMPLES|TELEMETRY_BATCH_SIZE|TELEMETRY_FLUSH_SECONDS|TELEMETRY_METRICS_SECONDS)
+        TELEMETRY_BATCH_SIZE)
+            [[ "$value" =~ ^[1-9][0-9]{0,5}$ ]] && (( 10#$value <= 100000 )) ;;
+        ADAPTIVE_INTERVAL|ADAPTIVE_COOLDOWN|ADAPTIVE_SUSTAINED_SAMPLES|TELEMETRY_FLUSH_SECONDS|TELEMETRY_METRICS_SECONDS)
             [[ "$value" =~ ^[1-9][0-9]{0,7}$ ]] ;;
         TELEMETRY_RETENTION_DAYS) [[ "$value" =~ ^[0-9]{1,6}$ ]] ;;
         DASHBOARD_IDLE_SECONDS) [[ "$value" =~ ^[0-9]{1,4}$ ]] && (( 10#$value >= 10 && 10#$value <= 3600 )) ;;

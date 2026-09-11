@@ -227,4 +227,5 @@ stop_probe
 check 'certificate renewal preserves nginx master' "$NGINX_PID" "$(systemctl show --property=MainPID --value nginx)"
 check 'query ready after certificate renewal' '{"status":"ready"}' "$(request "$Q" /readyz | tr -d '\n')"
 check 'search ready after certificate renewal' '{"status":"ready"}' "$(request "$S" /readyz | tr -d '\n')"
+/usr/bin/python3 "$ROOT/tests/integration/infrastructure.py" --mode native --manager "$GB"
 printf '\n== %d production deployment checks passed ==\n' "$PASS"

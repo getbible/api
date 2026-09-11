@@ -72,6 +72,7 @@ tg_install_helper() { test_server_action telegram-helper; }
 sync_install_tools() { test_server_action sync-tools; }
 logs_render_rotation() { test_server_action log-rotation; }
 infrastructure_ensure() { test_server_action infrastructure; }
+infrastructure_update() { test_server_action infrastructure-update; }
 tg_notify() { printf 'notify:%s\n' "$*" >> "$GB_TEST_EVENTS"; }
 ep_exists() { [[ "$1" == api.example.test ]]; }
 endpoint_apply() { printf 'apply:%s\n' "$1" >> "$GB_TEST_EVENTS"; }
@@ -282,6 +283,7 @@ reject_update
 fixture
 git -C "$CHECKOUT" remote set-url deployment "$GB_TEST_CASE/missing.git"
 run_cli update api.example.test || fail 'existing domain update failed'
+grep -qx 'server:infrastructure-update' "$GB_TEST_EVENTS" || fail 'domain update did not refresh management infrastructure'
 grep -qx 'apply:api.example.test' "$GB_TEST_EVENTS" || fail 'domain update did not apply the domain'
 assert_eq "$(git -C "$CHECKOUT" rev-parse HEAD)" "$BEFORE" 'domain update unexpectedly pulled source'
 run_cli update || fail 'existing all-domain update failed'

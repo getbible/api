@@ -1,4 +1,6 @@
 [Unit]
+Requires=getbible-prepare.service
+After=getbible-prepare.service
 Description=getBible local management job broker
 After=local-fs.target
 OnFailure=getbible-alert@%n.service

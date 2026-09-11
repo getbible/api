@@ -147,7 +147,7 @@ sync_install_version() {
         "SOURCE_PATH=$EV_SOURCE_PATH" "EXTENSIONS=$EP_EXTENSIONS" "EXTRA_FILES=$extras" "USER=$user" \
         "GROUP=$GB_READERS_GROUP" "HOME=$home" "KEY_FILE=$(sync_key_file "$domain" "$label")" "DATA_DIR=$(ep_data_dir "$domain")" \
         "STORAGE_MAX_GIB=$(gb_global STORAGE_MAX_GIB 0)" "STORAGE_STATE=$GB_VAR/storage" \
-        "LIBEXEC=$GB_LIBEXEC" "TELEGRAM_CONF=$GB_TELEGRAM_CONF" "GETBIBLE=${GB_SELF:-$GB_REPO_DIR/getbible.sh}" || return 1
+        "LIBEXEC=$GB_LIBEXEC" "RUN=$GB_RUN" "TELEGRAM_CONF=$GB_TELEGRAM_CONF" "GETBIBLE=${GB_SELF:-$GB_REPO_DIR/getbible.sh}" || return 1
     gb_render "$GB_TYPES/static/templates/sync.timer.tmpl" "$stage_timer" \
         "DOMAIN=$domain" "LABEL=$label" "REPO_URL=$EV_REPO_URL" "SCHEDULE=$schedule" || return 1
     sd_install_unit "$stage_service" "$unit.service" || return 1
