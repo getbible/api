@@ -85,12 +85,16 @@ def account(*args):
 def broker_probe():
     # This child really runs as the production dashboard UID. The broker checks
     # SO_PEERCRED; root making an equivalent call would not cover that boundary.
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-        connection.settimeout(10)
-        connection.connect("/run/getbible-admin/broker.sock")
-        connection.sendall(b'{"id":"ci-peer","method":"state","params":{}}\n')
-        with connection.makefile("rb") as stream:
-            response = json.loads(stream.readline(65536))
+    def exchange():
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(10)
+            connection.connect("/run/getbible-admin/broker.sock")
+            connection.sendall(b'{"id":"ci-peer","method":"state","params":{}}\n')
+            with connection.makefile("rb") as stream:
+                return json.loads(stream.readline(65536))
+
+    # Type=simple gives systemd a PID before the replacement binds its socket.
+    response = wait_for(exchange, "replacement broker accepts its authenticated peer")
     check("error" not in response, "dashboard UID is authorized by the actual broker")
     check("refresh" in response["result"], "broker returns its persisted refresh state")
 
