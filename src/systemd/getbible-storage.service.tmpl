@@ -4,8 +4,10 @@ After=getbible-prepare.service
 Description=getBible managed storage accounting
 After=local-fs.target
 OnFailure=getbible-alert@%n.service
-StartLimitIntervalSec=300
-StartLimitBurst=5
+# Successful oneshot starts count toward systemd's rate limit too. The timer
+# already waits 30 seconds after completion, and manual refreshes must remain
+# available. There is no automatic Restart loop for this bounded sampler.
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot

@@ -16,6 +16,7 @@ status="$(bash "$GB" dashboard status --yes)"
 [[ -f "$GB_PREFIX/etc/systemd/system/getbible-adapt.timer" ]] || fail 'adaptive timer is missing'
 [[ -f "$GB_PREFIX/etc/systemd/system/getbible-storage.timer" ]] || fail 'independent storage timer is missing'
 grep -qF 'OnUnitInactiveSec=30s' "$GB_PREFIX/etc/systemd/system/getbible-storage.timer" || fail 'storage accounting must refresh within the admission freshness window'
+grep -qFx 'StartLimitIntervalSec=0' "$GB_PREFIX/etc/systemd/system/getbible-storage.service" || fail 'successful periodic samples must not exhaust a service start quota'
 grep -qF 'TimeoutStartSec=75' "$GB_PREFIX/etc/systemd/system/getbible-storage.service" || fail 'storage sampling must have a finite deadline'
 grep -qF 'MemoryMax=512M' "$GB_PREFIX/etc/systemd/system/getbible-storage.service" || fail 'storage sampling must have a finite memory limit'
 [[ ! -e "$GB_PREFIX/etc/nginx/sites-enabled/getbible-dashboard.conf" ]] || fail 'disabled dashboard must not expose a vhost'
