@@ -1,35 +1,28 @@
 #!/usr/bin/env python3
-"""Traffic analytics from the getBible JSON access logs.
+"""Origin analytics from the canonical, continuously collected SQLite history.
 
-Usage: getbible-analytics --log-root DIR [--endpoint DOMAIN ...]
-                          [--window today|24h|7d|30d|all] [--json] [--top N]
-
-Reads every endpoint's live access log and its archived rotations whose
-modification time falls inside the window, streams the JSON lines, and
-reports per endpoint and combined:
-
-  total calls      every request except CORS preflights (OPTIONS)
-  unique callers   distinct token ids, or distinct client addresses when no
-                   token was presented (IPv6 collapsed to its /64)
-  status classes, rate-limited requests, bytes, latency percentiles, cache
-  hits, top paths, versions, tokens and user agents.
-
-Combined unique callers are the union across endpoints, so one client
-that used two endpoints counts once. Nothing here prints a raw address.
+No archive scans run when a dashboard or CLI report opens. Counts and latency
+queries include every retained origin request in the selected time range.
 """
 
 from __future__ import annotations
 
 import argparse
-import gzip
-import hashlib
 import ipaddress
 import json
 import os
+import sqlite3
 import sys
 import time
-from collections import Counter
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
+from pathlib import Path
+
+_base = Path(__file__).resolve().parent
+for _package in (_base / "apps" / "telemetry", _base.parent / "apps" / "telemetry"):
+    if _package.is_dir():
+        sys.path.insert(0, str(_package))
+        break
+from getbible_telemetry import TelemetryStore
 
 UTC = timezone.utc
 
@@ -50,15 +43,8 @@ def caller_key(entry: dict) -> str:
     return "ip:" + address
 
 
-def compact(key: str) -> bytes:
-    return hashlib.blake2b(key.encode("utf-8"), digest_size=12).digest()
 
 
-def parse_time(value: str) -> float | None:
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
-    except (ValueError, AttributeError):
-        return None
 
 
 def window_start(name: str, now: float) -> float:
@@ -69,174 +55,14 @@ def window_start(name: str, now: float) -> float:
     return 0.0 if seconds is None else now - seconds
 
 
-def percentile(values: list[float], fraction: float) -> float:
-    if not values:
-        return 0.0
-    values = sorted(values)
-    index = min(len(values) - 1, int(round(fraction * (len(values) - 1))))
-    return values[index]
 
 
-class Stats:
-    def __init__(self) -> None:
-        self.calls = 0
-        self.preflights = 0
-        self.callers: set[bytes] = set()
-        self.ips: set[bytes] = set()
-        self.tokens: Counter = Counter()
-        self.status: Counter = Counter()
-        self.limited = 0
-        self.bytes = 0
-        self.times: list[float] = []
-        self.cache_hits = 0
-        self.cache_total = 0
-        self.paths: Counter = Counter()
-        self.versions: Counter = Counter()
-        self.agents: Counter = Counter()
-        self.days: Counter = Counter()
-        self.malformed = 0
-        self.first: float | None = None
-        self.last: float | None = None
-
-    def add(self, entry: dict, stamp: float) -> None:
-        if entry.get("method") == "OPTIONS":
-            self.preflights += 1
-            return
-        self.calls += 1
-        key = caller_key(entry)
-        self.callers.add(compact(key))
-        if key.startswith("token:"):
-            self.tokens[key[6:]] += 1
-        else:
-            self.ips.add(compact(key))
-        try:
-            status = int(entry.get("status", 0))
-        except (TypeError, ValueError):
-            status = 0
-        self.status[f"{status // 100}xx" if status else "0"] += 1
-        if status == 429:
-            self.limited += 1
-        try:
-            self.bytes += int(entry.get("bytes", 0) or 0)
-        except (TypeError, ValueError):
-            pass
-        try:
-            duration = float(entry.get("request_time", 0) or 0)
-            if len(self.times) < 200_000:
-                self.times.append(duration)
-        except (TypeError, ValueError):
-            pass
-        cache = entry.get("cache") or ""
-        if cache and cache not in ("-", ""):
-            self.cache_total += 1
-            if cache == "HIT":
-                self.cache_hits += 1
-        uri = str(entry.get("uri") or "")
-        self.paths[uri.split("?", 1)[0][:120]] += 1
-        self.versions[entry.get("version") or "-"] += 1
-        self.agents[str(entry.get("user_agent") or "-")[:80]] += 1
-        self.days[datetime.fromtimestamp(stamp, UTC).strftime("%Y-%m-%d")] += 1
-        self.first = stamp if self.first is None or stamp < self.first else self.first
-        self.last = stamp if self.last is None or stamp > self.last else self.last
-
-    def merge(self, other: "Stats") -> None:
-        self.calls += other.calls
-        self.preflights += other.preflights
-        self.callers |= other.callers
-        self.ips |= other.ips
-        self.tokens.update(other.tokens)
-        self.status.update(other.status)
-        self.limited += other.limited
-        self.bytes += other.bytes
-        self.times.extend(other.times[: max(0, 200_000 - len(self.times))])
-        self.cache_hits += other.cache_hits
-        self.cache_total += other.cache_total
-        self.paths.update(other.paths)
-        self.versions.update(other.versions)
-        self.agents.update(other.agents)
-        self.days.update(other.days)
-        self.malformed += other.malformed
-        for stamp in (other.first, other.last):
-            if stamp is None:
-                continue
-            self.first = stamp if self.first is None or stamp < self.first else self.first
-            self.last = stamp if self.last is None or stamp > self.last else self.last
-
-    def summary(self, top: int) -> dict:
-        return {
-            "total_calls": self.calls,
-            "preflights": self.preflights,
-            "unique_callers": len(self.callers),
-            "unique_addresses": len(self.ips),
-            "unique_tokens": len(self.tokens),
-            "status": dict(sorted(self.status.items())),
-            "rate_limited": self.limited,
-            "bytes_sent": self.bytes,
-            "latency_seconds": {
-                "p50": round(percentile(self.times, 0.50), 4),
-                "p95": round(percentile(self.times, 0.95), 4),
-                "p99": round(percentile(self.times, 0.99), 4),
-            },
-            "cache_hit_ratio": round(self.cache_hits / self.cache_total, 3) if self.cache_total else None,
-            "top_paths": self.paths.most_common(top),
-            "versions": dict(self.versions.most_common(top)),
-            "tokens": dict(self.tokens.most_common(top)),
-            "top_user_agents": self.agents.most_common(top),
-            "calls_per_day": dict(sorted(self.days.items())),
-            "malformed_lines": self.malformed,
-            "first_seen": datetime.fromtimestamp(self.first, UTC).isoformat() if self.first else None,
-            "last_seen": datetime.fromtimestamp(self.last, UTC).isoformat() if self.last else None,
-        }
 
 
-def log_files(directory: str, start: float) -> list[str]:
-    files = []
-    live = os.path.join(directory, "access.log")
-    if os.path.isfile(live):
-        files.append(live)
-    archive = os.path.join(directory, "archive")
-    if os.path.isdir(archive):
-        for name in sorted(os.listdir(archive)):
-            if not name.startswith("access.log"):
-                continue
-            path = os.path.join(archive, name)
-            try:
-                if os.path.getmtime(path) >= start:
-                    files.append(path)
-            except OSError:
-                continue
-    return files
 
 
-def read_lines(path: str):
-    opener = gzip.open if path.endswith(".gz") else open
-    try:
-        with opener(path, "rt", encoding="utf-8", errors="replace") as handle:
-            yield from handle
-    except OSError:
-        return
 
 
-def analyse(directory: str, start: float, end: float) -> Stats:
-    stats = Stats()
-    for path in log_files(directory, start):
-        for line in read_lines(path):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except ValueError:
-                stats.malformed += 1
-                continue
-            stamp = parse_time(str(entry.get("time", "")))
-            if stamp is None:
-                stats.malformed += 1
-                continue
-            if stamp < start or stamp > end:
-                continue
-            stats.add(entry, stamp)
-    return stats
 
 
 def fmt_int(value: int) -> str:
@@ -274,9 +100,60 @@ def render_text(report: dict, top: int) -> str:
     return "\n".join(lines)
 
 
+def database_summary(store: TelemetryStore, start: float, end: float, domains: list[str], top: int) -> dict:
+    """Aggregate in SQLite, including every retained request in the range."""
+    store.db.create_function("caller_key", 2, lambda token, address: caller_key({"token": token, "remote_addr": address}), deterministic=True)
+    where = "stamp>=? AND stamp<? AND edge_json IS NOT NULL"
+    values = [start, end]
+    if domains:
+        where += " AND endpoint IN (" + ",".join("?" for _ in domains) + ")"
+        values.extend(domains)
+    store._deadline()
+    preflights = store.db.execute("SELECT count(*) FROM requests WHERE method='OPTIONS' AND " + where, values).fetchone()[0]
+    where += " AND method!='OPTIONS'"
+    row = store.db.execute(
+        "SELECT count(*) AS total_calls,count(DISTINCT caller_key(token_id,remote_addr)) AS unique_callers, "
+        "count(DISTINCT CASE WHEN token_id='' THEN caller_key('',remote_addr) END) AS unique_addresses, "
+        "count(DISTINCT NULLIF(token_id,'')) AS unique_tokens,COALESCE(sum(status=429),0) AS rate_limited,"
+        "COALESCE(sum(bytes),0) AS bytes_sent,COALESCE(sum(cache='HIT'),0) AS cache_hits,"
+        "COALESCE(sum(cache NOT IN ('','-')),0) AS cache_total,min(stamp) AS first_seen,max(stamp) AS last_seen "
+        "FROM requests WHERE " + where, values).fetchone()
+    result = dict(row)
+    result["preflights"] = preflights
+    def counts(expression: str, *, extra: str = "", limited: bool = True) -> list:
+        query = "SELECT " + expression + ",count(*) AS n FROM requests WHERE " + where + extra + " GROUP BY 1 ORDER BY n DESC,1"
+        return [list(item) for item in store.db.execute(query + (" LIMIT ?" if limited else ""), [*values, top] if limited else values)]
+    result["status"] = dict(counts("CAST(status / 100 AS INTEGER) || 'xx'"))
+    result["top_paths"] = counts("path")
+    result["versions"] = dict(counts("version"))
+    result["tokens"] = dict(counts("token_id", extra=" AND token_id!=''"))
+    result["top_user_agents"] = counts("user_agent")
+    result["calls_per_day"] = dict(sorted(counts("strftime('%Y-%m-%d',stamp,'unixepoch')", limited=False)))
+    hits = result.pop("cache_hits")
+    total = result.pop("cache_total")
+    result["cache_hit_ratio"] = hits / total if total else None
+    count = result["total_calls"]
+    result["latency_seconds"] = {}
+    for name, fraction in (("p50", .5), ("p95", .95), ("p99", .99)):
+        offset = min(max(0, count-1), round(fraction * max(0, count-1)))
+        value = store.db.execute("SELECT duration_ms FROM requests WHERE " + where + " ORDER BY duration_ms LIMIT 1 OFFSET ?",
+                                 [*values, offset]).fetchone() if count else None
+        result["latency_seconds"][name] = round(value[0] / 1000, 4) if value else 0
+    event_where = "stamp>=? AND stamp<? AND json_extract(payload,'$.malformed')=1"
+    event_values = [start, end]
+    if domains:
+        event_where += " AND endpoint IN (" + ",".join("?" for _ in domains) + ")"
+        event_values.extend(domains)
+    result["malformed_lines"] = store.db.execute("SELECT count(*) FROM events WHERE " + event_where, event_values).fetchone()[0]
+    for key in ("first_seen", "last_seen"):
+        result[key] = datetime.fromtimestamp(result[key], UTC).isoformat() if result[key] is not None else None
+    return result
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--log-root", required=True)
+    parser.add_argument("--log-root", help="Compatibility option; history is read from --db")
+    parser.add_argument("--db", default=os.environ.get("GETBIBLE_TELEMETRY_DB", "/var/lib/getbible/telemetry/traffic.sqlite3"))
     parser.add_argument("--endpoint", action="append", default=[])
     parser.add_argument("--window", choices=sorted(WINDOWS), default="24h")
     parser.add_argument("--json", action="store_true")
@@ -285,22 +162,24 @@ def main(argv: list[str]) -> int:
 
     now = time.time()
     start = window_start(args.window, now)
-    endpoints = args.endpoint or sorted(
-        name for name in os.listdir(args.log_root)
-        if os.path.isdir(os.path.join(args.log_root, name)) and os.path.exists(os.path.join(args.log_root, name, "access.log"))
-    ) if os.path.isdir(args.log_root) else []
-    combined = Stats()
     report = {
         "window": args.window,
         "from": datetime.fromtimestamp(start, UTC).isoformat() if start else "beginning",
         "to": datetime.fromtimestamp(now, UTC).isoformat(),
         "endpoints": {},
     }
-    for name in endpoints:
-        stats = analyse(os.path.join(args.log_root, name), start, now)
-        report["endpoints"][name] = stats.summary(args.top)
-        combined.merge(stats)
-    report["combined"] = combined.summary(args.top)
+    try:
+        with TelemetryStore(args.db, readonly=True) as store:
+            endpoints = args.endpoint or sorted({item["endpoint"] for item in store.endpoints()})
+            args.top = max(1, min(args.top, 1000))
+            for name in endpoints:
+                report["endpoints"][name] = database_summary(store, start, now, [name], args.top)
+            report["combined"] = database_summary(store, start, now, args.endpoint, args.top)
+            report["history"] = store.storage()
+            report["origin_only"] = True
+    except sqlite3.Error as exc:
+        print("Telemetry history unavailable: " + str(exc) + ". Check getbible-telemetry.service.", file=sys.stderr)
+        return 1
     if args.json:
         print(json.dumps(report, indent=2))
     else:

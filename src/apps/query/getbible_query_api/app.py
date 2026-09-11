@@ -13,6 +13,7 @@ from urllib.parse import quote
 
 from flask import Flask, Response, g, request
 
+from getbible_api_common.control import install_control
 from getbible_api_common import detect
 from getbible_api_common.bible import query_client
 from getbible_api_common.health import register_health
@@ -41,6 +42,7 @@ def create_app(settings: Settings | None = None) -> Flask:
     )
     app.extensions["getbible"] = bible
     app.extensions["settings"] = settings
+    install_control(app, bible, settings.librarian, "query")
     version = settings.librarian.version
     default_translation = settings.service.default_translation
     default_reference = settings.default_reference
@@ -106,8 +108,9 @@ def create_app(settings: Settings | None = None) -> Flask:
             raise ProblemError(400, "invalid_reference", f"Reference cannot exceed {max_length} characters.")
         g.reference = reference
         result = bible.select(reference, code)
+        g.books = sorted({chapter["book_nr"] for chapter in result.values() if "book_nr" in chapter})
         g.references = len([part for part in reference.split(";") if part.strip()])
         g.verses = sum(len(chapter["verses"]) for chapter in result.values())
-        return json_response(app, result, cache_seconds=settings.service.cache_seconds)
+        return json_response(app, result, cache_seconds=app.extensions["getbible_control"].cache_seconds(settings.service.cache_seconds))
 
     return app

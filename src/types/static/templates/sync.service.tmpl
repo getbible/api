@@ -18,6 +18,9 @@ Environment=GB_SYNC_HOME={{HOME}}
 Environment=GB_SYNC_KEY={{KEY_FILE}}
 Environment=GB_SYNC_DATA={{DATA_DIR}}
 Environment=GB_SYNC_KEEP=2
+Environment=GB_SYNC_STORAGE_MAX_GIB={{STORAGE_MAX_GIB}}
+Environment=GB_SYNC_STORAGE_STATE={{STORAGE_STATE}}
+Environment=GB_STORAGE_GUARD={{LIBEXEC}}/getbible-storage-guard
 Environment=GB_NOTIFY={{LIBEXEC}}/getbible-notify
 Environment=GB_EXPORT={{LIBEXEC}}/getbible-export-tree
 Environment=GB_TELEGRAM_CONF={{TELEGRAM_CONF}}
@@ -46,5 +49,5 @@ LockPersonality=true
 CapabilityBoundingSet=
 AmbientCapabilities=
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-ReadWritePaths={{DATA_DIR}} {{HOME}}
+ReadWritePaths={{DATA_DIR}} {{HOME}} {{STORAGE_STATE}}
 UMask=0027

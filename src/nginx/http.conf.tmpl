@@ -23,6 +23,7 @@ log_format getbible_json escape=json '{'
     '"user_agent":"$http_user_agent",'
     '"request_id":"$request_id",'
     '"token":"$gb_token_id",'
+    '"auth_state":"$gb_auth_state",'
     '"scheme":"$gb_public_scheme",'
     '"protocol":"$server_protocol",'
     '"tls":"$ssl_protocol",'
@@ -59,6 +60,17 @@ map "$server_name $gb_token_candidate $msec" $gb_token_id {
     volatile;
     default "";
     include {{NGINX_GB_DIR}}/token-validity/*.map;
+}
+
+# Log credential presence and validity without ever logging the credential.
+map $http_authorization $gb_authorization_present {
+    "" 0;
+    default 1;
+}
+map "$gb_token_id:$gb_authorization_present" $gb_auth_state {
+    ":0" anonymous;
+    ":1" rejected;
+    default valid;
 }
 
 # Limits key on the client address and are switched off for token holders:

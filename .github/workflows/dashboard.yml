@@ -1,0 +1,41 @@
+name: Dashboard
+
+on:
+  pull_request:
+  push:
+    branches: [main, master, staging]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: src/apps/dashboard/ui/package-lock.json
+      - name: Build the pinned dashboard
+        working-directory: src/apps/dashboard/ui
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build
+          npm test
+          git diff --exit-code -- ../static
+      - name: Install browser test tooling
+        run: |
+          npm install --prefix "$RUNNER_TEMP/dashboard-browser" --no-save --no-audit --no-fund playwright@1.62.1
+          "$RUNNER_TEMP/dashboard-browser/node_modules/.bin/playwright" install --with-deps chromium
+      - name: Exercise dashboard with synthetic local API responses
+        run: PLAYWRIGHT_MODULE="$RUNNER_TEMP/dashboard-browser/node_modules/playwright/index.mjs" node tests/dashboard-ui.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dashboard-browser-checks
+          path: test-artifacts/dashboard-*.png
+          if-no-files-found: ignore

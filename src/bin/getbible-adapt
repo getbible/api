@@ -1,0 +1,248 @@
+#!/usr/bin/env python3
+"""Sample runtime demand and apply bounded targets through normal deployments.
+
+CPU scheduling remains immediate in the kernel. This slow control loop changes
+worker counts and memory weights only after sustained demand, with a cooldown
+and the manager's existing candidate/readiness/drain admission checks.
+"""
+from __future__ import annotations
+import argparse
+import fcntl
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+import time
+
+
+def module(name, path):
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(name, loader)
+    result = importlib.util.module_from_spec(spec)
+    loader.exec_module(result)
+    return result
+
+
+def config(path):
+    try:
+        return dict(line.split("=", 1) for line in Path(path).read_text().splitlines() if re.match(r"^[A-Z][A-Z0-9_]*=", line))
+    except FileNotFoundError:
+        return {}
+
+
+def atomic_json(path, data):
+    fd, temporary = tempfile.mkstemp(prefix=".adaptive-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump(data, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def envfile(path):
+    values = config(path)
+    for key, value in values.items():
+        if value.startswith('"'):
+            # systemd EnvironmentFile uses quoted strings, never shell eval.
+            value = re.sub(r'\\([\\"])', r'\1', value[1:-1])
+        values[key] = value
+    return values
+
+
+def decide(settings, previous, sample, target):
+    """Pure bounded decision function: no process signals or request-path work."""
+    high = int(settings.get("ADAPTIVE_HIGH_PERCENT", "80"))
+    low = int(settings.get("ADAPTIVE_LOW_PERCENT", "20"))
+    count = int(settings.get("ADAPTIVE_SUSTAINED_SAMPLES", "4"))
+    busy = sample["utilization"] >= high or sample["queue_percent"] >= high
+    quiet = sample["utilization"] < low and sample["queue_percent"] < low
+    pressure = sample["memory_percent"] >= 85
+    status = {"high": previous.get("high", 0) + 1 if busy else 0,
+              "low": previous.get("low", 0) + 1 if quiet else 0,
+              "pressure": previous.get("pressure", 0) + 1 if pressure else 0}
+    updated = dict(target)
+    if status["pressure"] >= count:
+        updated["weight"] = min(16, int(target["weight"]) + 1)
+    elif sample["automatic_workers"] and status["high"] >= count:
+        updated["workers"] = min(sample["workers_max"], sample["workers"] + 1)
+    elif settings.get("ADAPTIVE_ALLOW_IDLE_SHRINK", "false") == "true" and sample["automatic_workers"] and status["low"] >= count:
+        updated["workers"] = max(sample["workers_min"], sample["workers"] - 1)
+    if settings.get("ADAPTIVE_ALLOW_IDLE_SHRINK", "false") == "true" and status["low"] >= count and sample["memory_percent"] < low:
+        updated["weight"] = max(1, int(updated["weight"]) - 1)
+    return updated, status
+
+
+def source_change(args, item, environment, previous, diagnostic=None):
+    repository = environment.get("GETBIBLE_REPOSITORY")
+    version = environment.get("GETBIBLE_VERSION")
+    if not repository or not version:
+        return previous
+    path = Path(repository) / version
+    try:
+        resolved = path.resolve(strict=True)
+        metadata = resolved.stat()
+        source = hashlib.sha256(repr((str(resolved), metadata.st_dev, metadata.st_ino)).encode()).hexdigest()
+    except OSError:
+        return previous
+    if source == previous:
+        return source
+    # The manager transitions every worker and changes only the managed
+    # nginx cache-key epoch through nginx -t/reload/rollback. Old in-flight
+    # responses remain in the old namespace instead of refilling a purged
+    # current cache. No app deployment, certificate, or DNS action occurs.
+    try:
+        refreshed = subprocess.run([args.manager, "runtime", item["domain"], "cache", item["label"],
+                                    "refresh-source"], capture_output=True, text=True, timeout=300, check=False)
+    except (OSError, subprocess.SubprocessError) as error:
+        if diagnostic is not None:
+            diagnostic.update(error=str(error)[-4096:], failed_at=time.time())
+        return previous
+    if refreshed.returncode:
+        if diagnostic is not None:
+            diagnostic.update(error=(refreshed.stdout + refreshed.stderr)[-4096:], failed_at=time.time())
+        return previous  # retry; never record a failed transition as done
+    return source
+
+
+def notify(args, level, title, body):
+    try:
+        subprocess.run([args.notify, level, title, body], capture_output=True, timeout=20, check=False)
+    except (OSError, subprocess.SubprocessError):
+        pass  # optional Telegram must not stop resource/source observation
+
+
+def run(args):
+    state_path = Path(args.state)
+    state_path.parent.mkdir(parents=True, exist_ok=True, mode=0o750)
+    lock = open(str(state_path) + ".lock", "a")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return {"status": "already running"}
+    with lock:
+        settings = config(args.config) | config(args.environment)
+        settings.update({key.removeprefix("GETBIBLE_"): value for key, value in os.environ.items() if key.startswith("GETBIBLE_")})
+        now = time.time()
+        try:
+            state = json.loads(state_path.read_text())
+        except (OSError, ValueError):
+            state = {}
+        if now - state.get("sampled_at", 0) < int(settings.get("ADAPTIVE_INTERVAL", "15")):
+            return {"status": "sampling interval"}
+        planner = module("getbible_resource_planner", Path(__file__).with_name("getbible-resources"))
+        entries = planner.inventory(Path(args.registry), Path(args.runtime_root))
+        previous_targets = dict(state.get("targets", {}))
+        state.setdefault("targets", {})
+        state.setdefault("endpoints", {})
+        changed = False
+        adaptive = settings.get("ADAPTIVE_RESOURCES", "true") == "true"
+        cooldown = now - state.get("applied_at", 0) >= int(settings.get("ADAPTIVE_COOLDOWN", "300"))
+        for item in entries:
+            active = Path(item["root"]) / "active"
+            if not active.is_dir():
+                continue
+            key = item["domain"] + "/" + item["label"]
+            previous = state["endpoints"].get(key, {})
+            environment = envfile(active / "runtime.env")
+            prefix = item["kind"].upper()
+            diagnostic = {}
+            source = source_change(args, item, environment, previous.get("source"), diagnostic)
+            source_state = {"source": source, "source_refresh_error": diagnostic or None,
+                            "source_error_notified_at": previous.get("source_error_notified_at", 0)}
+            if diagnostic and now - source_state["source_error_notified_at"] >= 900:
+                notify(args, "fail", "Source refresh failed: " + key,
+                       "Runtime source/cache refresh failed. The old cache namespace remains active; inspect getbible-adapt journal and adaptive.json.")
+                source_state["source_error_notified_at"] = now
+            elif not diagnostic and previous.get("source_refresh_error"):
+                notify(args, "ok", "Source refresh recovered: " + key,
+                       "Every serving worker acknowledged the publication and nginx cache namespace refresh succeeded.")
+            state["endpoints"][key] = previous | source_state
+            workers = int(environment.get(prefix + "_WORKERS", "1"))
+            threads = int(environment.get(prefix + "_THREADS", "1"))
+            unit = "getbible-" + item["kind"] + "-" + item["label"] + "-" + active.resolve().name + ".service"
+            show = subprocess.run([args.systemctl, "show", unit, "--property=CPUUsageNSec,MemoryCurrent,MemoryMax,ActiveState"], capture_output=True, text=True, timeout=10, check=False)
+            properties = dict(line.split("=", 1) for line in show.stdout.splitlines() if "=" in line)
+            if show.returncode or properties.get("ActiveState") != "active":
+                continue
+            try:
+                cpu = int(properties["CPUUsageNSec"])
+                memory = int(properties["MemoryCurrent"])
+                maximum = int(properties["MemoryMax"])
+            except (KeyError, ValueError):
+                continue
+            elapsed = max(1, now - previous.get("at", now))
+            cpu_delta = max(0, cpu - previous.get("cpu", cpu)) if previous.get("unit") == unit else 0
+            info = subprocess.run([args.control, "--runtime-root", args.runtime_root, "--cache-root", args.cache_root,
+                                   "--domain", item["domain"], "--kind", item["kind"], "--label", item["label"],
+                                   "--timeout", "2", "info"], capture_output=True, text=True, timeout=10, check=False)
+            try:
+                report = json.loads(info.stdout)
+                if not report.get("complete"):
+                    continue
+                inflight = sum(worker.get("activity", {}).get("inflight", 0) for worker in report.get("workers", []))
+            except ValueError:
+                continue
+            lower = int(item["config"].get("WORKERS_MIN", settings.get(prefix + "_WORKERS_MIN", "1")))
+            upper = int(item["config"].get("WORKERS_MAX", settings.get(prefix + "_WORKERS_MAX", "12")))
+            sample = {"utilization": 100 * cpu_delta / 1e9 / elapsed / max(1, workers),
+                      "queue_percent": 100 * inflight / max(1, workers * threads),
+                      "memory_percent": 100 * memory / max(1, maximum),
+                      "automatic_workers": item["config"].get("WORKERS", "auto") == "auto",
+                      "workers": workers, "workers_min": lower, "workers_max": upper}
+            target = state["targets"].get(key, {"workers": workers, "weight": planner.WEIGHT[item["kind"]]})
+            updated, counters = decide(settings, previous, sample, target)
+            state["endpoints"][key] = {**counters, **sample, "at": now, "cpu": cpu, "unit": unit, **source_state}
+            if adaptive and cooldown and updated != target:
+                state["targets"][key] = updated
+                changed = True
+        state["sampled_at"] = now
+        if changed:
+            state["applied_at"] = now
+        atomic_json(state_path, state)
+        if changed:
+            # The manager owns the global apply lock, finite-budget admission,
+            # candidate readiness, nginx validation/reload and old-worker drain.
+            applied = subprocess.run([args.manager, "resources", "apply"], capture_output=True, text=True, timeout=1800, check=False)
+            state["last_apply"] = {"at": now, "returncode": applied.returncode,
+                                   "output": (applied.stdout + applied.stderr)[-8192:]}
+            if applied.returncode:
+                state["targets"] = previous_targets
+            atomic_json(state_path, state)
+        return {"status": "applied" if changed else "sampled", "state": str(state_path),
+                "last_apply": state.get("last_apply")}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--once", action="store_true")
+    parser.add_argument("--config", default="/etc/getbible/getbible.conf")
+    parser.add_argument("--environment", default="/run/getbible/environment.conf")
+    parser.add_argument("--state", default="/var/lib/getbible/adaptive.json")
+    parser.add_argument("--registry", default="/etc/getbible/endpoints")
+    parser.add_argument("--runtime-root", default="/opt/getbible")
+    parser.add_argument("--cache-root", default="/var/cache/getbible")
+    parser.add_argument("--nginx-cache-root", default="/var/cache/nginx/getbible")
+    parser.add_argument("--systemctl", default="systemctl")
+    parser.add_argument("--manager", default="/usr/local/bin/getbible")
+    parser.add_argument("--notify", default="/usr/local/lib/getbible/getbible-notify")
+    parser.add_argument("--control", default="/usr/local/lib/getbible/getbible-runtime-control")
+    args = parser.parse_args()
+    try:
+        print(json.dumps(run(args)))
+        return 0
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        print(json.dumps({"status": "error", "error": str(error)}), file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

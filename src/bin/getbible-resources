@@ -40,16 +40,19 @@ def config(path: Path) -> dict[str, str]:
                 if re.match(r"^[A-Z][A-Z0-9_]*=", line))
 
 
-def cgroup_limits(proc: Path, override: Path | None = None) -> dict:
+def cgroup_limits(proc: Path, override: Path | None = None, owner: str = "self") -> dict:
     """Read this process's cgroup and every ancestor visible in its namespace.
 
     Mount roots can differ from membership paths (a subtree mount); never
     substitute host MemTotal for the container's actual memory.max.
     """
-    result = {"memory": None, "memory_path": None,
-              "cpus": float(len(os.sched_getaffinity(0))) if hasattr(os, "sched_getaffinity") else float(os.cpu_count() or 1)}
-    membership = proc / "self/cgroup"
+    affinity_pid = 0 if owner == "self" else int(owner)
+    cpus = float(len(os.sched_getaffinity(affinity_pid))) if hasattr(os, "sched_getaffinity") else float(os.cpu_count() or 1)
+    result = {"memory": None, "memory_path": None, "cpus": cpus}
+    membership = proc / owner / "cgroup"
     if not membership.is_file():
+        if owner != "self":
+            raise ValueError("Cannot inspect PID 1 cgroup membership for the aggregate runtime budget.")
         return result
     member = next((line[3:] for line in membership.read_text().splitlines() if line.startswith("0::")), None)
     if member is None:
@@ -115,7 +118,7 @@ def inventory(registry: Path, runtime: Path) -> list[dict]:
 
 
 def allocated(entries: list[dict], extra: int) -> tuple[list[int], int]:
-    sizes = [MINIMUM[item["kind"]] + extra * WEIGHT[item["kind"]] for item in entries]
+    sizes = [min(item.get("maximum", 2**63), item.get("minimum", MINIMUM[item["kind"]]) + extra * item.get("weight", WEIGHT[item["kind"]])) for item in entries]
     domains: dict[str, int] = {}
     for item, size in zip(entries, sizes):
         domains[item["domain"]] = domains.get(item["domain"], 0) + size
@@ -143,29 +146,105 @@ def domain_changes(result: dict, decreases_only: bool = False, exclude: str = ""
     return [domain for domain, _ in sorted(changed, key=lambda item: (-item[1], item[0]))]
 
 
-def endpoint_settings(item: dict, size: int, cpus: float) -> dict:
+def policy_values(args) -> dict:
+    policy = {
+        "MEMORY_CACHE_TTL": "2592000", "CACHE_TTL_JITTER": "0",
+        "QUERY_CPU_QUOTA": "auto", "SEARCH_CPU_QUOTA": "auto",
+        "CACHE_MEMORY_PERCENT": "50", "SHARED_CORPUS_LIMIT": "256",
+        "CHAPTER_CACHE_LIMIT": "100000", "TRANSLATION_CACHE_LIMIT": "256",
+        "REFERENCE_CACHE_LIMIT": "50000", "RESOURCE_RESERVE_PERCENT": "25",
+        "QUERY_MEMORY_MIN": "192M", "SEARCH_MEMORY_MIN": "512M",
+        "QUERY_MEMORY_MAX": "auto", "SEARCH_MEMORY_MAX": "auto",
+    }
+    for kind in ("QUERY", "SEARCH"):
+        policy.update({f"{kind}_WORKERS_MIN": "1", f"{kind}_WORKERS_MAX": "12",
+                       f"{kind}_THREADS_MIN": "1", f"{kind}_THREADS_MAX": "16" if kind == "QUERY" else "8",
+                       f"{kind}_WARM_TRANSLATIONS": "kjv"})
+    for argument in getattr(args, "policy", []) or []:
+        key, separator, value = argument.partition("=")
+        if not separator or key not in policy:
+            raise ValueError(f"Unknown resource policy: {key}")
+        policy[key] = value
+    policy["_authoritative"] = set(getattr(args, "authoritative", []) or [])
+    return policy
+
+
+def bounded(value, name, minimum, maximum):
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{name} must be an integer.") from error
+    if not minimum <= number <= maximum:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}.")
+    return number
+
+
+def endpoint_settings(item: dict, size: int, cpus: float, policy: dict | None = None, mode="docker") -> dict:
+    policy = policy or policy_values(argparse.Namespace())
     kind, saved = item["kind"], item["config"]
-    requested_workers = int(saved.get("WORKERS") or (4 if kind == "query" else 2))
-    requested_threads = int(saved.get("THREADS") or 4)
-    if not 1 <= requested_workers <= 64 or not 1 <= requested_threads <= 64:
-        raise ValueError(f"Invalid worker/thread configuration for {item['domain']} {item['label']}.")
+    prefix = kind.upper()
+    def value(key, fallback=None):
+        global_key = f"{prefix}_{key}" if f"{prefix}_{key}" in policy else key
+        if global_key in policy.get("_authoritative", set()):
+            return policy[global_key]
+        return saved.get(key, policy.get(global_key, fallback))
+    worker_min = bounded(value("WORKERS_MIN"), "WORKERS_MIN", 1, 64)
+    worker_max = bounded(value("WORKERS_MAX"), "WORKERS_MAX", worker_min, 64)
+    thread_min = bounded(value("THREADS_MIN"), "THREADS_MIN", 1, 64)
+    thread_max = bounded(value("THREADS_MAX"), "THREADS_MAX", thread_min, 64)
+    quota = value("CPU_QUOTA", "auto")
+    if quota == "auto":
+        quota = "" if mode == "docker" else ("200%" if kind == "query" else "400%")
+    if quota:
+        if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)?%", quota) or float(quota[:-1]) <= 0:
+            raise ValueError("CPU_QUOTA must be auto or a positive percentage.")
+        cpus = min(cpus, float(quota[:-1]) / 100)
+    requested_workers = saved.get("WORKERS") or "auto"
+    automatic = requested_workers == "auto"
+    desired = min(worker_max, max(worker_min, math.ceil(cpus))) if automatic else bounded(requested_workers, "WORKERS", 1, 64)
+    if automatic and "adaptive_workers" in item:
+        desired = bounded(item["adaptive_workers"], "adaptive workers", worker_min, worker_max)
+    requested_threads = saved.get("THREADS") or "4"
+    desired_threads = min(thread_max, 4) if requested_threads == "auto" else bounded(requested_threads, "THREADS", 1, 64)
     per_worker_floor = (128 if kind == "query" else 512) * MIB
-    workers = max(1, min(requested_workers, math.ceil(cpus), size // per_worker_floor))
+    worker_capacity = min(worker_max, max(1, math.ceil(cpus)), size // per_worker_floor)
+    if worker_capacity < worker_min:
+        raise ValueError(f"{item['domain']} {item['label']} cannot fit WORKERS_MIN={worker_min} in its allocated memory.")
+    workers = max(worker_min, min(desired, worker_capacity))
     per_worker = size // workers
-    threads = max(1, min(requested_threads, 4, per_worker // ((32 if kind == "query" else 256) * MIB)))
-    # Never use zero: the dependency may interpret it as an unlimited cache.
-    corpus = max(1, min(4, (per_worker - 256 * MIB) // (128 * MIB)))
-    warm = list(dict.fromkeys(code.strip() for code in saved.get("WARM_TRANSLATIONS", "").split(",") if code.strip()))
-    effective_warm = warm[:corpus] if kind == "search" else warm
+    thread_capacity = min(thread_max, max(1, per_worker // ((32 if kind == "query" else 128) * MIB)))
+    if thread_capacity < thread_min:
+        raise ValueError(f"{item['domain']} {item['label']} cannot fit THREADS_MIN={thread_min} in its allocated memory.")
+    threads = max(thread_min, min(desired_threads, thread_capacity))
+    cache_percent = bounded(value("CACHE_MEMORY_PERCENT"), "CACHE_MEMORY_PERCENT", 5, 80)
+    cache_bytes = max(MIB, per_worker * cache_percent // 100)
+    corpus = bounded(value("SHARED_CORPUS_LIMIT"), "SHARED_CORPUS_LIMIT", 1, 100000)
+    chapter_bytes = cache_bytes * (80 if kind == "query" else 10) // 100
+    translation_bytes = cache_bytes * (10 if kind == "query" else 20) // 100
+    shared_bytes = cache_bytes - chapter_bytes - translation_bytes
+    warm_value = value("WARM_TRANSLATIONS", "").strip().lower()
+    warm = [] if warm_value == "none" else list(dict.fromkeys(code.strip() for code in warm_value.split(",") if code.strip()))
+    if any(not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,29}", code) for code in warm):
+        raise ValueError("Invalid warm translation code.")
+    ttl = bounded(value("MEMORY_CACHE_TTL"), "MEMORY_CACHE_TTL", 0, 31536000)
+    jitter = float(value("CACHE_TTL_JITTER"))
+    if not 0 <= jitter < 1:
+        raise ValueError("CACHE_TTL_JITTER must be in [0, 1).")
     return {
-        "WORKERS": workers, "THREADS": threads,
+        "WORKERS": workers, "THREADS": threads, "WORKERS_MIN": worker_min,
+        "WORKERS_MAX": worker_capacity, "CPU_QUOTA": quota,
+        "TASKS_MAX": max(64 if kind == "query" else 128, workers * (threads + 5) + 32),
+        "NOFILE": 4096 if kind == "query" else 8192,
         "MEMORY_HIGH": size * 85 // 100, "MEMORY_MAX": size,
-        "WARM_TRANSLATIONS": ",".join(effective_warm),
-        "SEARCH_MAX_CONCURRENT": threads,
+        "MEMORY_CACHE_TTL": ttl, "CACHE_TTL_JITTER": jitter,
+        "WARM_TRANSLATIONS": ",".join(warm), "SEARCH_MAX_CONCURRENT": threads,
         "EXPENSIVE_CONCURRENT": max(1, threads // 2),
-        "TRANSLATION_CACHE_LIMIT": corpus, "SEARCH_CORPUS_LIMIT": corpus,
-        "REFERENCE_CACHE_LIMIT": max(256, min(5000, per_worker // (64 * 1024))),
-        "CHAPTER_CACHE_LIMIT": max(32, min(2048, per_worker // (512 * 1024))),
+        "TRANSLATION_CACHE_LIMIT": bounded(value("TRANSLATION_CACHE_LIMIT"), "TRANSLATION_CACHE_LIMIT", 1, 100000),
+        "SEARCH_CORPUS_LIMIT": corpus, "SHARED_CORPUS_LIMIT": corpus,
+        "SHARED_CORPUS_BYTES": shared_bytes, "CHAPTER_CACHE_BYTES": chapter_bytes,
+        "TRANSLATION_CACHE_BYTES": translation_bytes,
+        "REFERENCE_CACHE_LIMIT": bounded(value("REFERENCE_CACHE_LIMIT"), "REFERENCE_CACHE_LIMIT", 1, 1000000),
+        "CHAPTER_CACHE_LIMIT": bounded(value("CHAPTER_CACHE_LIMIT"), "CHAPTER_CACHE_LIMIT", 1, 1000000),
     }
 
 
@@ -226,7 +305,10 @@ def plan(args) -> dict:
         raise ValueError("Docker resource adaptation cannot be disabled; configure a finite Compose memory limit.")
     if not enabled:
         return {"enabled": False, "source": "native manifest and endpoint settings", "endpoints": []}
-    limits = cgroup_limits(Path(args.proc_root), Path(args.cgroup_root) if args.cgroup_root else None)
+    # Runtime services are siblings of the management service, not children
+    # inside its 512-MiB cgroup. PID 1 identifies the enclosing system/container
+    # budget while preserving every enclosing cgroup ceiling.
+    limits = cgroup_limits(Path(args.proc_root), Path(args.cgroup_root) if args.cgroup_root else None, owner="1")
     cap = limits["memory"]
     if args.mode == "docker" and cap is None:
         raise ValueError("Docker requires a finite cgroup v2 memory.max; set the Compose memory limit before starting getBible.")
@@ -235,9 +317,31 @@ def plan(args) -> dict:
     source = "cgroup" if requested is None else "configured budget"
     if requested is not None and cap is not None and cap < requested:
         source = "cgroup (lower than configured budget)"
-    reserve = max(256 * MIB, budget // 4)
+    policy = policy_values(args)
+    reserve = max(256 * MIB, budget * bounded(policy["RESOURCE_RESERVE_PERCENT"], "RESOURCE_RESERVE_PERCENT", 5, 75) // 100)
     available = budget - reserve
     entries = inventory(Path(args.registry), Path(args.runtime_root))
+    policy = policy_values(args)
+    adaptive_path = Path(getattr(args, "adaptive_state", "/var/lib/getbible/adaptive.json"))
+    try:
+        adaptive = json.loads(adaptive_path.read_text()).get("targets", {})
+    except (OSError, ValueError, AttributeError):
+        adaptive = {}
+    for item in entries:
+        min_key = item["kind"].upper() + "_MEMORY_MIN"
+        max_key = item["kind"].upper() + "_MEMORY_MAX"
+        minimum = policy[min_key] if min_key in policy["_authoritative"] else item["config"].get("MEMORY_MIN", policy[min_key])
+        maximum = policy[max_key] if max_key in policy["_authoritative"] else item["config"].get("MEMORY_MAX", policy[max_key])
+        item["minimum"] = memory_bytes(minimum)
+        item["maximum"] = 2**63 if maximum == "auto" else memory_bytes(maximum)
+        if item["maximum"] < item["minimum"]:
+            raise ValueError("MEMORY_MAX cannot be lower than MEMORY_MIN.")
+        target = adaptive.get(item["domain"] + "/" + item["label"], {})
+        if isinstance(target, dict):
+            weight = target.get("weight", WEIGHT[item["kind"]])
+            item["weight"] = max(1, min(16, int(weight)))
+            if "workers" in target:
+                item["adaptive_workers"] = target["workers"]
     sizes, overlap = allocated(entries, 0)
     required = sum(sizes) + overlap
     if available < required:
@@ -258,7 +362,7 @@ def plan(args) -> dict:
         effective.append({"domain": item["domain"], "label": item["label"], "kind": item["kind"],
                           "requested_warm": item["config"].get("WARM_TRANSLATIONS", ""),
                           "selected_memory_max_bytes": selected_ceiling(item),
-                          "settings": endpoint_settings(item, size, limits["cpus"])})
+                          "settings": endpoint_settings(item, size, limits["cpus"], policy, args.mode)})
     running, live = running_memory(entries, args.systemctl, args.offline) if args.candidate_domain else (None, [])
     candidate = sum(item["settings"]["MEMORY_MAX"] for item in effective if item["domain"] == args.candidate_domain)
     if running is not None and running + candidate > available:
@@ -271,7 +375,7 @@ def plan(args) -> dict:
             "cgroup_limit_path": limits["memory_path"], "cpu_capacity": limits["cpus"],
             "infrastructure_reserve_bytes": reserve, "steady_runtime_bytes": sum(sizes),
             "candidate_reserve_bytes": overlap, "running_bytes": running, "running_generations": live,
-            "note": "Cache capacities are entry counts, not byte guarantees. Warm-set truncation does not disable translations. Minimum sizes are sizing floors; runtime readiness still decides whether a workload fits.",
+            "note": "Cache byte budgets bound estimated retained objects; process RSS also includes request work, shared pages and interpreter overhead. Configured warm lists are honored and may evict under a small byte budget. Runtime readiness and cgroup ceilings remain authoritative.",
             "endpoints": effective}
 
 
@@ -279,6 +383,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("native", "docker"), default="native")
     parser.add_argument("--budget", default="auto")
+    parser.add_argument("--policy", action="append", default=[], metavar="KEY=VALUE")
+    parser.add_argument("--authoritative", action="append", default=[])
+    parser.add_argument("--adaptive-state", default="/var/lib/getbible/adaptive.json")
     parser.add_argument("--registry", default="/etc/getbible/endpoints")
     parser.add_argument("--runtime-root", default="/opt/getbible")
     parser.add_argument("--proc-root", default="/proc")

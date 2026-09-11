@@ -98,6 +98,32 @@ class StaticSyncTest(unittest.TestCase):
         self.assertEqual(self.live.resolve(), current)
         self.assertEqual(len(list((self.data / "releases" / "v2").iterdir())), 2)
 
+    def test_unchanged_check_renews_freshness_without_republishing(self) -> None:
+        self.sync()
+        first = self.live.resolve()
+        marker = self.data / ".freshness-v2"
+        self.assertTrue(marker.is_file())
+        os.utime(marker, (1, 1))
+        self.sync()
+        self.assertEqual(self.live.resolve(), first)
+        self.assertGreater(marker.stat().st_mtime, 1)
+        self.assertEqual(len(list((self.data / "releases/v2").iterdir())), 1)
+
+    def test_storage_refusal_preserves_current_publication(self) -> None:
+        self.sync()
+        first = self.live.resolve()
+        state = self.root / "storage"
+        state.mkdir()
+        import time
+        (state / "usage.json").write_text(json.dumps({"generated_at": time.time(), "used_bytes": 1024**3}))
+        self.payload("replacement")
+        self.commit()
+        refused = self.sync(success=False, GB_SYNC_STORAGE_MAX_GIB="1", GB_SYNC_STORAGE_STATE=str(state),
+                            GB_STORAGE_GUARD=str(BIN / "getbible-storage-guard"))
+        self.assertIn("serving and rollback releases were retained", refused.stderr)
+        self.assertEqual(self.live.resolve(), first)
+        self.assertEqual(len(list((self.data / "releases/v2").iterdir())), 1)
+
     def test_same_second_forced_exports_never_reuse_or_modify_release(self) -> None:
         self.sync()
         first = self.live.resolve()

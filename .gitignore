@@ -9,3 +9,5 @@ __pycache__/
 .env.*
 !.env.example
 getbible-data/
+src/apps/dashboard/ui/node_modules
+test-artifacts/

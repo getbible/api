@@ -30,9 +30,10 @@ timeout = _integer(f"{PREFIX}_WORKER_TIMEOUT", {{WORKER_TIMEOUT}}, 5, 600)
 graceful_timeout = _integer(f"{PREFIX}_GRACEFUL_TIMEOUT", 30, 5, 300)
 keepalive = _integer(f"{PREFIX}_KEEPALIVE", 5, 1, 60)
 
-# Recycling caps process-local librarian caches without synchronised restarts.
-max_requests = _integer(f"{PREFIX}_MAX_REQUESTS", 10000, 100, 1000000)
-max_requests_jitter = _integer(f"{PREFIX}_MAX_REQUESTS_JITTER", 1000, 0, 100000)
+# Resident caches own their configured lifetime. Optional recycling remains
+# available for operators, but does not discard warm caches every 10000 calls.
+max_requests = _integer(f"{PREFIX}_MAX_REQUESTS", 0, 0, 1000000000)
+max_requests_jitter = _integer(f"{PREFIX}_MAX_REQUESTS_JITTER", 0, 0, 1000000)
 
 limit_request_line = 4094
 limit_request_fields = 50
@@ -50,20 +51,22 @@ umask = 0o007
 
 def on_starting(server):
     """Warm the configured translations before workers fork so their indexes
-    are shared copy-on-write (search only; the list is empty for query)."""
+    are shared copy-on-write. Query warms only its chapter lookup structures."""
     translations = tuple(
         code.strip().casefold()
         for code in os.environ.get(f"{PREFIX}_WARM_TRANSLATIONS", "").split(",")
-        if code.strip()
+        if code.strip() and code.strip().casefold() != "none"
     )
     if not translations:
         return
     from {{PACKAGE}}.wsgi import app
 
+    app.extensions["getbible_control"].refresh_source(force=True)
     bible = app.extensions["getbible"]
     for translation in dict.fromkeys(translations):
         try:
-            report = bible.warm_translation(translation, diacritics="fold")
+            report = (bible.warm_query(translation) if "{{KIND}}" == "query"
+                      else bible.warm_translation(translation, diacritics="fold"))
         except Exception:
             server.log.exception("Failed to warm translation %s", translation)
             raise
@@ -74,7 +77,14 @@ def when_ready(server):
     server.log.info("getBible {{KIND}} endpoint ready: workers=%s threads=%s", workers, threads)
 
 
+def post_worker_init(worker):
+    from {{PACKAGE}}.wsgi import app
+
+    app.extensions["getbible_control"].start()
+
+
 def worker_exit(server, worker):
     from {{PACKAGE}}.wsgi import app
 
+    app.extensions["getbible_control"].close()
     app.extensions["getbible"].close()

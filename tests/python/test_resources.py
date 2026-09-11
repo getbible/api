@@ -28,6 +28,8 @@ class ResourceTest(unittest.TestCase):
         self.registry = self.root / "endpoints"
         self.runtime = self.root / "runtime"
         (self.proc / "self").mkdir(parents=True)
+        (self.proc / "1").mkdir()
+        (self.proc / "1/cgroup").write_text("0::/\n")
         (self.cg / "system.slice/operator.scope").mkdir(parents=True)
         (self.proc / "self/cgroup").write_text("0::/system.slice/operator.scope\n")
         (self.proc / "self/mountinfo").write_text("10 9 0:2 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n")
@@ -157,6 +159,46 @@ class ResourceTest(unittest.TestCase):
         available = result["budget_bytes"] - result["infrastructure_reserve_bytes"]
         self.assertLessEqual(original + query["settings"]["MEMORY_MAX"], available)
         self.assertLessEqual(query["settings"]["MEMORY_MAX"] + 2 * search["settings"]["MEMORY_MAX"], available)
+
+    def test_management_service_cap_does_not_replace_aggregate_container_budget(self):
+        self.endpoint("query.example.test", "query")
+        self.endpoint("search.example.test", "search")
+        (self.cg / "system.slice/operator.scope/memory.max").write_text(str(512 * MIB))
+        result = planner.plan(self.args())
+        self.assertEqual(result["budget_bytes"], 4096 * MIB)
+        self.assertEqual(planner.cgroup_limits(self.proc, self.cg)["memory"], 512 * MIB)
+
+    def test_large_host_uses_shared_cpu_and_configurable_cache_budgets(self):
+        self.endpoint("search.example.test", "search", WORKERS="auto", WARM_TRANSLATIONS="kjv,asv,web,ylt,darby")
+        (self.cg / "memory.max").write_text(str(24 * 1024 * MIB))
+        (self.cg / "cpu.max").write_text("600000 100000")
+        with patch.object(planner.os, "sched_getaffinity", return_value=set(range(8))):
+            result = planner.plan(self.args())
+        settings = result["endpoints"][0]["settings"]
+        self.assertEqual(settings["CPU_QUOTA"], "")
+        self.assertEqual(settings["WORKERS"], 6)
+        self.assertEqual(settings["SEARCH_CORPUS_LIMIT"], 256)
+        self.assertEqual(settings["MEMORY_CACHE_TTL"], 2592000)
+        self.assertEqual(settings["WARM_TRANSLATIONS"], "kjv,asv,web,ylt,darby")
+        cache_bytes = sum(settings[key] for key in ("SHARED_CORPUS_BYTES", "CHAPTER_CACHE_BYTES", "TRANSLATION_CACHE_BYTES"))
+        self.assertLessEqual(cache_bytes * settings["WORKERS"], settings["MEMORY_MAX"] // 2)
+
+    def test_explicit_environment_policy_overrides_existing_endpoint_settings(self):
+        self.endpoint("search.example.test", "search", CPU_QUOTA="100%", WARM_TRANSLATIONS="asv")
+        result = planner.plan(self.args(policy=["SEARCH_CPU_QUOTA=250%", "SEARCH_WARM_TRANSLATIONS=kjv"],
+                                        authoritative=["SEARCH_CPU_QUOTA", "SEARCH_WARM_TRANSLATIONS"]))
+        settings = result["endpoints"][0]["settings"]
+        self.assertEqual(settings["CPU_QUOTA"], "250%")
+        self.assertEqual(settings["WARM_TRANSLATIONS"], "kjv")
+
+    def test_explicit_memory_ceiling_is_respected_with_update_overlap(self):
+        self.endpoint("query.example.test", "query")
+        self.endpoint("search.example.test", "search")
+        result = planner.plan(self.args(policy=["QUERY_MEMORY_MAX=512M", "SEARCH_MEMORY_MAX=768M"]))
+        query, search = result["endpoints"]
+        self.assertEqual(query["settings"]["MEMORY_MAX"], 512 * MIB)
+        self.assertEqual(search["settings"]["MEMORY_MAX"], 768 * MIB)
+        self.assertLessEqual(result["steady_runtime_bytes"] + result["candidate_reserve_bytes"] + result["infrastructure_reserve_bytes"], result["budget_bytes"])
 
     def test_drain_timeout_keeps_old_generation_alive(self):
         self.endpoint("search.example.test", "search")

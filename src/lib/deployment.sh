@@ -60,7 +60,9 @@ gb_setting_validate() {
         TLS_MODE) [[ "$value" == managed || "$value" == external ]] ;;
         PUBLIC_SCHEME) [[ "$value" == https ]] ;;
         ORIGIN_HTTP_PORT) [[ "$value" =~ ^[0-9]{1,5}$ ]] && (( 10#$value >= 1 && 10#$value <= 65535 )) ;;
-        MEMORY_BUDGET) [[ "$value" =~ ^(auto|[1-9][0-9]*([kKmMgGtT]([iI]?[bB])?)?)$ ]] ;;
+        MEMORY_BUDGET|QUERY_MEMORY_MAX|SEARCH_MEMORY_MAX) [[ "$value" =~ ^(auto|[1-9][0-9]*([kKmMgGtT]([iI]?[bB])?)?)$ ]] ;;
+        QUERY_MEMORY_MIN|SEARCH_MEMORY_MIN) [[ "$value" =~ ^[1-9][0-9]*([kKmMgGtT]([iI]?[bB])?)?$ ]] ;;
+        RESOURCE_RESERVE_PERCENT) [[ "$value" =~ ^[0-9]{1,2}$ ]] && (( 10#$value >= 5 && 10#$value <= 75 )) ;;
         DEFAULT_DEPLOY_MODE) [[ "$value" == live || "$value" == staged ]] ;;
         CERT_METHOD) [[ "$value" == auto || "$value" == http || "$value" == dns-cloudflare ]] ;;
         CERTBOT_EMAIL) [[ -z "$value" ]] || certs_valid_email "$value" ;;
@@ -68,12 +70,36 @@ gb_setting_validate() {
         DEFAULT_CLOUDFLARE_MODE) [[ "$value" == off || "$value" == dns || "$value" == proxied ]] ;;
         DEFAULT_CLOUDFLARE_CACHE) [[ "$value" == bypass || "$value" == respect ]] ;;
         DEFAULT_CLOUDFLARE_FEATURES) [[ "$value" == free || "$value" == paid ]] ;;
-        HSTS_INCLUDE_SUBDOMAINS|CLOUDFLARE_ENABLED|TELEGRAM_ENABLED) [[ "$value" == true || "$value" == false ]] ;;
+        HSTS_INCLUDE_SUBDOMAINS|CLOUDFLARE_ENABLED|TELEGRAM_ENABLED|ADAPTIVE_RESOURCES|ADAPTIVE_ALLOW_IDLE_SHRINK|TELEMETRY_ENABLED|DASHBOARD_ENABLED) [[ "$value" == true || "$value" == false ]] ;;
         DEFAULT_SYNC_SCHEDULE) [[ "$value" == daily || "$value" == weekly || "$value" == monthly ]] ;;
         DEFAULT_EXTENSIONS) [[ "$value" =~ ^[a-z0-9]+(,[a-z0-9]+)*$ ]] ;;
-        DEFAULT_QUERY_WORKERS|DEFAULT_SEARCH_WORKERS|DEFAULT_QUERY_THREADS|DEFAULT_SEARCH_THREADS)
+        DEFAULT_QUERY_WORKERS|DEFAULT_SEARCH_WORKERS)
+            [[ "$value" == auto ]] || { [[ "$value" =~ ^[0-9]{1,2}$ ]] && (( 10#$value >= 1 && 10#$value <= 64 )); } ;;
+        DEFAULT_QUERY_THREADS|DEFAULT_SEARCH_THREADS|QUERY_WORKERS_MIN|QUERY_WORKERS_MAX|SEARCH_WORKERS_MIN|SEARCH_WORKERS_MAX|QUERY_THREADS_MIN|QUERY_THREADS_MAX|SEARCH_THREADS_MIN|SEARCH_THREADS_MAX)
             [[ "$value" =~ ^[0-9]{1,2}$ ]] && (( 10#$value >= 1 && 10#$value <= 64 )) ;;
-        DEFAULT_QUERY_CACHE_TTL|DEFAULT_SEARCH_CACHE_TTL) [[ "$value" =~ ^[0-9]{1,7}$ ]] ;;
+        QUERY_CPU_QUOTA|SEARCH_CPU_QUOTA)
+            [[ "$value" == auto ]] || { [[ "$value" =~ ^[0-9]{1,6}(\.[0-9]{1,3})?%$ ]] && [[ "${value//[0.%]/}" =~ [1-9] ]]; } ;;
+        MEMORY_CACHE_TTL|DEFAULT_QUERY_CACHE_TTL|DEFAULT_SEARCH_CACHE_TTL)
+            [[ "$value" =~ ^[0-9]{1,8}$ ]] && (( 10#$value <= 31536000 )) ;;
+        CACHE_TTL_JITTER) [[ "$value" =~ ^0(\.[0-9]+)?$ ]] ;;
+        SHARED_CORPUS_LIMIT|TRANSLATION_CACHE_LIMIT)
+            [[ "$value" =~ ^[0-9]{1,6}$ ]] && (( 10#$value >= 1 && 10#$value <= 100000 )) ;;
+        CHAPTER_CACHE_LIMIT|REFERENCE_CACHE_LIMIT)
+            [[ "$value" =~ ^[0-9]{1,7}$ ]] && (( 10#$value >= 1 && 10#$value <= 1000000 )) ;;
+        QUERY_WARM_TRANSLATIONS|SEARCH_WARM_TRANSLATIONS) [[ -z "$value" || "$value" =~ ^[a-zA-Z0-9_-]+(,[a-zA-Z0-9_-]+)*$ ]] ;;
+        CACHE_MEMORY_PERCENT)
+            [[ "$value" =~ ^[0-9]{1,2}$ ]] && (( 10#$value >= 5 && 10#$value <= 80 )) ;;
+        ADAPTIVE_HIGH_PERCENT|ADAPTIVE_LOW_PERCENT|ALERT_CPU_PERCENT|ALERT_MEMORY_PERCENT|ALERT_DISK_PERCENT|ALERT_MEMORY_PRESSURE_PERCENT)
+            [[ "$value" =~ ^[0-9]{1,2}$ ]] && (( 10#$value >= 1 && 10#$value <= 95 )) ;;
+        ADAPTIVE_INTERVAL|ADAPTIVE_COOLDOWN|ADAPTIVE_SUSTAINED_SAMPLES|TELEMETRY_BATCH_SIZE|TELEMETRY_FLUSH_SECONDS|TELEMETRY_METRICS_SECONDS)
+            [[ "$value" =~ ^[1-9][0-9]{0,7}$ ]] ;;
+        TELEMETRY_RETENTION_DAYS) [[ "$value" =~ ^[0-9]{1,6}$ ]] ;;
+        DASHBOARD_IDLE_SECONDS) [[ "$value" =~ ^[0-9]{1,4}$ ]] && (( 10#$value >= 10 && 10#$value <= 3600 )) ;;
+        TELEMETRY_MAX_GIB|TELEMETRY_SPOOL_MAX_GIB|TELEMETRY_SPOOL_ROTATE_MIB|ALERT_COOLDOWN_SECONDS|ALERT_HOLD_SECONDS|ALERT_SYNC_GRACE_SECONDS) [[ "$value" =~ ^[1-9][0-9]{0,5}$ ]] ;;
+        STORAGE_MAX_GIB) [[ "$value" =~ ^[0-9]{1,6}$ ]] ;;
+        DASHBOARD_SESSION_DAYS) [[ "$value" =~ ^[0-9]{1,2}$ ]] && (( 10#$value >= 1 && 10#$value <= 30 )) ;;
+        DASHBOARD_TOKEN_SECONDS) [[ "$value" =~ ^[0-9]{1,2}$ ]] && (( 10#$value >= 10 && 10#$value <= 60 )) ;;
+        DASHBOARD_DOMAIN) [[ -z "$value" ]] || gb_valid_domain "$value" ;;
         DEFAULT_RATE_PER_SECOND|DEFAULT_RATE_BURST|DEFAULT_QUOTA_HOUR|DEFAULT_QUOTA_DAY|DEFAULT_CONN_LIMIT|DEFAULT_CACHE_TTL|DEFAULT_SHA_CACHE_TTL|LOG_ROTATE_KEEP)
             [[ "$value" =~ ^[0-9]{1,9}$ ]] ;;
         LOG_ROTATE_SIZE) [[ "$value" =~ ^[1-9][0-9]*[kMG]?$ ]] ;;

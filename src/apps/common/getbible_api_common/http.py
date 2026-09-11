@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import re
 import time
 import uuid
@@ -28,6 +29,8 @@ def install_request_hooks(app: Flask, settings: ServiceSettings, logger: logging
         g.request_id = incoming if _REQUEST_ID.fullmatch(incoming) else uuid.uuid4().hex
         token = request.headers.get("X-GetBible-Token-Id", "")
         g.token_id = token if _TOKEN_ID.fullmatch(token) else ""
+        auth = request.headers.get("X-GetBible-Auth-State", "") if settings.trust_proxy else ""
+        g.auth_state = auth if auth in {"anonymous", "valid", "rejected"} else ("valid" if g.token_id else "anonymous")
         g.started = time.perf_counter()
         g.operation = "http"
 
@@ -61,6 +64,11 @@ def install_request_hooks(app: Flask, settings: ServiceSettings, logger: logging
             "duration_ms": duration_ms,
             "remote_addr": request.remote_addr,
             "token": g.get("token_id") or None,
+            "auth_state": g.get("auth_state"),
+            "worker_pid": os.getpid(),
+            "in_flight": g.get("in_flight"),
+            "source_generation": g.get("source_generation"),
+            "resident_bytes_estimate": g.get("resident_bytes_estimate"),
             "user_agent": request.headers.get("User-Agent", ""),
             "response_bytes": response.calculate_content_length(),
             "operation": operation,
@@ -68,6 +76,8 @@ def install_request_hooks(app: Flask, settings: ServiceSettings, logger: logging
             "translation": g.get("translation"),
             "reference": g.get("reference"),
             "references": g.get("references"),
+            "books": g.get("books"),
+            "matched_books": g.get("matched_books"),
             "verses": g.get("verses"),
             "search": g.get("search"),
             "criteria": g.get("criteria"),

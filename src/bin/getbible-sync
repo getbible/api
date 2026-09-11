@@ -16,6 +16,11 @@ GB_SYNC_KEEP="${GB_SYNC_KEEP:-2}"
 GB_SYNC_FORCE="${GB_SYNC_FORCE:-0}"
 GB_NOTIFY="${GB_NOTIFY:-/usr/local/lib/getbible/getbible-notify}"
 GB_EXPORT="${GB_EXPORT:-/usr/local/lib/getbible/getbible-export-tree}"
+GB_STORAGE_GUARD="${GB_STORAGE_GUARD:-/usr/local/lib/getbible/getbible-storage-guard}"
+GB_SYNC_STORAGE_MAX_GIB="${GB_SYNC_STORAGE_MAX_GIB:-0}"
+GB_SYNC_STORAGE_STATE="${GB_SYNC_STORAGE_STATE:-/var/lib/getbible/storage}"
+STORAGE_RESERVED=false
+STORAGE_ID="$GB_SYNC_DOMAIN.$GB_SYNC_VERSION.$$"
 
 # "root" is the tree of a domain served without version folders.
 [[ "$GB_SYNC_VERSION" =~ ^(v[1-9][0-9]*|root)$ ]] || { echo 'Invalid version label' >&2; exit 2; }
@@ -43,7 +48,19 @@ state_set() {
     { [[ -f "$STATE" ]] && grep -vE "^$1=" "$STATE" || true; printf '%s=%s\n' "$1" "$2"; } > "$STATE.tmp"
     mv -f "$STATE.tmp" "$STATE"
 }
+freshness_record() {
+    # A successful check renews consumer freshness even when the commit is
+    # unchanged. This metadata lives beside immutable publication symlinks.
+    local marker="$GB_SYNC_DATA/.freshness-$GB_SYNC_VERSION" temporary
+    temporary="$(mktemp "$GB_SYNC_DATA/.freshness-$GB_SYNC_VERSION.XXXXXXXX")"
+    date -u +%s > "$temporary"
+    chmod 0640 "$temporary"
+    mv -f -- "$temporary" "$marker"
+}
 cleanup() {
+    if [[ "$STORAGE_RESERVED" == true ]]; then
+        "$GB_STORAGE_GUARD" release --state "$GB_SYNC_STORAGE_STATE" --id "$STORAGE_ID" >/dev/null || true
+    fi
     [[ -z "$SWAP" ]] || rm -f -- "$SWAP"
     if [[ "$PUBLISHED" == false && -n "$RELEASE" ]]; then rm -rf -- "$RELEASE"; fi
 }
@@ -96,6 +113,7 @@ CONFIG_SHA="$(printf '%s\0' "$GB_SYNC_REPO" "$FETCH_REF" "$GB_SYNC_SUBPATH" "$GB
 if [[ "$REMOTE_SHA" == "$LAST_SHA" && "$(state_get CONFIG_SHA)" == "$CONFIG_SHA" && -L "$CURRENT" && -d "$CURRENT" && "$GB_SYNC_FORCE" != 1 ]]; then
     log "up to date at ${REMOTE_SHA:0:12}"
     state_set LAST_CHECK "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    freshness_record
     exit 0
 fi
 notify start "Update started: $LABEL" "Repository: $GB_SYNC_REPO; reference: $FETCH_REF; commit: ${REMOTE_SHA:0:12}"
@@ -114,6 +132,13 @@ HEAD_SHA="$(git -C "$CHECKOUT" rev-parse 'FETCH_HEAD^{commit}')"
 # Export Git's committed blobs directly: no checkout rewrite, JSON parsing,
 # checksum verification or full-content comparison with the live release.
 
+STEP="storage admission"
+if [[ "$GB_SYNC_STORAGE_MAX_GIB" != 0 ]]; then
+    "$GB_STORAGE_GUARD" reserve --state "$GB_SYNC_STORAGE_STATE" --id "$STORAGE_ID" \
+        --max-gib "$GB_SYNC_STORAGE_MAX_GIB" --checkout "$CHECKOUT" --revision "$HEAD_SHA"
+    STORAGE_RESERVED=true
+fi
+
 STEP="export"
 RELEASE="$(mktemp -d "$RELEASES/$(date -u +%Y%m%dT%H%M%SZ)-${HEAD_SHA:0:12}-XXXXXXXX")"
 chmod 0750 "$RELEASE"
@@ -124,6 +149,11 @@ IFS=$'\t' read -r FILES CHANGED <<< "$STATS"
 
 printf '%s\n' "$HEAD_SHA" > "$RELEASE/.revision"
 chmod 0640 "$RELEASE/.revision"
+
+STEP="publication admission"
+if [[ "$STORAGE_RESERVED" == true ]]; then
+    "$GB_STORAGE_GUARD" check --state "$GB_SYNC_STORAGE_STATE" --id "$STORAGE_ID" --max-gib "$GB_SYNC_STORAGE_MAX_GIB"
+fi
 
 STEP="publish"
 SWAP="$GB_SYNC_DATA/.$GB_SYNC_VERSION.$$.tmp"
@@ -142,6 +172,7 @@ state_set LAST_CHECK "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 state_set LAST_RELEASE "$KEEP_NAME"
 state_set FILES "$FILES"
 state_set CHANGED "$CHANGED"
+freshness_record
 rm -f "$FORCE_FILE"
 
 STEP="prune"

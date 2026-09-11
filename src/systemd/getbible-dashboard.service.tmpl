@@ -1,0 +1,40 @@
+[Unit]
+Description=getBible private management dashboard
+After=getbible-admin.service getbible-telemetry.service
+Requires=getbible-admin.service
+OnFailure=getbible-alert@%n.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=getbible-dashboard
+Group={{NGINX_USER}}
+SupplementaryGroups=getbible-dashboard {{NOTIFY_GROUP}}
+UMask=0027
+RuntimeDirectory=getbible-dashboard
+RuntimeDirectoryMode=0750
+ExecStart={{PYTHON}} {{LIBEXEC}}/getbible-dashboard --config {{RUN}}/dashboard.conf --state-dir {{VAR}}/dashboard serve --socket {{PREFIX}}/run/getbible-dashboard/http.sock --static-dir {{LIBEXEC}}/apps/dashboard/static
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths={{VAR}}/dashboard {{LOG}}/dashboard {{PREFIX}}/run/getbible-dashboard
+ReadOnlyPaths={{VAR}}/telemetry
+InaccessiblePaths=-{{ETC}}/endpoints -{{VAR}}/admin -{{PREFIX}}/var/backups/getbible
+LimitNOFILE=2048
+TasksMax=64
+MemoryHigh=384M
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

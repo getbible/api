@@ -1,0 +1,13 @@
+[Unit]
+Description=Keep getBible storage admission accounting current
+
+[Timer]
+OnBootSec=10s
+# With the 75-second service deadline, this interval keeps a successful sample
+# within the admission guard's 120-second freshness window.
+OnUnitInactiveSec=30s
+AccuracySec=1s
+Unit=getbible-storage.service
+
+[Install]
+WantedBy=timers.target

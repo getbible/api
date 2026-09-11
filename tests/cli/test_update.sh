@@ -71,6 +71,7 @@ gb_ensure_base_dirs() { test_server_action directories; }
 tg_install_helper() { test_server_action telegram-helper; }
 sync_install_tools() { test_server_action sync-tools; }
 logs_render_rotation() { test_server_action log-rotation; }
+infrastructure_ensure() { test_server_action infrastructure; }
 tg_notify() { printf 'notify:%s\n' "$*" >> "$GB_TEST_EVENTS"; }
 ep_exists() { [[ "$1" == api.example.test ]]; }
 endpoint_apply() { printf 'apply:%s\n' "$1" >> "$GB_TEST_EVENTS"; }

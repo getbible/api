@@ -26,6 +26,10 @@ def _common_kwargs(settings: LibrarianSettings) -> dict:
         books_cache_limit=settings.books_cache_limit,
         cache_ttl_jitter=settings.cache_ttl_jitter,
         require_checksums=False,
+        shared_corpus_limit=settings.shared_corpus_limit,
+        shared_corpus_bytes=settings.shared_corpus_bytes,
+        chapter_cache_bytes=settings.chapter_cache_bytes,
+        translation_cache_bytes=settings.translation_cache_bytes,
     )
 
 

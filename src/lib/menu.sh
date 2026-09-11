@@ -20,6 +20,7 @@ menu_main() {
             self-update "$manager_label" \
             update "$update_label" \
             analytics "Traffic analytics: calls and unique callers" \
+            dashboard "Private dashboard: domain, password, sessions, blocked addresses" \
             logs "Logs: view, archives, rotate" \
             settings "Settings: Telegram, Cloudflare, icons, defaults, retention" \
             system "System: host check, dependencies, self-test" \
@@ -40,6 +41,7 @@ menu_main() {
                 fi ;;
             update) menu_update ;;
             analytics) menu_analytics ;;
+            dashboard) menu_dashboard ;;
             logs) menu_logs ;;
             settings) menu_settings ;;
             system) menu_system ;;
@@ -255,7 +257,7 @@ menu_analytics() {
 
 menu_logs() {
     local choice domain out
-    choice="$(ui_menu "Logs" "Retention: $(gb_global LOG_ROTATE_KEEP 30) archives of $(gb_global LOG_ROTATE_SIZE 1G) each, checked hourly" \
+    choice="$(ui_menu "Logs" "Canonical history: up to $(gb_global TELEMETRY_MAX_GIB 10) GiB and $(gb_global TELEMETRY_RETENTION_DAYS 180) days. The oldest data is pruned first." \
         view "View a domain's logs" \
         rotate "Rotate now (files above the size limit)" \
         force "Force rotation of every log now" \
@@ -265,7 +267,7 @@ menu_logs() {
         view)
             domain="$(menu_pick_domain)" || return 0
             menu_endpoint_logs "$domain" ;;
-        rotate) ui_run "Rotate" /usr/sbin/logrotate -s "$GB_VAR/logrotate.state" "$GB_LOGROTATE_CONF" ;;
+        rotate) ui_run "Rotate" logs_rotate_now ;;
         force) ui_run "Force rotation" logs_rotate_now ;;
         retention) menu_settings_retention ;;
     esac
@@ -525,15 +527,15 @@ menu_settings_defaults() {
 
 menu_settings_retention() {
     local size keep
-    menu_settings_editable "$GB_GLOBAL_CONF" LOG_ROTATE_SIZE LOG_ROTATE_KEEP || return 0
-    size="$(ui_input "Log retention" "Rotate a log once it reaches this size (e.g. 1G, 500M)" "$(gb_global LOG_ROTATE_SIZE 1G)")" || return 0
-    keep="$(ui_input "Log retention" "Archived files to keep per log" "$(gb_global LOG_ROTATE_KEEP 30)")" || return 0
-    menu_settings_save 'Log retention' LOG_ROTATE_SIZE "$size" LOG_ROTATE_KEEP "$keep" || return 0
-    if ! logs_render_rotation; then
-        ui_msg 'Log retention' 'Settings were saved, but log rotation configuration could not be applied. Check the reported error before retrying.'
+    menu_settings_editable "$GB_GLOBAL_CONF" TELEMETRY_MAX_GIB TELEMETRY_RETENTION_DAYS || return 0
+    size="$(ui_input "Traffic retention" "Maximum local traffic history size in GiB" "$(gb_global TELEMETRY_MAX_GIB 10)")" || return 0
+    keep="$(ui_input "Traffic retention" "Maximum traffic history age in days (0: size limit only)" "$(gb_global TELEMETRY_RETENTION_DAYS 180)")" || return 0
+    menu_settings_save 'Traffic retention' TELEMETRY_MAX_GIB "$size" TELEMETRY_RETENTION_DAYS "$keep" || return 0
+    if ! infrastructure_environment || ! logs_render_rotation; then
+        ui_msg 'Traffic retention' 'Settings were saved, but collector configuration could not be applied. Check the reported error before retrying.'
         return 0
     fi
-    ui_msg "Log retention" "Logs rotate at $size and $keep archives are kept."
+    ui_msg "Traffic retention" "Traffic history is limited to $size GiB and $keep days. Oldest records are pruned first."
 }
 
 menu_system() {

@@ -14,8 +14,8 @@ _DEFAULT_KEYS = ("words", "match", "case_sensitive", "scope", "diacritics", "sor
 class Settings:
     librarian: LibrarianSettings
     service: ServiceSettings
-    search_corpus_limit: int = 4
-    translation_cache_limit: int = 4
+    search_corpus_limit: int = 256
+    translation_cache_limit: int = 256
     max_query_length: int = 500
     max_page_size: int = 100
     max_offset: int = 10_000
@@ -52,12 +52,12 @@ class Settings:
                 defaults[key] = int(raw)
             else:
                 defaults[key] = raw
-        warm = tuple(dict.fromkeys(code.strip().casefold() for code in env_str("SEARCH_WARM_TRANSLATIONS", "").split(",") if code.strip()))
+        warm = tuple(dict.fromkeys(code.strip().casefold() for code in env_str("SEARCH_WARM_TRANSLATIONS", "").split(",") if code.strip() and code.strip().casefold() != "none"))
         return cls(
             librarian=LibrarianSettings.from_environment("/var/cache/getbible/search/librarian"),
-            service=ServiceSettings.from_environment("SEARCH", cache_seconds=60, max_input_length=500),
-            search_corpus_limit=env_int("GETBIBLE_SEARCH_CORPUS_LIMIT", 4, 0, 1000),
-            translation_cache_limit=env_int("GETBIBLE_TRANSLATION_CACHE_LIMIT", 4, 0, 1000),
+            service=ServiceSettings.from_environment("SEARCH", cache_seconds=2_592_000, max_input_length=500),
+            search_corpus_limit=env_int("GETBIBLE_SEARCH_CORPUS_LIMIT", 256, 0, 100000),
+            translation_cache_limit=env_int("GETBIBLE_TRANSLATION_CACHE_LIMIT", 256, 0, 100000),
             max_query_length=env_int("SEARCH_MAX_QUERY_LENGTH", 500, 32, 500),
             max_page_size=env_int("SEARCH_MAX_PAGE_SIZE", 100, 1, 1000),
             max_offset=env_int("SEARCH_MAX_OFFSET", 10_000, 0, 10_000),
