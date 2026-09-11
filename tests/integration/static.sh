@@ -49,7 +49,7 @@ it_nginx_start || exit 1
 echo "-- documents --"
 it_check "chapter json 200"          "200"              "$(it_status "$DOMAIN" /v2/kjv/1/1.json)"
 it_check "chapter content type"      "application/json" "$(it_header "$DOMAIN" /v2/kjv/1/1.json content-type)"
-it_check "chapter cache-control"     "max-age=3600"     "$(it_header "$DOMAIN" /v2/kjv/1/1.json cache-control)"
+it_check "chapter cache-control"     "max-age=2592000"  "$(it_header "$DOMAIN" /v2/kjv/1/1.json cache-control)"
 it_check "chapter etag"              'etag: "'          "$(it_header "$DOMAIN" /v2/kjv/1/1.json etag)"
 it_check "sha served as text"        "text/plain"       "$(it_header "$DOMAIN" /v2/kjv/1/1.sha content-type)"
 it_check "sha cache-control"         "max-age=300"      "$(it_header "$DOMAIN" /v2/kjv/1/1.sha cache-control)"
@@ -71,7 +71,7 @@ CHAPTER_ETAG="$(it_header "$DOMAIN" /v2/kjv/1/1.json etag | sed 's/^[^:]*: *//')
 CHAPTER_MODIFIED="$(it_header "$DOMAIN" /v2/kjv/1/1.json last-modified | sed 's/^[^:]*: *//')"
 it_check "unchanged etag gives 304" "304" "$(it_status "$DOMAIN" /v2/kjv/1/1.json -H "If-None-Match: $CHAPTER_ETAG")"
 it_check "unchanged date gives 304" "304" "$(it_status "$DOMAIN" /v2/kjv/1/1.json -H "If-Modified-Since: $CHAPTER_MODIFIED")"
-it_check "304 carries cache lifetime" "max-age=3600" "$(it_headers "$DOMAIN" /v2/kjv/1/1.json -H "If-None-Match: $CHAPTER_ETAG" | grep -i '^cache-control')"
+it_check "304 carries cache lifetime" "max-age=2592000" "$(it_headers "$DOMAIN" /v2/kjv/1/1.json -H "If-None-Match: $CHAPTER_ETAG" | grep -i '^cache-control')"
 it_check "304 carries validator" "$CHAPTER_ETAG" "$(it_headers "$DOMAIN" /v2/kjv/1/1.json -H "If-None-Match: $CHAPTER_ETAG" | grep -i '^etag')"
 it_check "HEAD carries validator" "$CHAPTER_ETAG" "$(it_headers "$DOMAIN" /v2/kjv/1/1.json -I | grep -i '^etag')"
 

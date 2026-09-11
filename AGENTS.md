@@ -53,6 +53,12 @@ See `docs/DEPLOYMENT_DECISIONS.md` before changing deployment behavior.
 
 ## Project policy
 
+Operator-provided deployment information is private. Never copy an operator's
+hardware inventory, co-hosted services, private addresses, hostnames or local
+infrastructure details into source, tests, documentation, examples, commit
+messages, pull requests or release notes. Use generic examples and synthetic
+test data. Keep deployment-specific configuration outside version control.
+
 The source repositories and sanctioned operators are trusted. Static builders
 own content, JSON, schema and checksum validation. This manager copies committed
 files faithfully and publishes them atomically; do not add downstream corpus
