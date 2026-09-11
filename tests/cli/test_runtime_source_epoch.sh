@@ -30,6 +30,7 @@ mv -Tf "$repository/next" "$repository/v2"
 second="$(rt_source_epoch "$domain" v2)"
 [[ "$first" != "$second" ]]
 nginx_harden_token_files() { :; }
+# shellcheck disable=SC2317,SC2329 # First indirect nginx callback; replaced below to exercise rollback.
 nginx_test() { :; }
 nginx_reload() { :; }
 rt_refresh_cache_epoch "$domain" v2 "$second"

@@ -45,6 +45,8 @@ infrastructure_environment
 stage="$TEST_ROOT/render"
 dashboard_render "$stage" dashboard.example.test
 site="$stage/sites-available/getbible-dashboard.conf"
+# Keep the nginx variable literal; it must not expand in this shell assertion.
+# shellcheck disable=SC2016
 grep -qF 'proxy_set_header X-GetBible-Client-IP $remote_addr;' "$site" || fail 'spoofed client IP header must be overwritten'
 grep -qF 'proxy_set_header Authorization "";' "$site" || fail 'bearer credentials must be stripped'
 grep -qF 'proxy_cache off;' "$site" || fail 'dashboard responses must not enter shared caches'

@@ -71,8 +71,8 @@ resources_context() {
     RES_CACHE_TTL_JITTER="$(gb_global CACHE_TTL_JITTER 0)"
     # shellcheck disable=SC2153 # RM_* are loaded from the runtime manifest.
     RES_MEMORY_HIGH="$RM_MEMORY_HIGH"
-    # shellcheck disable=SC2153 # RM_* are loaded from the runtime manifest.
     RES_MEMORY_MAX="$(resources_value "$domain" "$label" MEMORY_MAX "${prefix}_MEMORY_MAX" auto)"
+    # shellcheck disable=SC2153 # RM_MEMORY_MAX is loaded dynamically from the runtime manifest.
     [[ "$RES_MEMORY_MAX" != auto ]] || RES_MEMORY_MAX="$RM_MEMORY_MAX"
     RES_WARM_TRANSLATIONS="$(resources_value "$domain" "$label" WARM_TRANSLATIONS "${prefix}_WARM_TRANSLATIONS" kjv)"
     [[ "$RES_WARM_TRANSLATIONS" != none ]] || RES_WARM_TRANSLATIONS=""
@@ -111,7 +111,7 @@ PYWORK
         RES_TASKS_MAX=$(( RES_WORKERS * (RES_THREADS + 5) + 32 ))
     fi
     cache_percent="$(resources_value "$domain" "$label" CACHE_MEMORY_PERCENT CACHE_MEMORY_PERCENT 50)"
-    cache_bytes=$(( memory_bytes / RES_WORKERS * cache_percent / 100 ))
+    cache_bytes=$(( memory_bytes * cache_percent / (RES_WORKERS * 100) ))
     if [[ "$EP_KIND" == query ]]; then
         RES_CHAPTER_CACHE_BYTES=$(( cache_bytes * 80 / 100 ))
         RES_TRANSLATION_CACHE_BYTES=$(( cache_bytes * 10 / 100 ))
