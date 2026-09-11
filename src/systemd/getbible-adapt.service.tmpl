@@ -1,4 +1,6 @@
 [Unit]
+Requires=getbible-prepare.service
+After=getbible-prepare.service
 Description=getBible adaptive runtime resource allocation
 After=getbible-telemetry.service
 OnFailure=getbible-alert@%n.service

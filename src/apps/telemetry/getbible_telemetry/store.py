@@ -508,8 +508,8 @@ class TelemetryStore:
         hard physical byte ceiling. Never block ingestion waiting for readers
         to release snapshots, and report physical over-budget state instead.
         """
-        if max_bytes < 1024 * 1024 or retention_days <= 0:
-            raise ValueError("max_bytes must be >=1 MiB and retention_days must be positive")
+        if max_bytes < 1024 * 1024 or not math.isfinite(retention_days) or retention_days < 0:
+            raise ValueError("max_bytes must be >=1 MiB and retention_days must be finite and nonnegative")
         now = time.time() if now is None else now
         self.db.set_progress_handler(None, 0)
         self.db.commit()
@@ -532,8 +532,9 @@ class TelemetryStore:
                     count += n
             return count
 
-        remove(cutoff, "age")
-        reason = "age"
+        if retention_days:
+            remove(cutoff, "age")
+        reason = "age" if sum(deleted.values()) else "size"
         # Work in bounded batches and free pages incrementally; a large request
         # cannot force deletion of newer data before older records of any kind.
         for _ in range(64):
@@ -551,7 +552,8 @@ class TelemetryStore:
                 "ORDER BY stamp,source,id LIMIT ?", (needed,)).fetchall()
             if not candidates:
                 break
-            reason = "size" if reason == "age" and not sum(deleted.values()) else "age_or_size"
+            if reason == "age":
+                reason = "age_or_size"
             with self.db:
                 for table in deleted:
                     ids = [row["id"] for row in candidates if row["source"] == table]

@@ -121,6 +121,12 @@ check gb_setting_validate DEFAULT_QUERY_CACHE_TTL 31536000
 reject gb_setting_validate DEFAULT_QUERY_CACHE_TTL 31536001
 reject gb_setting_validate TRUSTED_PROXY_CIDRS 0.0.0.0/0
 reject gb_setting_validate ORIGIN_HTTP_PORT 65536
+check gb_setting_validate TELEMETRY_RETENTION_DAYS 0
+check gb_setting_validate TELEMETRY_BATCH_SIZE 1
+check gb_setting_validate TELEMETRY_BATCH_SIZE 100000
+reject gb_setting_validate TELEMETRY_BATCH_SIZE 0
+reject gb_setting_validate TELEMETRY_BATCH_SIZE 100001
+reject gb_setting_validate TELEMETRY_BATCH_SIZE 1.5
 
 # Recreation replaces the snapshot; removing an explicit environment setting
 # restores the saved value instead of carrying a stale override indefinitely.

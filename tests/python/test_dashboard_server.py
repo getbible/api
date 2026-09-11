@@ -68,6 +68,10 @@ class FakeBroker:
 
     def call(self, method, params):
         self.calls.append((method, params))
+        if method == "state":
+            return {"refresh": {"state": "waiting", "pending": True, "attempts": 0,
+                                "requested_at": 1, "next_retry_at": None, "last_error": None},
+                    "pending_jobs": 1, "accepting_jobs": False}
         if method == "submit":
             return {"job_id": "job-123", "status": "queued"}
         if method == "job":
@@ -151,13 +155,32 @@ class HTTPTests(unittest.TestCase):
 
     def test_private_reports_and_actions_require_authentication(self):
         for path in ("/api/overview", "/api/history", "/api/requests", "/api/events", "/api/endpoints",
-                     "/api/translations", "/api/storage", "/api/sessions", "/api/jobs", "/api/operations"):
+                     "/api/management/state", "/api/translations", "/api/storage", "/api/sessions", "/api/jobs", "/api/operations"):
             status, headers, data = self.request("GET", path)
             self.assertEqual(status, 401, path)
             self.assertEqual(headers["Content-Type"], "application/problem+json")
         self.assertEqual(self.request("POST", "/api/actions", {"operation": "status"})[0], 401)
         self.assertEqual(self.broker.calls, [])
         self.assertEqual(self.analytics.calls, [])
+
+    def test_management_refresh_state_is_authenticated_and_available_during_drain(self):
+        self.login()
+        status, headers, data = self.request("GET", "/api/management/state")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertEqual(data["refresh"]["state"], "waiting")
+        self.assertFalse(data["accepting_jobs"])
+        self.assertEqual(self.broker.calls[-1][0], "state")
+        self.assertIn("session_id", self.broker.calls[-1][1]["actor"])
+
+    def test_refresh_pause_is_a_retryable_problem_response(self):
+        from getbible_dashboard.broker import BrokerError
+        self.login()
+        with patch.object(self.broker, "call", side_effect=BrokerError("Management is refreshing", "management_refresh_pending")):
+            status, headers, data = self.request("POST", "/api/actions", {"operation": "domain.status", "arguments": {"domain": "api.example.test"}})
+        self.assertEqual(status, 503)
+        self.assertEqual(headers["Content-Type"], "application/problem+json")
+        self.assertEqual(data["code"], "management_refresh_pending")
 
     def test_cross_origin_password_does_not_send_telegram(self):
         for origin in ("https://evil.test", "null", None):

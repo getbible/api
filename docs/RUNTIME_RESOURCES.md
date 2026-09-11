@@ -19,6 +19,18 @@ Every global key below has a `GETBIBLE_` deployment environment form. Explicit
 environment values are authoritative over saved endpoint overrides. Saved global
 values are defaults; endpoint-specific settings can override those defaults.
 
+Native installations use built-in defaults without an environment file. Persist
+changes through the menu or `sudo ./getbible.sh settings set KEY VALUE`;
+`settings environment` shows effective values and their sources. A variable
+passed to one native command affects that invocation; use saved settings for
+values that must survive reboot. Native defaults retain managed TLS and do not
+enable Cloudflare or the dashboard automatically.
+
+Docker startup captures supported nonempty `GETBIBLE_*` values for systemd and
+reconciles existing runtime resource and cache settings. Recreating the container
+with a changed override applies it; removing an override restores the saved/default
+value. Restoration preserves endpoint code, identities and publication state.
+
 | Global key | Default | Meaning |
 | --- | --- | --- |
 | `MEMORY_BUDGET` | `auto` | Container cap; explicit native aggregate budget also supported |
@@ -145,10 +157,9 @@ the dashboard reports both budgets and measured usage.
 
 ## Verification
 
-Offline tests cover allocation/overlap, explicit environment precedence,
+The CI suite checks allocation and update overlap, environment precedence,
 CPU sharing, memory maxima, public cache operations, publication boundaries,
-adaptive hysteresis, storage reservations and hard-link accounting. Runtime
-lifecycle tests retain candidate readiness/drain/rollback checks. Real Unix
-socket, systemd, cgroup and nginx behavior must additionally run through the
-repository's disposable Ubuntu acceptance test; a restricted development
-sandbox may prohibit socket creation and cannot prove production boot behavior.
+adaptive hysteresis, storage reservations and hard-link accounting. Disposable
+Ubuntu acceptance tests exercise real Unix sockets, systemd services, nginx,
+candidate readiness, graceful drain and rollback. Docker acceptance checks
+cgroup limits, offline deployment and restoration after container recreation.

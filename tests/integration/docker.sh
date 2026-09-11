@@ -103,6 +103,8 @@ container bash -Eeuo pipefail -c 'for kind in query search; do
     "/opt/getbible/$kind/v2/current/.venv/bin/python" -m pip check
 done'
 container getbible resources --json | python3 -c 'import json,sys; p=json.load(sys.stdin); assert p["enabled"] and p["cgroup_limit_bytes"] == 4*1024**3 and p["budget_bytes"] <= 4*1024**3; assert len(p["endpoints"]) == 2'
+docker cp "$ROOT/tests/integration/infrastructure.py" "$CONTAINER:/tmp/getbible-infrastructure-ci.py"
+container env GB_CI_DISPOSABLE_HOST=1 /usr/bin/python3 /tmp/getbible-infrastructure-ci.py --mode docker
 docker network connect "${PROJECT}_default" "$CONTAINER"
 
 # Real HAProxy HTTP forwarding: backend address never replaces request Host.
@@ -140,9 +142,21 @@ container bash -Eeuo pipefail -c 'id getbible-query; id getbible-search; id www-
 container bash -Eeuo pipefail -c 'find /var/lib/getbible -name "*.pub" -type f -exec sha256sum {} +' > "$TEST_ROOT/keys-before"
 test -s "$TEST_ROOT/keys-before"
 container touch /var/log/getbible/recreation-sentinel
+# Preserve both the active configuration generation and immutable application
+# release. Resource refresh at image startup must not redeploy either one.
+# shellcheck disable=SC2016
+container bash -Eeuo pipefail -c 'for kind in query search; do
+    readlink -f "/opt/getbible/$kind/v2/active"
+    readlink -f "/opt/getbible/$kind/v2/current"
+done' > "$TEST_ROOT/generations-before"
 
 # Recreate, do not merely restart: account databases and image root are fresh.
 compose down --timeout 120
+export GETBIBLE_MEMORY_LIMIT=3g GETBIBLE_CPU_LIMIT=1.5
+export GETBIBLE_MEMORY_CACHE_TTL=604800 GETBIBLE_CACHE_MEMORY_PERCENT=35
+export GETBIBLE_QUERY_CPU_QUOTA=75% GETBIBLE_SEARCH_CPU_QUOTA=125%
+export GETBIBLE_TELEMETRY_RETENTION_DAYS=0 GETBIBLE_TELEMETRY_BATCH_SIZE=37
+export GETBIBLE_TELEMETRY_FLUSH_SECONDS=2 GETBIBLE_TELEMETRY_METRICS_SECONDS=1 GETBIBLE_TELEMETRY_MAX_GIB=2
 compose up -d --wait --wait-timeout 240
 CONTAINER="$(compose ps -q getbible)"
 container /usr/local/lib/getbible/getbible-identities show > "$TEST_ROOT/identities-after.json"
@@ -151,6 +165,12 @@ container bash -Eeuo pipefail -c 'find /var/lib/getbible -name "*.pub" -type f -
 cmp "$TEST_ROOT/identities-before.json" "$TEST_ROOT/identities-after.json"
 cmp "$TEST_ROOT/owners-before" "$TEST_ROOT/owners-after"
 cmp "$TEST_ROOT/keys-before" "$TEST_ROOT/keys-after"
+# shellcheck disable=SC2016
+container bash -Eeuo pipefail -c 'for kind in query search; do
+    readlink -f "/opt/getbible/$kind/v2/active"
+    readlink -f "/opt/getbible/$kind/v2/current"
+done' > "$TEST_ROOT/generations-after"
+cmp "$TEST_ROOT/generations-before" "$TEST_ROOT/generations-after"
 container test -f /var/log/getbible/recreation-sentinel
 container systemctl is-active --quiet getbible-logrotate.timer
 container systemctl is-active --quiet getbible-sync-static_example_test-v2.timer
@@ -158,5 +178,8 @@ request query.example.test /v2/test/Ge1:1 --fail -H "Authorization: Bearer $TOKE
 [[ "$(request query.example.test /v2/test/Ge1:1 -o /dev/null -w '%{http_code}')" == 401 ]]
 request search.example.test /v2/test/beginning --fail >/dev/null
 request static.example.test /v2/test/1/1.json --fail >/dev/null
+docker cp "$ROOT/tests/integration/infrastructure.py" "$CONTAINER:/tmp/getbible-infrastructure-ci.py"
+container env GB_CI_DISPOSABLE_HOST=1 "GB_TEST_QUERY_TOKEN=$TOKEN" /usr/bin/python3 /tmp/getbible-infrastructure-ci.py \
+    --mode docker --collector-only --recreated-resources
 container /usr/share/getbible/api/docker/healthcheck.sh
-printf 'Docker acceptance passed: offline deployment, systemd isolation, HAProxy routing, tokens and full recreation.\n'
+printf 'Docker acceptance passed: offline deployment, installed infrastructure, HAProxy routing, persistent state and changed resource settings on recreation.\n'

@@ -1,4 +1,6 @@
 [Unit]
+Requires=getbible-prepare.service
+After=getbible-prepare.service
 Description=getBible managed storage accounting
 After=local-fs.target
 OnFailure=getbible-alert@%n.service

@@ -79,6 +79,14 @@ The first run creates `/etc/getbible` with the global configuration, the
 helper programs under `/usr/local/lib/getbible`.
 `install-deps` enables and starts `certbot.timer` for automatic renewal checks.
 
+Saved configuration, credentials and endpoint settings live in `/etc/getbible`,
+outside the manager checkout. Persistent management state, identities, dashboard
+sessions and telemetry live in `/var/lib/getbible`. Source updates preserve these
+directories and their saved values. `/run/getbible` contains only generated
+service snapshots, recreated from saved configuration at boot. Local `.env`
+files and `getbible-data/` are ignored by Git if used alongside a checkout;
+native installation does not require either location.
+
 The rendered configuration adapts to the release. Ubuntu 26.04 ships the Rust
 coreutils, whose `install -d` and `mv -T` differ from GNU's, so the tool creates
 every directory level explicitly and switches symlinks with `rename(2)`. Ubuntu

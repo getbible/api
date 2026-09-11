@@ -20,6 +20,7 @@ import pwd
 import queue
 import re
 import secrets
+import signal
 import stat
 import socket
 import socketserver
@@ -32,6 +33,13 @@ import time
 
 MAX_REQUEST = 2 * 1024 * 1024
 MAX_OUTPUT = 256 * 1024
+REFRESH_RETRY_DELAYS = (1, 5)
+REFRESH_COMMAND = ("/usr/bin/systemctl", "--no-block", "restart", "getbible-admin.service")
+
+
+class ManagementPaused(Exception):
+    """Accepted work is draining before a management service refresh."""
+
 DOMAIN = r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?)+"
 RUNTIME_KEYS = "WORKERS|THREADS|WARM_TRANSLATIONS|DEFAULT_TRANSLATION|DEFAULT_REFERENCE|ALLOWED_TRANSLATIONS|REPOSITORY|CACHE_TTL|MEMORY_CACHE_TTL|MEMORY_MIN|MEMORY_MAX|CPU_QUOTA|WORKERS_MIN|WORKERS_MAX|THREADS_MIN|THREADS_MAX|CACHE_MEMORY_PERCENT|SHARED_CORPUS_LIMIT|CHAPTER_CACHE_LIMIT|TRANSLATION_CACHE_LIMIT|REFERENCE_CACHE_LIMIT"
 PATTERNS = {
@@ -230,6 +238,9 @@ class Broker:
         self.work = queue.Queue(maxsize=64)
         self.secrets = {}
         self.output_secrets = {}
+        self.refresh_requested = False
+        self.refresh = {"state": "current", "pending": False, "attempts": 0,
+                        "requested_at": None, "next_retry_at": None, "last_error": None}
         self.storage_cache = (0, None)
         self.inventory_cache = {}
         self.inventory_lock = threading.Lock()
@@ -240,11 +251,74 @@ class Broker:
                     created REAL NOT NULL, started REAL, finished REAL, exit_code INTEGER,
                     output TEXT NOT NULL DEFAULT '');
                 CREATE INDEX IF NOT EXISTS jobs_created ON jobs(created);
+                CREATE TABLE IF NOT EXISTS management_state (id INTEGER PRIMARY KEY CHECK(id=1), refresh TEXT NOT NULL);
             """)
             db.execute("UPDATE jobs SET status='interrupted',finished=?,output=output || '\nBroker restarted; inspect current system state before retrying.' WHERE status IN ('running','queued')", (time.time(),))
+        # Starting this process loads the current installed code and unit. Old
+        # jobs remain durable; only the completed refresh request is cleared.
+        self.persist_refresh()
         os.chmod(self.database, 0o600)
         self.worker = threading.Thread(target=self.run_jobs, daemon=True, name="management-jobs")
         self.worker.start()
+
+    def request_refresh(self, _signum=None, _frame=None):
+        # A Python signal can interrupt a SQLite transaction or a held lock.
+        # Do not perform either operation from this handler.
+        self.refresh_requested = True
+
+    def persist_refresh(self):
+        with self.connect() as db:
+            db.execute("INSERT OR REPLACE INTO management_state(id,refresh) VALUES(1,?)",
+                       (json.dumps(self.refresh),))
+
+    def state(self):
+        with self.mutex:
+            refresh = dict(self.refresh)
+            if self.refresh_requested and refresh["state"] in {"current", "failed"}:
+                refresh.update(state="waiting", pending=True)
+            return {"refresh": refresh, "pending_jobs": self.work.unfinished_tasks,
+                    "accepting_jobs": not self.refresh_requested and refresh["state"] in {"current", "failed"}}
+
+    def refresh_tick(self, now=None):
+        """Drain accepted work and secret claims before scheduling a unit restart."""
+        now = time.time() if now is None else now
+        with self.mutex:
+            if self.refresh_requested:
+                self.refresh_requested = False
+                if self.refresh["state"] in {"current", "failed"}:
+                    self.refresh = {"state": "waiting", "pending": True, "attempts": 0,
+                                    "requested_at": now, "next_retry_at": None, "last_error": None}
+                    self.persist_refresh()
+            for job_id, (expires, _) in list(self.output_secrets.items()):
+                if expires <= now:
+                    self.output_secrets.pop(job_id, None)
+            if self.refresh["state"] not in {"waiting", "retrying"}:
+                return
+            if self.work.unfinished_tasks or self.output_secrets:
+                return
+            if self.refresh["next_retry_at"] is not None and now < self.refresh["next_retry_at"]:
+                return
+            self.refresh.update(state="scheduling", attempts=self.refresh["attempts"] + 1, next_retry_at=None)
+            # Persist before systemd can stop this process. The submitted job and
+            # all its output are already committed, with no undisclosed secrets.
+            self.persist_refresh()
+        try:
+            result = subprocess.run(REFRESH_COMMAND, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                    timeout=5, close_fds=True,
+                                    env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8"})
+            succeeded = result.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            succeeded = False
+        with self.mutex:
+            if succeeded:
+                self.refresh.update(state="scheduled", last_error=None)
+            else:
+                attempts = self.refresh["attempts"]
+                self.refresh.update(state="failed" if attempts >= 3 else "retrying",
+                                    next_retry_at=None if attempts >= 3 else now + REFRESH_RETRY_DELAYS[attempts - 1],
+                                    last_error="The management service refresh could not be scheduled; run update to retry.")
+            self.persist_refresh()
 
     def audit(self, event, **fields):
         """Administrative events enter the same collector as request events."""
@@ -307,6 +381,8 @@ class Broker:
         job = secrets.token_urlsafe(18)
         safe = {key: ("[hidden]" if key == "secret" else f"[{len(value)} characters of custom content]" if key == "content" else redact(value) if isinstance(value, str) else value) for key, value in values.items()}
         with self.mutex:
+            if not self.state()["accepting_jobs"]:
+                raise ManagementPaused("Management is refreshing; accepted jobs remain available")
             if self.work.full():
                 raise ValueError("Management queue is full; wait for an existing job")
             if "secret" in values:
@@ -663,6 +739,8 @@ class Broker:
         if any(not isinstance(v, str) or len(v) > 128 or any(ord(c) < 32 for c in v) for v in actor_data.values()):
             raise ValueError("Invalid actor")
         actor = json.dumps({"uid": uid, **actor_data}, sort_keys=True)
+        if method == "state":
+            return self.state()
         if method == "operations":
             return self.catalogue()
         if method == "submit":
@@ -695,6 +773,8 @@ class RequestHandler(socketserver.StreamRequestHandler):
             request_id = request.get("id") if isinstance(request, dict) else None
             result = self.server.broker.dispatch(request, uid)
             reply = {"id": request_id, "result": result}
+        except ManagementPaused:
+            reply = {"id": request_id, "error": {"code": "management_refresh_pending", "message": "Management is refreshing; accepted jobs remain available."}}
         except (ValueError, TypeError, json.JSONDecodeError):
             reply = {"id": request_id, "error": {"code": "invalid_request", "message": "The requested operation or arguments are invalid."}}
         except Exception:
@@ -705,6 +785,9 @@ class RequestHandler(socketserver.StreamRequestHandler):
 class Server(socketserver.ThreadingUnixStreamServer):
     daemon_threads = True
     request_queue_size = 16
+
+    def service_actions(self):
+        self.broker.refresh_tick()
 
 
 def main():
@@ -733,6 +816,7 @@ def main():
     if path.exists():
         path.unlink()
     broker = Broker(args.state_dir, args.manager, args.prefix, args.runtime_control)
+    signal.signal(signal.SIGUSR1, broker.request_refresh)
     with Server(str(path), RequestHandler) as server:
         server.allowed_uids = allowed
         server.broker = broker

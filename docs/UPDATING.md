@@ -98,6 +98,13 @@ staged: an update never requests a certificate or changes DNS for them. An
 update rewrites every generated page and OpenAPI document; the ones an
 operator has taken over are left alone (`PAGES.md`).
 
+Explicit updates also install the current collector, dashboard and management
+service code. The broker finishes accepted jobs and preserves their results
+before restarting; issued credentials remain available until collected or their
+existing one-use window expires. Saved settings and state stay outside the
+checkout under `/etc/getbible` and `/var/lib/getbible`. Updating source never
+replaces those values with the example configuration.
+
 ## Choose the operation
 
 | Operation | Result |

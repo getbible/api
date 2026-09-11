@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import contextlib
+import io
 import os
 import sqlite3
 import sys
@@ -20,6 +22,8 @@ from getbible_telemetry.collector import read_settings
 from getbible_telemetry.health import HealthInspector
 from getbible_telemetry.metrics import MetricsSampler
 from getbible_telemetry.producer import emit_event
+from getbible_telemetry.cli import main
+from getbible_telemetry.settings import numeric_setting
 
 
 def edge(request_id="r1", **changes):
@@ -124,6 +128,93 @@ class TelemetryTest(unittest.TestCase):
         self.assertLessEqual(self.store.storage()["bytes"], 1024**2)
         self.assertEqual(self.store.requests(0, 1000)["items"][0]["request_id"], "249")
         self.assertTrue(self.store.storage()["retention_events"])
+
+    def test_zero_retention_disables_age_but_keeps_oldest_first_size_pruning(self):
+        self.append(edge("old", time=1))
+        result = self.store.prune(max_bytes=1024**2, retention_days=0, now=10**10)
+        self.assertEqual(result["deleted"]["requests"], 0)
+        with self.store.db:
+            for index in range(250):
+                self.store.append(edge(str(index), time=index + 2, user_agent="x" * 8192),
+                                  endpoint="bible.test", source="edge", record_key=str(index))
+        result = self.store.prune(max_bytes=1024**2, retention_days=0, now=10**10)
+        self.assertGreater(result["deleted"]["requests"], 0)
+        rows = self.store.requests(0, 1000)["items"]
+        self.assertEqual(rows[0]["request_id"], "249")
+        self.assertNotIn("old", [row["request_id"] for row in rows])
+        self.assertEqual(self.store.storage()["retention_events"][0]["reason"], "size")
+
+    def test_startup_and_reload_share_strict_numeric_contract(self):
+        path = self.root / "telemetry.env"
+        options = {"RETENTION_DAYS": "--retention-days", "MAX_GIB": "--max-gib",
+                   "BATCH_SIZE": "--batch-size", "FLUSH_SECONDS": "--flush-seconds"}
+        for key, option in options.items():
+            for value in ("nan", "inf", "Infinity", "1.5", "1.0", "-1", "100000000000"):
+                with self.subTest(key=key, value=value):
+                    path.write_text(f"GETBIBLE_TELEMETRY_{key}={value}\n")
+                    with self.assertRaises(ValueError):
+                        read_settings(str(path))
+                    with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
+                        main(["collect", "--once", option, value])
+                    self.assertEqual(raised.exception.code, 2)
+        path.write_text("GETBIBLE_TELEMETRY_RETENTION_DAYS=000000\nGETBIBLE_TELEMETRY_BATCH_SIZE=100000\n")
+        self.assertEqual(read_settings(str(path)), {"TELEMETRY_RETENTION_DAYS": 0, "TELEMETRY_BATCH_SIZE": 100000})
+        with self.assertRaises(ValueError):
+            Collector(self.store, str(self.root), batch_size=100001)
+        with self.assertRaises(ValueError):
+            numeric_setting("ALERT_CPU_PERCENT", 96)
+        with patch("getbible_telemetry.cli.TelemetryStore") as storage, patch("getbible_telemetry.cli.Collector") as collector:
+            main(["collect", "--once", "--retention-days", "0", "--batch-size", "100000", "--no-journal"])
+            self.assertEqual(collector.call_args.kwargs["batch_size"], 100000)
+            self.assertEqual(collector.return_value.run.call_args.kwargs["retention_days"], 0)
+            storage.assert_called_once()
+
+    def test_alert_environment_without_settings_file_is_honored(self):
+        with patch.dict(os.environ, {"GETBIBLE_ALERT_HOLD_SECONDS": "7", "GETBIBLE_ALERT_CPU_PERCENT": "81"}):
+            collector = Collector(self.store, str(self.root))
+        self.assertEqual(collector.alert_settings["ALERT_HOLD_SECONDS"], 7)
+        self.assertEqual(collector.alert_settings["ALERT_CPU_PERCENT"], 81)
+
+    def test_flush_deadline_preserves_one_second_metrics_and_shutdown_ticks(self):
+        collector = Collector(self.store, str(self.root))
+        clock, ingested, metrics, sleeps = [0.0], [], [], []
+        def sleep(delay):
+            sleeps.append(delay)
+            clock[0] += delay
+            if clock[0] >= 7:
+                collector.running = False
+        def ingest(*_args, **_kwargs):
+            ingested.append(clock[0])
+            return 0
+        def sample():
+            metrics.append(clock[0])
+            return {}
+        with patch("getbible_telemetry.collector.time.monotonic", side_effect=lambda: clock[0]), \
+                patch("getbible_telemetry.collector.time.sleep", side_effect=sleep), \
+                patch("getbible_telemetry.collector.MetricsSampler") as sampler, \
+                patch("getbible_telemetry.collector.HealthInspector") as inspector, \
+                patch.object(collector, "files", return_value=[(self.root / "access.log", "bible.test", "edge", False)]), \
+                patch.object(collector, "ingest_file", side_effect=ingest), \
+                patch.object(collector, "rotate"), patch.object(collector, "cleanup"), \
+                patch.object(collector, "state", return_value={}), patch.object(collector, "health"), \
+                patch.object(self.store, "prune", return_value={}):
+            sampler.return_value.sample.side_effect = sample
+            inspector.return_value.current.return_value = {}
+            collector.run(flush_seconds=3, metrics_seconds=1, retention_days=0, journal=False)
+        self.assertEqual(ingested, [0, 3, 6])
+        self.assertEqual(metrics, list(range(7)))
+        self.assertTrue(all(0 < delay <= 1 for delay in sleeps))
+
+    def test_reload_zero_retention_reaches_pruner_without_resetting_other_settings(self):
+        path = self.root / "telemetry.env"
+        path.write_text("GETBIBLE_TELEMETRY_RETENTION_DAYS=0\nGETBIBLE_TELEMETRY_FLUSH_SECONDS=3\n")
+        collector = Collector(self.store, str(self.root))
+        with patch.object(self.store, "prune", return_value={}) as prune, \
+                patch("getbible_telemetry.collector.HealthInspector") as inspector:
+            inspector.return_value.current.return_value = {}
+            collector.run(once=True, journal=False, settings=str(path))
+        self.assertEqual(prune.call_args.kwargs["retention_days"], 0)
+        self.assertNotIn("settings_error", self.store.storage()["metadata"])
 
     def test_partial_line_cursor_commit_and_restart(self):
         path = self.root / "logs/bible.test/access.log"

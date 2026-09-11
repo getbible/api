@@ -17,7 +17,11 @@ GB_SYNC_FORCE="${GB_SYNC_FORCE:-0}"
 GB_NOTIFY="${GB_NOTIFY:-/usr/local/lib/getbible/getbible-notify}"
 GB_EXPORT="${GB_EXPORT:-/usr/local/lib/getbible/getbible-export-tree}"
 GB_STORAGE_GUARD="${GB_STORAGE_GUARD:-/usr/local/lib/getbible/getbible-storage-guard}"
-GB_SYNC_STORAGE_MAX_GIB="${GB_SYNC_STORAGE_MAX_GIB:-0}"
+# The effective snapshot overrides settings embedded when this endpoint was
+# installed. An explicit zero disables admission; an empty override falls back.
+GB_SYNC_STORAGE_MAX_GIB="${GETBIBLE_STORAGE_MAX_GIB:-${GB_SYNC_STORAGE_MAX_GIB:-0}}"
+[[ "$GB_SYNC_STORAGE_MAX_GIB" =~ ^[0-9]{1,6}$ ]] || { echo 'Invalid storage limit: expected integer 0..999999 GiB' >&2; exit 2; }
+GB_SYNC_STORAGE_MAX_GIB="$((10#$GB_SYNC_STORAGE_MAX_GIB))"
 GB_SYNC_STORAGE_STATE="${GB_SYNC_STORAGE_STATE:-/var/lib/getbible/storage}"
 STORAGE_RESERVED=false
 STORAGE_ID="$GB_SYNC_DOMAIN.$GB_SYNC_VERSION.$$"

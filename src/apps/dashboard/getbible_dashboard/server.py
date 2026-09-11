@@ -277,7 +277,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.close_connection = True
             self._problem(400, "invalid_request", str(exc)[:256])
         except BrokerError as exc:
-            self._problem(503 if exc.code == "broker_unavailable" else 400, exc.code, str(exc)[:256])
+            self._problem(503 if exc.code in {"broker_unavailable", "management_refresh_pending"} else 400, exc.code, str(exc)[:256])
         except (ReportingUnavailable, CancelledError) as exc:
             self._problem(409, "reporting_unavailable", str(exc) or "Reporting is sleeping; reconnect the dashboard")
         except sqlite3.OperationalError as exc:
@@ -299,6 +299,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         name = path.removeprefix("/api/")
         if name == "dashboard/state":
             return self._json(200, self.app.lifecycle.state())
+        if name == "management/state":
+            return self._json(200, self.app.broker.call("state", {"actor": {"session_id": session["id"]}}))
         if name == "sessions":
             return self._json(200, {"sessions": self.app.auth.sessions(), "current_session_id": session["id"]})
         if name in {"overview", "history", "requests", "events"}:

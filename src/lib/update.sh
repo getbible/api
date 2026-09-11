@@ -75,6 +75,7 @@ update_manager() {
 
 update_domain() {
     local domain="$1"
+    if [[ "${GB_INFRASTRUCTURE_UPDATED:-false}" != true ]]; then infrastructure_update || return 1; fi
     if gb_is_docker && [[ "$(ep_get "$domain" TYPE)" == runtime ]]; then
         endpoint_source_type runtime
         rt_update "$domain"
@@ -92,6 +93,8 @@ update_all() {
     fi
     exec 8>"$GB_VAR/update.lock"
     flock -n 8 || gb_die "Another update is running."
+    infrastructure_update || return 1
+    local GB_INFRASTRUCTURE_UPDATED=true
     gb_step "Updating every domain from commit $commit"
     tg_notify start "Update started" "getbible.sh update at commit $commit on $(ep_list | wc -l) domain(s)."
     logs_render_rotation

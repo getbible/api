@@ -47,6 +47,14 @@ as false. An explicit environment value of false prevents the CLI from enabling
 the dashboard until that override is changed. Applying configuration explicitly
 reloads the dashboard settings with SIGHUP and preserves existing sessions.
 
+Native installations use the same built-in settings without requiring Compose
+or an environment file. Run these commands as root through `./getbible.sh` from
+the manager checkout. Saved settings live under `/etc/getbible`; boot preparation
+regenerates temporary service settings before the collector and dashboard start.
+`self-update` fetches manager source, and a subsequent `update` applies it to the
+installed management services and API domains. Docker receives manager updates
+from a replacement image.
+
 The initial password is an undisclosed random value; set or reset it through the
 CLI before the first login. Passwords are hashed and never stored in plaintext.
 An automated password change can use stdin instead of process arguments:
@@ -175,7 +183,8 @@ are recorded in the existing identity registry before mounted data is accessed.
 
 Automated tests cover broker argument validation, private-file import rejection,
 credential redaction, one-time token disclosure, interrupted jobs, authentication
-state and trusted proxy template rendering. `systemd-analyze verify` validates the
-generated units. Actual systemd/cgroup, nginx, external TLS, cookie, sleep/wake and
-image recreation acceptance must also run on the disposable Ubuntu host described
-in [DEPLOYMENT_DECISIONS.md](DEPLOYMENT_DECISIONS.md) before production rollout.
+state, reporting sleep/wake and trusted proxy rendering. Chromium tests exercise
+sign-in, charts, filters, management forms, themes and responsive layout.
+Disposable Ubuntu and Docker acceptance tests exercise installed services,
+nginx routing, external TLS forwarding and persistent state restoration; see
+[DEPLOYMENT_DECISIONS.md](DEPLOYMENT_DECISIONS.md).

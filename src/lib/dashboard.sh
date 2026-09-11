@@ -15,7 +15,45 @@ dashboard_save_setting() {
     gb_global_set "$1" "$2"
 }
 
-infrastructure_environment() {
+# All writers share a lock independent of the long-running manager lock. The
+# boot preparation path must never wait for a deployment which is starting it.
+infrastructure_environment() (
+    local lock_fd file complete=true before after
+    gb_ensure_dir "$GB_RUN" 0755 || return 1
+    exec {lock_fd}>"$GB_RUN/effective-settings.lock" || return 1
+    flock "$lock_fd" || return 1
+    if [[ "${1:-}" == --if-missing ]]; then
+        for file in dashboard.conf telemetry.env adaptive.env storage.env telegram.conf; do
+            [[ -f "$GB_RUN/$file" ]] || complete=false
+        done
+        [[ "$complete" != true ]] || return 0
+    fi
+    before="$(infrastructure_dashboard_fingerprint)"
+    infrastructure_environment_write || return 1
+    after="$(infrastructure_dashboard_fingerprint)"
+    if [[ "$before" != "$after" && "${GB_PREPARING_INFRASTRUCTURE:-false}" != true \
+        && "${GB_CONTAINER_BOOTSTRAP:-false}" != true && "$GB_DRY_RUN" != true ]] \
+        && sd_is_active getbible-dashboard.service; then
+        "$GB_SYSTEMCTL" reload getbible-dashboard.service || return 1
+    fi
+)
+
+infrastructure_dashboard_fingerprint() {
+    local file
+    for file in dashboard.conf telegram.conf; do
+        if [[ -f "$GB_RUN/$file" ]]; then gb_sha256_file "$GB_RUN/$file"; else printf 'missing\n'; fi
+    done
+}
+
+infrastructure_prepare() {
+    local GB_PREPARING_INFRASTRUCTURE=true
+    # /etc holds saved settings; Docker's entrypoint additionally captures its
+    # authoritative overrides before systemd starts. A complete snapshot may
+    # contain direct native command overrides and must remain untouched.
+    infrastructure_environment --if-missing
+}
+
+infrastructure_environment_write() {
     local key stage telegram default
     gb_ensure_dir "$GB_RUN" 0755 || return 1
     stage="$(gb_tmpdir)/dashboard.conf"
@@ -89,7 +127,7 @@ infrastructure_install() {
     stage="$(gb_tmpdir)/infrastructure-units"
     gb_ensure_dir "$stage" 0755 || return 1
     python="$(command -v "$GB_PYTHON")"
-    for unit in getbible-admin.service getbible-dashboard.service getbible-telemetry.service getbible-adapt.service getbible-adapt.timer getbible-storage.service getbible-storage.timer getbible-alert@.service; do
+    for unit in getbible-prepare.service getbible-admin.service getbible-dashboard.service getbible-telemetry.service getbible-adapt.service getbible-adapt.timer getbible-storage.service getbible-storage.timer getbible-alert@.service; do
         gb_render "$GB_SRC/systemd/$unit.tmpl" "$stage/$unit" \
             "PYTHON=$python" "PREFIX=$GB_PREFIX" "ETC=$GB_ETC" "VAR=$GB_VAR" "LOG=$GB_LOG" "RUN=$GB_RUN" \
             "OPT=$GB_OPT" "CACHE=$GB_CACHE" "LIBEXEC=$GB_LIBEXEC" "MANAGER=$GB_SELF" \
@@ -131,10 +169,28 @@ infrastructure_storage_initial_sample() {
 # Called by ordinary commands only to initialize a missing installation. Boot
 # explicitly refreshes effective settings/identities without a DNS/TLS action.
 infrastructure_ensure() {
-    if [[ ! -f "$GB_SYSTEMD/getbible-telemetry.service" || ! -f "$GB_SYSTEMD/getbible-storage.timer" || "${GB_CONTAINER_BOOTSTRAP:-false}" == true ]]; then
+    if [[ ! -f "$GB_SYSTEMD/getbible-prepare.service" || ! -f "$GB_SYSTEMD/getbible-telemetry.service" || ! -f "$GB_SYSTEMD/getbible-storage.timer" || "${GB_CONTAINER_BOOTSTRAP:-false}" == true ]]; then
         infrastructure_install
     else
         infrastructure_environment
+    fi
+}
+
+# Applying a reviewed manager release refreshes installed code even when its
+# units already exist. Ordinary commands only refresh effective configuration.
+infrastructure_update() {
+    local telemetry_active=false dashboard_active=false admin_active=false
+    if sd_is_active getbible-telemetry.service; then telemetry_active=true; fi
+    if sd_is_active getbible-dashboard.service; then dashboard_active=true; fi
+    if sd_is_active getbible-admin.service; then admin_active=true; fi
+    infrastructure_install || return 1
+    [[ "$GB_DRY_RUN" != true ]] || return 0
+    if [[ "$telemetry_active" == true ]]; then sd_restart getbible-telemetry.service || return 1; fi
+    if [[ "$dashboard_active" == true ]]; then sd_restart getbible-dashboard.service || return 1; fi
+    # An update can itself be a broker job. Let the broker drain and persist its
+    # results (including unclaimed credentials) before it replaces itself.
+    if [[ "$admin_active" == true ]]; then
+        "$GB_SYSTEMCTL" kill --kill-who=main --signal=SIGUSR1 getbible-admin.service || return 1
     fi
 }
 

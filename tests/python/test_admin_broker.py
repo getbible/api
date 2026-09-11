@@ -4,6 +4,9 @@ import importlib.util
 import json
 from pathlib import Path
 import tempfile
+import threading
+from types import SimpleNamespace
+from unittest.mock import patch
 import unittest
 
 
@@ -102,6 +105,106 @@ class JobTests(unittest.TestCase):
         job = replacement.job("old-job", "operator")
         self.assertEqual(job["status"], "interrupted")
         self.assertTrue(replacement.work.empty())
+
+    def test_refresh_signal_only_sets_a_flag_and_rejects_new_work(self):
+        with patch.object(self.app, "connect", side_effect=AssertionError("signal opened database")):
+            self.app.request_refresh()
+        self.assertFalse(self.app.state()["accepting_jobs"])
+        with self.assertRaises(broker.ManagementPaused):
+            self.app.submit({"operation": "domain.status", "arguments": {"domain": "api.example.test"}}, "operator")
+        self.assertEqual(self.app.jobs(), [])
+
+    def test_refresh_drains_job_and_commits_result_before_fixed_unit_restart(self):
+        started, release = threading.Event(), threading.Event()
+        original = self.app.run_job
+        def delayed(*args):
+            started.set()
+            release.wait(5)
+            original(*args)
+        with patch.object(self.app, "run_job", side_effect=delayed):
+            job = self.app.submit({"operation": "domain.status", "arguments": {"domain": "api.example.test"}}, "operator")
+            self.assertTrue(started.wait(5))
+            self.app.request_refresh()
+            with patch.object(broker.subprocess, "run") as restart:
+                self.app.refresh_tick()
+                restart.assert_not_called()
+                self.assertEqual(self.app.state()["pending_jobs"], 1)
+                self.assertEqual(self.app.job(job["id"], "operator")["status"], "queued")
+            release.set()
+            self.app.work.join()
+        def schedule(*args, **kwargs):
+            self.assertEqual(args[0], broker.REFRESH_COMMAND)
+            self.assertFalse(kwargs.get("shell", False))
+            self.assertEqual(self.app.job(job["id"], "operator")["status"], "succeeded")
+            with self.app.connect() as db:
+                saved = json.loads(db.execute("SELECT refresh FROM management_state WHERE id=1").fetchone()[0])
+            self.assertEqual(saved["state"], "scheduling")
+            return SimpleNamespace(returncode=0)
+        with patch.object(broker.subprocess, "run", side_effect=schedule):
+            self.app.refresh_tick()
+        self.assertEqual(self.app.state()["refresh"]["state"], "scheduled")
+        replacement = broker.Broker(self.root / "admin", self.manager, str(self.root))
+        self.assertEqual(replacement.job(job["id"], "operator")["status"], "succeeded")
+        self.assertEqual(replacement.state()["refresh"]["state"], "current")
+        self.assertTrue(replacement.state()["accepting_jobs"])
+
+    def test_refresh_keeps_one_time_output_available_until_claimed_or_expired(self):
+        for consume in (True, False):
+            with self.subTest(consume=consume):
+                self.app.refresh.update(state="current", pending=False)
+                job = self.app.submit({"operation": "token.add", "arguments": {"domain": "api.example.test", "label": "integration"}}, "operator")
+                self.app.work.join()
+                self.app.request_refresh()
+                with patch.object(broker.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as restart:
+                    self.app.refresh_tick()
+                    restart.assert_not_called()
+                    self.assertTrue(self.app.job(job["id"], "operator")["secret_available"])
+                    if consume:
+                        self.assertIn(self.token, self.app.job(job["id"], "operator", True)["one_time_output"])
+                        self.app.refresh_tick()
+                    else:
+                        expires = self.app.output_secrets[job["id"]][0]
+                        self.app.refresh_tick(now=expires + 1)
+                    restart.assert_called_once()
+                self.assertFalse(self.app.output_secrets)
+                self.assertNotIn(self.token, self.app.database.read_bytes().decode("utf-8", "ignore"))
+
+    def test_refresh_retries_are_bounded_persistent_and_failure_reopens_management(self):
+        self.app.request_refresh()
+        with patch.object(broker.subprocess, "run", return_value=SimpleNamespace(returncode=1)) as restart:
+            self.app.refresh_tick(now=100)
+            self.assertEqual(self.app.state()["refresh"]["state"], "retrying")
+            self.app.refresh_tick(now=100.5)
+            self.assertEqual(restart.call_count, 1)
+            self.app.refresh_tick(now=101)
+            self.app.refresh_tick(now=106)
+            self.app.refresh_tick(now=1000)
+            self.assertEqual(restart.call_count, 3)
+        state = self.app.state()
+        self.assertEqual(state["refresh"]["state"], "failed")
+        self.assertEqual(state["refresh"]["attempts"], 3)
+        self.assertTrue(state["refresh"]["pending"])
+        self.assertTrue(state["accepting_jobs"])
+        self.assertIsNone(state["refresh"]["next_retry_at"])
+        with self.app.connect() as db:
+            saved = json.loads(db.execute("SELECT refresh FROM management_state WHERE id=1").fetchone()[0])
+        self.assertEqual(saved, state["refresh"])
+        job = self.app.submit({"operation": "domain.status", "arguments": {"domain": "api.example.test"}}, "operator")
+        self.app.work.join()
+        self.assertEqual(self.app.job(job["id"], "operator")["status"], "succeeded")
+        self.app.request_refresh()
+        with patch.object(broker.subprocess, "run", return_value=SimpleNamespace(returncode=0)):
+            self.app.refresh_tick(now=1001)
+        self.assertEqual(self.app.state()["refresh"]["attempts"], 1)
+        self.assertEqual(self.app.dispatch({"method": "state"}, 0)["refresh"]["state"], "scheduled")
+
+    def test_refresh_scheduling_errors_are_visible_and_retried(self):
+        self.app.request_refresh()
+        with patch.object(broker.subprocess, "run", side_effect=[OSError("unavailable"), broker.subprocess.TimeoutExpired(broker.REFRESH_COMMAND, 5)]):
+            self.app.refresh_tick(now=100)
+            self.app.refresh_tick(now=101)
+        self.assertEqual(self.app.state()["refresh"]["state"], "retrying")
+        self.assertIsNotNone(self.app.state()["refresh"]["last_error"])
 
     def test_endpoint_inventory_never_exposes_registry_credentials(self):
         endpoint = self.root / "etc/getbible/endpoints/api.example.test"

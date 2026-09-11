@@ -1,0 +1,29 @@
+[Unit]
+Description=getBible effective service configuration
+After=local-fs.target
+Before=getbible-telemetry.service getbible-admin.service getbible-dashboard.service getbible-adapt.service getbible-storage.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=root
+Group=root
+UMask=0027
+RuntimeDirectory=getbible
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+ExecStart={{MANAGER}} infrastructure-prepare --yes
+NoNewPrivileges=true
+ProtectSystem=strict
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+ReadWritePaths={{RUN}}
+TasksMax=32
+MemoryMax=128M
+TimeoutStartSec=60

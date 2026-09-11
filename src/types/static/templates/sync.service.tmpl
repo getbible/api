@@ -1,12 +1,14 @@
 [Unit]
 Description=getBible sync {{DOMAIN}} {{LABEL}} from {{REPO_URL}}
-After=network-online.target
+After=network-online.target getbible-prepare.service
+Requires=getbible-prepare.service
 Wants=network-online.target
 
 [Service]
 Type=oneshot
 User={{USER}}
 Group={{GROUP}}
+EnvironmentFile={{RUN}}/storage.env
 Environment=GB_SYNC_DOMAIN={{DOMAIN}}
 Environment=GB_SYNC_VERSION={{LABEL}}
 Environment=GB_SYNC_REPO={{REPO_URL}}
