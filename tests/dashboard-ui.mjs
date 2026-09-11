@@ -117,6 +117,11 @@ try {
   await page.getByText('Fixture browser', {exact: true}).waitFor();
   assert.deepEqual(failures, [], 'No browser runtime errors');
   console.log('Dashboard browser checks passed: authentication flow, charts, filters, worker actions, management forms, one-time output, themes and mobile layout.');
+} catch (error) {
+  await fs.mkdir(path.join(root, 'test-artifacts'), {recursive: true});
+  await page.screenshot({path: path.join(root, 'test-artifacts/dashboard-failure.png'), fullPage: true});
+  console.error('Browser errors:', failures);
+  throw error;
 } finally {
   await context.close();
   await browser.close();
