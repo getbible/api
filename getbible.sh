@@ -151,7 +151,7 @@ gb_system_init() {
     if gb_is_docker && [[ -z "$GB_PREFIX" && "${GB_CONTAINER_BOOTSTRAP:-false}" != true && ! -d /run/systemd/system ]]; then
         gb_die "The Docker image must run systemd as PID 1. Start it using the supplied Compose configuration."
     fi
-    gb_management_lock || return 1
+    gb_management_lock || return "$?"
     gb_global_init
     gb_ensure_base_groups
     gb_ensure_base_dirs
@@ -170,7 +170,7 @@ cmd_container_init() {
     local GB_CONTAINER_BOOTSTRAP=true GB_RESOURCES_BOOTSTRAP=true stage
     export GB_CONTAINER_BOOTSTRAP GB_RESOURCES_BOOTSTRAP
     gb_environment_capture || return 1
-    gb_system_init || return 1
+    gb_system_init || return "$?"
     if [[ ! -f "$GB_NGINX/conf.d/getbible-http.conf" ]]; then
         stage="$(gb_tmpdir)/initial-nginx"
         nginx_render_global "$stage" || return 1
@@ -319,7 +319,7 @@ cmd_runtime() {
     if [[ "$domain" == versions ]]; then py_catalog; return; fi
     [[ -n "$domain" && -n "$action" ]] || gb_die "runtime DOMAIN [ENDPOINT] update|redeploy|rollback|set KEY VALUE"
     shift 2
-    gb_system_init || return 1
+    gb_system_init || return "$?"
     ep_exists "$domain" || gb_die "Unknown domain: $domain"
     [[ "$(ep_get "$domain" TYPE)" == runtime ]] || gb_die "$domain is not a runtime domain"
     endpoint_source_type runtime
@@ -519,7 +519,7 @@ main() {
         self-update)
             [[ $# == 0 ]] || gb_die "self-update takes no arguments (use --dry-run to preview)."
             gb_require_root
-            if [[ "$GB_DRY_RUN" != true ]]; then gb_management_lock || return 1; fi
+            if [[ "$GB_DRY_RUN" != true ]]; then gb_management_lock || return "$?"; fi
             update_manager ;;
         runtime) cmd_runtime "$@" ;;
         remove)

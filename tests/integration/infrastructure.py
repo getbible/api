@@ -102,7 +102,7 @@ class UnixHTTP(http.client.HTTPConnection):
         self.sock.connect("/run/getbible-dashboard/http.sock")
 
 
-def http(path, *, client=True, method="GET", body=None):
+def dashboard_request(path, *, client=True, method="GET", body=None):
     headers = {"Host": DOMAIN, "Origin": "https://" + DOMAIN,
                "Content-Type": "application/json"}
     if client:
@@ -130,8 +130,10 @@ def unit_checks():
     for unit in ("getbible-adapt.service", "getbible-storage.service"):
         run("systemctl", "start", unit, timeout=900)
         check(property_of(unit, "Result") == "success", f"{unit} executes under systemd")
-    for row in run("systemctl", "list-unit-files", "--no-legend", "getbible-sync-*.service").splitlines():
-        unit = row.split()[0]
+    # The native runtime-only fixture legitimately has no static sync units;
+    # systemctl list-unit-files exits nonzero for an unmatched pattern.
+    for installed in sorted(Path("/etc/systemd/system").glob("getbible-sync-*.service")):
+        unit = installed.name
         check("getbible-prepare.service" in property_of(unit, "Requires").split(),
               f"{unit} requires effective snapshot preparation")
         check(str(RUN / "storage.env") in property_of(unit, "EnvironmentFiles"),
@@ -199,7 +201,7 @@ def dashboard_checks():
         # persisted enable setting is created by acceptance.
         (RUN / "dashboard.conf").write_text("".join(f"{key}={value}\n" for key, value in values.items()))
         run("systemctl", "start", "getbible-admin.service", "getbible-dashboard.service")
-        wait_for(lambda: http("/api/auth/status") == (200, {"authenticated": False, "telegram_configured": False}),
+        wait_for(lambda: dashboard_request("/api/auth/status") == (200, {"authenticated": False, "telegram_configured": False}),
                  "real dashboard starts with Telegram disabled")
         check(pid("getbible-dashboard.service") > 0, "dashboard has a live systemd process")
         status = Path(f"/proc/{pid('getbible-dashboard.service')}/status").read_text()
@@ -207,17 +209,17 @@ def dashboard_checks():
         check(int(uid) == pwd.getpwnam("getbible-dashboard").pw_uid, "dashboard runs as its dedicated account")
         for path in (Path("/run/getbible-admin/broker.sock"), Path("/run/getbible-dashboard/http.sock")):
             check(stat.S_IMODE(path.stat().st_mode) == 0o660, f"{path.name} enforces its production socket mode")
-        check(http("/api/auth/status", client=False)[0] == 400, "dashboard requires the trusted client header")
+        check(dashboard_request("/api/auth/status", client=False)[0] == 400, "dashboard requires the trusted client header")
         for path in ("/api/overview", "/api/management/state"):
-            code, body = http(path)
+            code, body = dashboard_request(path)
             check(code == 503 and body["code"] == "telegram_unavailable", "protected route fails closed: " + path)
-        code, body = http("/api/auth/password", method="POST", body={"password": "disposable-unused-password"})
+        code, body = dashboard_request("/api/auth/password", method="POST", body={"password": "disposable-unused-password"})
         check(code == 503 and body["code"] == "telegram_unavailable", "password submission cannot bypass disabled Telegram")
         account("/usr/bin/python3", str(probe), "--broker-probe")
         old_pid = pid("getbible-admin.service")
         run("systemctl", "kill", "--kill-whom=main", "--signal=USR1", "getbible-admin.service")
         wait_for(lambda: pid("getbible-admin.service") not in (0, old_pid), "broker installs its deferred service refresh")
-        wait_for(lambda: http("/api/auth/status")[0] == 200, "dashboard HTTP recovers after broker replacement")
+        wait_for(lambda: dashboard_request("/api/auth/status")[0] == 200, "dashboard HTTP recovers after broker replacement")
         account("/usr/bin/python3", str(probe), "--broker-probe")
     finally:
         run("systemctl", "stop", "getbible-dashboard.service", "getbible-admin.service")
