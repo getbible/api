@@ -101,11 +101,16 @@ def source_change(args, item, environment, previous, diagnostic=None):
     # current cache. No app deployment, certificate, or DNS action occurs.
     try:
         refreshed = subprocess.run([args.manager, "runtime", item["domain"], "cache", item["label"],
-                                    "refresh-source"], capture_output=True, text=True, timeout=300, check=False)
+                                    "refresh-source"], capture_output=True, text=True, timeout=300, check=False,
+                                    env=dict(os.environ, GB_MANAGEMENT_LOCK_WAIT_SECONDS="0"))
     except (OSError, subprocess.SubprocessError) as error:
         if diagnostic is not None:
             diagnostic.update(error=str(error)[-4096:], failed_at=time.time())
         return previous
+    if refreshed.returncode == 75:
+        if diagnostic is not None:
+            diagnostic["deferred"] = True
+        return previous  # the foreground manager owns the lock; retry next sample
     if refreshed.returncode:
         if diagnostic is not None:
             diagnostic.update(error=(refreshed.stdout + refreshed.stderr)[-4096:], failed_at=time.time())
@@ -141,6 +146,7 @@ def run(args):
         planner = module("getbible_resource_planner", Path(__file__).with_name("getbible-resources"))
         entries = planner.inventory(Path(args.registry), Path(args.runtime_root))
         previous_targets = dict(state.get("targets", {}))
+        previous_applied_at = state.get("applied_at", 0)
         state.setdefault("targets", {})
         state.setdefault("endpoints", {})
         changed = False
@@ -156,13 +162,15 @@ def run(args):
             prefix = item["kind"].upper()
             diagnostic = {}
             source = source_change(args, item, environment, previous.get("source"), diagnostic)
-            source_state = {"source": source, "source_refresh_error": diagnostic or None,
+            deferred = diagnostic.pop("deferred", False)
+            source_state = {"source": source, "source_refresh_deferred": deferred,
+                            "source_refresh_error": previous.get("source_refresh_error") if deferred else diagnostic or None,
                             "source_error_notified_at": previous.get("source_error_notified_at", 0)}
-            if diagnostic and now - source_state["source_error_notified_at"] >= 900:
+            if not deferred and diagnostic and now - source_state["source_error_notified_at"] >= 900:
                 notify(args, "fail", "Source refresh failed: " + key,
                        "Runtime source/cache refresh failed. The old cache namespace remains active; inspect getbible-adapt journal and adaptive.json.")
                 source_state["source_error_notified_at"] = now
-            elif not diagnostic and previous.get("source_refresh_error"):
+            elif not deferred and not diagnostic and previous.get("source_refresh_error"):
                 notify(args, "ok", "Source refresh recovered: " + key,
                        "Every serving worker acknowledged the publication and nginx cache namespace refresh succeeded.")
             state["endpoints"][key] = previous | source_state
@@ -211,11 +219,17 @@ def run(args):
         if changed:
             # The manager owns the global apply lock, finite-budget admission,
             # candidate readiness, nginx validation/reload and old-worker drain.
-            applied = subprocess.run([args.manager, "resources", "apply"], capture_output=True, text=True, timeout=1800, check=False)
+            applied = subprocess.run([args.manager, "resources", "apply"], capture_output=True, text=True, timeout=1800, check=False,
+                                     env=dict(os.environ, GB_MANAGEMENT_LOCK_WAIT_SECONDS="0"))
             state["last_apply"] = {"at": now, "returncode": applied.returncode,
                                    "output": (applied.stdout + applied.stderr)[-8192:]}
             if applied.returncode:
                 state["targets"] = previous_targets
+            if applied.returncode == 75:
+                state["applied_at"] = previous_applied_at
+                state["last_apply"]["deferred"] = True
+                atomic_json(state_path, state)
+                return {"status": "deferred", "state": str(state_path), "last_apply": state["last_apply"]}
             atomic_json(state_path, state)
         return {"status": "applied" if changed else "sampled", "state": str(state_path),
                 "last_apply": state.get("last_apply")}

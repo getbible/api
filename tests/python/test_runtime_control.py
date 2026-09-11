@@ -157,6 +157,43 @@ class RuntimeControlTest(unittest.TestCase):
             self.assertIsNone(adapt.source_change(args, item, environment, None, diagnostic))
             self.assertEqual(diagnostic["error"], "nginx rejected")
 
+    def test_watcher_defers_busy_manager_without_source_failure(self):
+        args = SimpleNamespace(manager="getbible", registry=str(self.root))
+        item = {"domain": "query.example.test", "kind": "query", "label": "v2"}
+        environment = {"GETBIBLE_REPOSITORY": str(self.root), "GETBIBLE_VERSION": "v2"}
+        diagnostic = {}
+        with patch.object(adapt.subprocess, "run", return_value=SimpleNamespace(returncode=75)) as run:
+            self.assertIsNone(adapt.source_change(args, item, environment, None, diagnostic))
+        self.assertEqual(diagnostic, {"deferred": True})
+        self.assertEqual(run.call_args.kwargs["env"]["GB_MANAGEMENT_LOCK_WAIT_SECONDS"], "0")
+
+    def test_busy_resource_apply_preserves_targets_and_retries_without_cooldown(self):
+        active = self.root / "runtime" / "active"
+        active.mkdir(parents=True)
+        (active / "runtime.env").write_text("QUERY_WORKERS=1\nQUERY_THREADS=1\n")
+        settings = self.root / "manager.conf"
+        settings.write_text("ADAPTIVE_SUSTAINED_SAMPLES=1\n")
+        state = self.root / "adaptive.json"
+        state.write_text(json.dumps({"applied_at": 100, "targets": {}}))
+        args = SimpleNamespace(state=str(state), config=str(settings), environment=str(self.root / "absent"),
+                               registry=str(self.root), runtime_root=str(self.root), cache_root=str(self.root),
+                               systemctl="systemctl", control="control", manager="manager")
+        item = {"domain": "query.example.test", "kind": "query", "label": "v2", "config": {},
+                "root": str(active.parent)}
+        planner = SimpleNamespace(inventory=lambda *_: [item], WEIGHT={"query": 1})
+        replies = [SimpleNamespace(returncode=0, stdout="CPUUsageNSec=100\nMemoryCurrent=1\nMemoryMax=10\nActiveState=active"),
+                   SimpleNamespace(stdout=json.dumps({"complete": True, "workers": [{"activity": {"inflight": 5}}]})),
+                   SimpleNamespace(returncode=75, stdout="", stderr="busy")]
+        with patch.object(adapt, "module", return_value=planner), patch.object(adapt.time, "time", return_value=2000), \
+                patch.object(adapt.subprocess, "run", side_effect=replies) as run:
+            result = adapt.run(args)
+        saved = json.loads(state.read_text())
+        self.assertEqual(result["status"], "deferred")
+        self.assertEqual(saved["targets"], {})
+        self.assertEqual(saved["applied_at"], 100)
+        self.assertTrue(saved["last_apply"]["deferred"])
+        self.assertEqual(run.call_args.kwargs["env"]["GB_MANAGEMENT_LOCK_WAIT_SECONDS"], "0")
+
     def test_idle_workers_keep_resident_caches_unless_shrinking_is_opted_in(self):
         target = {"workers": 4, "weight": 4}
         sample = {"utilization": 0, "queue_percent": 0, "memory_percent": 10,
