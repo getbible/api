@@ -25,6 +25,19 @@ grep -qFx 'ProtectSystem=strict' "$GB_SYSTEMD/getbible-prepare.service" || fail 
 grep -qFx 'RuntimeDirectoryPreserve=yes' "$GB_SYSTEMD/getbible-prepare.service" || fail 'preparation must preserve runtime snapshots'
 grep -qFx 'Wants=getbible-admin.service' "$GB_SYSTEMD/getbible-dashboard.service" || fail 'dashboard must survive broker replacement'
 
+# Exercise the installed adaptive executable, including its sibling planner,
+# without configured endpoints or external systemctl/manager operations.
+"$GB_PYTHON" "$GB_LIBEXEC/getbible-adapt" --once --config "$GB_GLOBAL_CONF" \
+    --environment "$GB_ENVIRONMENT_CONF" --state "$GB_VAR/adaptive.json" \
+    --registry "$GB_ENDPOINTS" --runtime-root "$GB_OPT" --cache-root "$GB_CACHE" \
+    > "$TEST_ROOT/adaptive-result.json"
+"$GB_PYTHON" - "$TEST_ROOT/adaptive-result.json" <<'PYRESULT'
+import json
+import sys
+with open(sys.argv[1]) as stream:
+    assert json.load(stream)["status"] == "sampled"
+PYRESULT
+
 persisted="$(sha256sum "$GB_GLOBAL_CONF" "$GB_TELEGRAM_CONF")"
 # A complete command-generated native override must survive first service start.
 GETBIBLE_TELEMETRY_MAX_GIB=9 infrastructure_environment
