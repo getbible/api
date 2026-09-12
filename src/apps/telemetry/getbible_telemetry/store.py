@@ -29,6 +29,11 @@ _BEARER = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
 _SECRET_ASSIGNMENT = re.compile(r"(?i)\b(password|passwd|otp|access_token|refresh_token|api_key|bot_token|authorization|cookie|secret|token)=([^\s&\"']+)")
 _TELEGRAM_BOT = re.compile(r"\bbot\d{5,}:[A-Za-z0-9_-]{20,}")
 _TOKEN_ID = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
+_STATIC_METADATA = frozenset({
+    "books", "chapters", "checksums", "docs", "health", "healthz", "index",
+    "metadata", "metrics", "openapi", "query", "ready", "readyz", "search",
+    "translations", "versions",
+})
 _DIMENSIONS = {
     "endpoint": "endpoint", "version": "version", "status": "status",
     "auth": "auth", "ip": "remote_addr", "path": "path",
@@ -108,6 +113,29 @@ def _text(value: Any) -> str:
     return str(value)
 
 
+def _static_bible_path(pieces: list[str]) -> tuple[str, str]:
+    """Recognise corpus files without reading a repository on the ingest path."""
+    if not pieces:
+        return "", ""
+    translation = pieces[0].removesuffix(".json")
+    if (translation in _STATIC_METADATA
+            or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", translation)):
+        return "", ""
+    if len(pieces) == 1 and pieces[0].endswith(".json"):
+        return translation, ""
+    if pieces[0] != translation:
+        return "", ""
+    # Book and chapter files have numeric identities. Translation metadata,
+    # documentation and arbitrary deeper paths remain available in request
+    # details without being counted as Bible text downloads.
+    if len(pieces) == 2 and re.fullmatch(r"[1-9][0-9]*\.json", pieces[1]):
+        return translation, pieces[1].removesuffix(".json")
+    if (len(pieces) == 3 and re.fullmatch(r"[1-9][0-9]*", pieces[1])
+            and re.fullmatch(r"[1-9][0-9]*\.json", pieces[2])):
+        return translation, pieces[1]
+    return "", ""
+
+
 def _normalise(entry: dict[str, Any], endpoint: str, source: str, record_key: str) -> dict[str, Any]:
     entry = redact(entry)
     endpoint = endpoint or _text(entry.get("endpoint") or entry.get("host"))
@@ -124,11 +152,9 @@ def _normalise(entry: dict[str, Any], endpoint: str, source: str, record_key: st
         version = version or pieces.pop(0)
     translation = _text(entry.get("translation") or params.get("translation"))
     book = _text(entry.get("books") or entry.get("book") or params.get("books") or params.get("book"))
-    # Static Bible paths have a translation followed by numeric book/chapter.
-    # Root metadata and runtime route names are not translation names.
-    if not translation and len(pieces) >= 2 and re.fullmatch(r"\d+(?:\.json)?", pieces[1]):
-        translation = pieces[0]
-        book = book or pieces[1].removesuffix(".json")
+    if not translation:
+        translation, static_book = _static_bible_path(pieces)
+        book = book or static_book
     reference = _text(entry.get("reference") or entry.get("references") or params.get("ref")
                       or params.get("reference") or params.get("references"))
     search = _text(entry.get("search") or entry.get("criteria") or params.get("search")

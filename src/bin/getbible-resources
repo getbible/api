@@ -203,7 +203,9 @@ def endpoint_settings(item: dict, size: int, cpus: float, policy: dict | None = 
     automatic = requested_workers == "auto"
     desired = min(worker_max, max(worker_min, math.ceil(cpus))) if automatic else bounded(requested_workers, "WORKERS", 1, 64)
     if automatic and "adaptive_workers" in item:
-        desired = bounded(item["adaptive_workers"], "adaptive workers", worker_min, worker_max)
+        # A retained controller target was valid for the previous deployment.
+        # New environment bounds govern it when the container is recreated.
+        desired = max(worker_min, min(worker_max, bounded(item["adaptive_workers"], "adaptive workers", 1, 64)))
     requested_threads = saved.get("THREADS") or "4"
     desired_threads = min(thread_max, 4) if requested_threads == "auto" else bounded(requested_threads, "THREADS", 1, 64)
     per_worker_floor = (128 if kind == "query" else 512) * MIB

@@ -39,7 +39,7 @@ jobs:
         env:
           RELEASE_REF: ${{ github.ref }}
         run: |
-          version=1.0.0-dev
+          version=2.0.0-dev
           if [[ "$RELEASE_REF" == refs/tags/* ]]; then
             version="${RELEASE_REF#refs/tags/v}"
             [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Release tags must be vMAJOR.MINOR.PATCH.' >&2; exit 1; }
@@ -67,10 +67,10 @@ jobs:
           done
           sudo apt-get update
           sudo apt-get install -y haproxy shellcheck
-      - name: Lint image entry points and ownership restoration tests
+      - name: Lint image entry points and test ownership restoration and release guards
         run: |
           shellcheck -x -s bash docker/*.sh tests/integration/docker.sh
-          python3 -m unittest tests.python.test_identities -v
+          python3 -m unittest tests.python.test_identities tests.python.test_docker_release -v
       - name: Real systemd, offline deployment, HAProxy, token access and recreation
         run: tests/integration/docker.sh
       - name: Preserve the exact tested image for publication
@@ -148,6 +148,7 @@ jobs:
       - name: Candidate manifest or immutable release and latest
         env:
           RELEASE_REF: ${{ github.ref }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
           sources=("$image:sha-$GITHUB_SHA-amd64" "$image:sha-$GITHUB_SHA-arm64")
@@ -155,17 +156,24 @@ jobs:
           if [[ "$RELEASE_REF" != refs/tags/* ]]; then exit 0; fi
           version="${RELEASE_REF#refs/tags/v}"
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          if docker buildx imagetools inspect "$image:$version" >/dev/null 2>&1; then
+          # Both architecture tags already exist. Query the complete package
+          # tag list and stop on any API error; a failed registry lookup is
+          # never evidence that an immutable version or latest is absent.
+          package_tags="${RUNNER_TEMP:?}/getbible-package-tags"
+          gh api --paginate "orgs/$GITHUB_REPOSITORY_OWNER/packages/container/api/versions?per_page=100" \
+            --jq '.[].metadata.container.tags[]' > "$package_tags"
+          if grep -Fxq "$version" "$package_tags"; then
             echo "Release $version already exists; numbered releases are never overwritten." >&2
             exit 1
           fi
-          docker buildx imagetools create -t "$image:$version" "${sources[@]}"
           # Releasing a maintained older series must not move latest backwards.
           latest_version=0.0.0
-          if docker pull "$image:latest" >/dev/null 2>&1; then
+          if grep -Fxq latest "$package_tags"; then
+            docker pull "$image:latest"
             latest_version="$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$image:latest")"
             [[ "$latest_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
           fi
+          docker buildx imagetools create -t "$image:$version" "${sources[@]}"
           newest="$(printf '%s\n%s\n' "$latest_version" "$version" | sort -V | tail -1)"
           if [[ "$newest" == "$version" ]]; then
             docker buildx imagetools create -t "$image:latest" "${sources[@]}"

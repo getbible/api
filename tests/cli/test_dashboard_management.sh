@@ -70,6 +70,20 @@ gb_global_set TELEMETRY_MAX_GIB 25
 grep -qFx 'GETBIBLE_TELEMETRY_MAX_GIB=25' "$GB_RUN/telemetry.env" || fail 'saved retention must reach the collector immediately'
 gb_global_set STORAGE_MAX_GIB 50
 grep -qFx 'GETBIBLE_STORAGE_MAX_GIB=50' "$GB_RUN/storage.env" || fail 'saved storage budget must reach the independent sampler immediately'
+gb_global_set QUERY_WORKERS_MAX 6
+if grep -q '^GETBIBLE_\(QUERY\|SEARCH\)_' "$GB_RUN/adaptive.env"; then
+    fail 'saved resource defaults must not become authoritative deployment overrides in the controller'
+fi
+export GETBIBLE_QUERY_WORKERS_MAX=3 GETBIBLE_SEARCH_CPU_QUOTA=auto
+infrastructure_environment
+grep -qFx 'GETBIBLE_QUERY_WORKERS_MAX=3' "$GB_RUN/adaptive.env" || fail 'explicit worker bounds must reach the controller'
+grep -qFx 'GETBIBLE_SEARCH_CPU_QUOTA=auto' "$GB_RUN/adaptive.env" || fail 'explicit auto policy must retain environment authority'
+GETBIBLE_QUERY_WORKERS_MAX='' infrastructure_environment
+if grep -q '^GETBIBLE_QUERY_WORKERS_MAX=' "$GB_RUN/adaptive.env"; then
+    fail 'empty deployment resource values must restore saved or endpoint settings'
+fi
+unset GETBIBLE_QUERY_WORKERS_MAX GETBIBLE_SEARCH_CPU_QUOTA
+infrastructure_environment
 infrastructure_storage_initial_sample || fail 'enabled storage budget must be sampled before services start'
 [[ -s "$GB_VAR/storage/usage.json" ]] || fail 'startup storage accounting snapshot is missing'
 "$GB_PYTHON" - "$GB_VAR/storage/usage.json" "$GB_PREFIX" <<'PY'

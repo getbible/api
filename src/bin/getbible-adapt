@@ -134,8 +134,10 @@ def run(args):
     except BlockingIOError:
         return {"status": "already running"}
     with lock:
-        settings = config(args.config) | config(args.environment)
-        settings.update({key.removeprefix("GETBIBLE_"): value for key, value in os.environ.items() if key.startswith("GETBIBLE_")})
+        overrides = {key: value for key, value in config(args.environment).items() if value}
+        overrides.update({key.removeprefix("GETBIBLE_"): value for key, value in os.environ.items()
+                          if key.startswith("GETBIBLE_") and value})
+        settings = config(args.config) | overrides
         now = time.time()
         try:
             state = json.loads(state_path.read_text())
@@ -199,8 +201,8 @@ def run(args):
                 inflight = sum(worker.get("activity", {}).get("inflight", 0) for worker in report.get("workers", []))
             except ValueError:
                 continue
-            lower = int(item["config"].get("WORKERS_MIN", settings.get(prefix + "_WORKERS_MIN", "1")))
-            upper = int(item["config"].get("WORKERS_MAX", settings.get(prefix + "_WORKERS_MAX", "12")))
+            lower = int(overrides.get(prefix + "_WORKERS_MIN", item["config"].get("WORKERS_MIN", settings.get(prefix + "_WORKERS_MIN", "1"))))
+            upper = int(overrides.get(prefix + "_WORKERS_MAX", item["config"].get("WORKERS_MAX", settings.get(prefix + "_WORKERS_MAX", "12"))))
             sample = {"utilization": 100 * cpu_delta / 1e9 / elapsed / max(1, workers),
                       "queue_percent": 100 * inflight / max(1, workers * threads),
                       "memory_percent": 100 * memory / max(1, maximum),

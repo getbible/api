@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import json
 from pathlib import Path
 import subprocess
 import tempfile
@@ -190,6 +191,24 @@ class ResourceTest(unittest.TestCase):
         settings = result["endpoints"][0]["settings"]
         self.assertEqual(settings["CPU_QUOTA"], "250%")
         self.assertEqual(settings["WARM_TRANSLATIONS"], "kjv")
+
+    def test_recreation_clamps_retained_adaptive_target_to_new_environment_bounds(self):
+        self.endpoint("query.example.test", "query", WORKERS="auto")
+        (self.cg / "cpu.max").write_text("800000 100000")
+        state = self.root / "adaptive.json"
+        for previous, expected in ((8, 4), (1, 3)):
+            with self.subTest(previous=previous):
+                state.write_text(json.dumps({"targets": {"query.example.test/v2": {"workers": previous}}}))
+                with patch.object(planner.os, "sched_getaffinity", return_value=set(range(8))):
+                    result = planner.plan(self.args(
+                        adaptive_state=str(state),
+                        policy=["QUERY_WORKERS_MIN=3", "QUERY_WORKERS_MAX=4"],
+                        authoritative=["QUERY_WORKERS_MIN", "QUERY_WORKERS_MAX"]))
+                self.assertEqual(result["endpoints"][0]["settings"]["WORKERS"], expected)
+                self.assertEqual(json.loads(state.read_text())["targets"]["query.example.test/v2"]["workers"], previous)
+        state.write_text(json.dumps({"targets": {"query.example.test/v2": {"workers": 65}}}))
+        with self.assertRaisesRegex(ValueError, "adaptive workers must be between 1 and 64"):
+            planner.plan(self.args(adaptive_state=str(state)))
 
     def test_explicit_memory_ceiling_is_respected_with_update_overlap(self):
         self.endpoint("query.example.test", "query")

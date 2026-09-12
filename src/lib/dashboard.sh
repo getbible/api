@@ -73,8 +73,16 @@ infrastructure_environment_write() {
         : > "$(gb_tmpdir)/$stage.env"
         while IFS= read -r key; do
             case "$stage:$key" in
-                telemetry:TELEMETRY_*|telemetry:ALERT_*|adaptive:ADAPTIVE_*|adaptive:MEMORY_BUDGET|adaptive:QUERY_*|adaptive:SEARCH_*)
+                telemetry:TELEMETRY_*|telemetry:ALERT_*|adaptive:ADAPTIVE_*|adaptive:MEMORY_BUDGET)
                     printf 'GETBIBLE_%s=%s\n' "$key" "$(gb_global "$key")" >> "$(gb_tmpdir)/$stage.env" ;;
+                adaptive:QUERY_*|adaptive:SEARCH_*)
+                    # The controller reads saved global defaults itself.
+                    # Forward only explicit deployment overrides; exporting
+                    # defaults would incorrectly replace endpoint settings in
+                    # the controller's subsequent resources apply command.
+                    if gb_environment_managed "$GB_GLOBAL_CONF" "$key"; then
+                        printf 'GETBIBLE_%s=%s\n' "$key" "$(gb_global "$key")" >> "$(gb_tmpdir)/$stage.env"
+                    fi ;;
             esac
         done < <(gb_environment_keys)
         printf 'GB_TELEGRAM_CONF=%s/telegram.conf\n' "$GB_RUN" >> "$(gb_tmpdir)/$stage.env"
