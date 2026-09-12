@@ -1,27 +1,76 @@
 name: Docker image
 
 on:
-  pull_request:
   push:
-    branches: [main, master, agent/docker-deployment]
-    tags: ['v*.*.*']
-  workflow_dispatch:
-    inputs:
-      publish_candidate:
-        description: Publish the tested private sha tag (never latest or a release tag)
-        type: boolean
-        default: false
+    branches: [main]
 
 permissions:
   contents: read
 
+# Keep each main build and its publication together. A newer merge never
+# interrupts acceptance or races another run while moving registry tags.
 concurrency:
-  group: docker-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: docker-main
+  queue: max
+  cancel-in-progress: false
 
 jobs:
+  plan:
+    name: Verify merged main commit and image version
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      build: ${{ steps.release.outputs.build }}
+      image_version: ${{ steps.release.outputs.image_version }}
+      numbered_version: ${{ steps.release.outputs.numbered_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Plan merged main image
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PREVIOUS_MAIN: ${{ github.event.before }}
+        run: |
+          printf 'build=false\n' >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_EVENT_NAME" != push || "$GITHUB_REF" != refs/heads/main ]]; then exit 0; fi
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$PREVIOUS_MAIN" =~ ^[0-9a-f]{40}$ ]]
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" > "$RUNNER_TEMP/merged-prs.json"
+          merged="$(python3 -c 'import json, os, sys
+          merged = any(pr["merged_at"] is not None and pr["base"]["ref"] == "main"
+                       and pr["base"]["repo"]["full_name"] == os.environ["GITHUB_REPOSITORY"]
+                       and pr["merge_commit_sha"] == os.environ["GITHUB_SHA"]
+                       for page in json.load(sys.stdin) for pr in page)
+          print(str(merged).lower())' < "$RUNNER_TEMP/merged-prs.json")"
+          if [[ "$merged" != true ]]; then
+            echo 'No pull request was merged into main at this commit; image build skipped.'
+            exit 0
+          fi
+          version="$(cat VERSION)"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'VERSION must be MAJOR.MINOR.PATCH.' >&2; exit 1; }
+          previous_version=
+          if [[ ! "$PREVIOUS_MAIN" =~ ^0+$ ]]; then
+            git cat-file -e "$PREVIOUS_MAIN^{commit}"
+            if [[ -n "$(git ls-tree --name-only "$PREVIOUS_MAIN" -- VERSION)" ]]; then
+              previous_version="$(git show "$PREVIOUS_MAIN:VERSION")"
+            fi
+          fi
+          numbered_version=
+          image_version="$version-dev"
+          if [[ "$version" != "$previous_version" ]]; then
+            numbered_version="$version"
+            image_version="$version"
+          fi
+          printf 'build=true\nimage_version=%s\nnumbered_version=%s\n' "$image_version" "$numbered_version" >> "$GITHUB_OUTPUT"
+
   validate:
     name: Image / ${{ matrix.arch }}
+    needs: plan
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.build == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -35,16 +84,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
-      - name: Image version
-        env:
-          RELEASE_REF: ${{ github.ref }}
-        run: |
-          version=2.0.0-dev
-          if [[ "$RELEASE_REF" == refs/tags/* ]]; then
-            version="${RELEASE_REF#refs/tags/v}"
-            [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Release tags must be vMAJOR.MINOR.PATCH.' >&2; exit 1; }
-          fi
-          printf 'IMAGE_VERSION=%s\n' "$version" >> "$GITHUB_ENV"
       - name: Build the complete image and verify all bundled runtimes
         uses: docker/build-push-action@v6
         with:
@@ -54,7 +93,7 @@ jobs:
           platforms: linux/${{ matrix.arch }}
           provenance: false
           build-args: |
-            GETBIBLE_VERSION=${{ env.IMAGE_VERSION }}
+            GETBIBLE_VERSION=${{ needs.plan.outputs.image_version }}
             GETBIBLE_REVISION=${{ github.sha }}
           cache-from: type=gha,scope=getbible-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=getbible-${{ matrix.arch }}
@@ -74,10 +113,8 @@ jobs:
       - name: Real systemd, offline deployment, HAProxy, token access and recreation
         run: tests/integration/docker.sh
       - name: Preserve the exact tested image for publication
-        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish_candidate) || (github.event_name == 'push' && github.ref == 'refs/heads/agent/docker-deployment')
         run: docker image save getbible-api-test:ci | gzip -1 > /tmp/getbible-image.tar.gz
       - uses: actions/upload-artifact@v4
-        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish_candidate) || (github.event_name == 'push' && github.ref == 'refs/heads/agent/docker-deployment')
         with:
           name: image-${{ matrix.arch }}
           path: /tmp/getbible-image.tar.gz
@@ -86,8 +123,8 @@ jobs:
 
   publish:
     name: Publish tested image / ${{ matrix.arch }}
-    needs: validate
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish_candidate) || (github.event_name == 'push' && github.ref == 'refs/heads/agent/docker-deployment')
+    needs: [plan, validate]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.build == 'true'
     strategy:
       matrix:
         arch: [amd64, arm64]
@@ -130,10 +167,8 @@ jobs:
 
   manifest:
     name: Publish multi-architecture manifest
-    needs: publish
-    concurrency:
-      group: getbible-ghcr-manifest
-      cancel-in-progress: false
+    needs: [plan, publish]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.build == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -145,36 +180,44 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Candidate manifest or immutable release and latest
+      - name: Publish merged main manifest and optional numbered release
         env:
-          RELEASE_REF: ${{ github.ref }}
+          NUMBERED_VERSION: ${{ needs.plan.outputs.numbered_version }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
           sources=("$image:sha-$GITHUB_SHA-amd64" "$image:sha-$GITHUB_SHA-arm64")
-          docker buildx imagetools create -t "$image:sha-$GITHUB_SHA" "${sources[@]}"
-          if [[ "$RELEASE_REF" != refs/tags/* ]]; then exit 0; fi
-          version="${RELEASE_REF#refs/tags/v}"
-          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          # Both architecture tags already exist. Query the complete package
-          # tag list and stop on any API error; a failed registry lookup is
-          # never evidence that an immutable version or latest is absent.
-          package_tags="${RUNNER_TEMP:?}/getbible-package-tags"
-          gh api --paginate "orgs/$GITHUB_REPOSITORY_OWNER/packages/container/api/versions?per_page=100" \
-            --jq '.[].metadata.container.tags[]' > "$package_tags"
-          if grep -Fxq "$version" "$package_tags"; then
-            echo "Release $version already exists; numbered releases are never overwritten." >&2
-            exit 1
+          candidate="$image:sha-$GITHUB_SHA"
+          docker buildx imagetools create -t "$candidate" "${sources[@]}"
+          # Resolve main before changing stable tags. A failed lookup must not
+          # leave a partial numbered release that cannot be retried safely.
+          main_head="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
+          [[ "$main_head" =~ ^[0-9a-f]{40}$ ]] || { echo 'Invalid main revision from GitHub.' >&2; exit 1; }
+          if [[ -n "$NUMBERED_VERSION" ]]; then
+            [[ "$NUMBERED_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+            # A failed lookup is never evidence that an immutable tag is absent.
+            package_tags="${RUNNER_TEMP:?}/getbible-package-tags"
+            gh api --paginate "orgs/$GITHUB_REPOSITORY_OWNER/packages/container/api/versions?per_page=100" \
+              --jq '.[].metadata.container.tags[]' > "$package_tags"
+            if grep -Fxq "$NUMBERED_VERSION" "$package_tags"; then
+              # Retrying after a later publication failure may find the number
+              # already present. Only the exact accepted manifest is reusable.
+              docker buildx imagetools inspect --raw "$image:$NUMBERED_VERSION" > "$RUNNER_TEMP/numbered-manifest.json"
+              docker buildx imagetools inspect --raw "$candidate" > "$RUNNER_TEMP/candidate-manifest.json"
+              if ! cmp -s "$RUNNER_TEMP/numbered-manifest.json" "$RUNNER_TEMP/candidate-manifest.json"; then
+                echo "Release $NUMBERED_VERSION already exists with a different manifest; numbered releases are never overwritten." >&2
+                exit 1
+              fi
+              echo "Release $NUMBERED_VERSION already contains this accepted image; retaining it."
+            else
+              docker buildx imagetools create -t "$image:$NUMBERED_VERSION" "$candidate"
+            fi
           fi
-          # Releasing a maintained older series must not move latest backwards.
-          latest_version=0.0.0
-          if grep -Fxq latest "$package_tags"; then
-            docker pull "$image:latest"
-            latest_version="$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$image:latest")"
-            [[ "$latest_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
-          fi
-          docker buildx imagetools create -t "$image:$version" "${sources[@]}"
-          newest="$(printf '%s\n%s\n' "$latest_version" "$version" | sort -V | tail -1)"
-          if [[ "$newest" == "$version" ]]; then
-            docker buildx imagetools create -t "$image:latest" "${sources[@]}"
+          # Workflows are serialized, and an old rerun must not move latest
+          # behind the currently accepted main image. A newer main commit
+          # receives latest only after its own build and acceptance complete.
+          if [[ "$main_head" == "$GITHUB_SHA" ]]; then
+            docker buildx imagetools create -t "$image:latest" "$candidate"
+          else
+            echo 'Main has advanced; preserving latest for the newer merged commit.'
           fi

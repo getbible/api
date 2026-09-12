@@ -37,7 +37,7 @@ runtime endpoint's selected Python family. This differs from native ordinary
 `update`, which retains the selected exact patch. Retained generations keep
 their exact interpreter for rollback in both modes.
 
-`latest` is a moving stable-image tag, not an automatic updater. Pulling and
+`latest` follows accepted merges into `main`; it is not an automatic updater. Pulling and
 recreating is still necessary. Numbered tags provide repeatability. Returning
 to a previous image is different from runtime generation rollback: if a newer
 image has already applied incompatible persisted configuration, restore the
