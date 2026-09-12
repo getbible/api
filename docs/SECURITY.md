@@ -29,6 +29,12 @@ HAProxy source addresses and creates the runtime token-ID header itself.
 The raw bearer secret never reaches the application or request logs. See
 [OPNSENSE_HAPROXY.md](OPNSENSE_HAPROXY.md) for exact responsibilities and tests.
 
+The documented HAProxy route also accepts direct HTTPS callers and derives
+their identity from the connection source. Cloudflare source maps refresh
+through the plugin's existing URL-download/reload mechanism; they classify
+trusted visitor headers without denying other sources. An unavailable map
+falls back to peer-IP attribution, including its shared per-IP policy effects.
+
 External TLS does not request local certificates. Cloudflare Full (strict)
 validates HAProxy's domain certificate; optional Authenticated Origin Pulls
 verification belongs on HAProxy. Restrict the plaintext origin port to the

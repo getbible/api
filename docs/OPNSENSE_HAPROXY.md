@@ -1,224 +1,526 @@
 # OPNsense HAProxy in front of getBible
 
-Use this with [DOCKER.md](DOCKER.md) and [CLOUDFLARE.md](CLOUDFLARE.md).
-The examples use Docker host `192.168.10.20:8080`, HAProxy's LAN source
-`192.168.10.1`, and example domains. Replace these with the actual addresses
-and domains before applying them.
+This is the step-by-step external-TLS setup for native and Docker installations.
+Use it with [DOCKER.md](DOCKER.md) and [CLOUDFLARE.md](CLOUDFLARE.md).
+The backend-pool tables follow the OPNsense form, including advanced fields.
 
-## Routing and protocol contract
+The forwarding setup accepts both Cloudflare-proxied and direct HTTPS requests
+for configured domains. It does not require Cloudflare-only firewall rules,
+hardcoded Cloudflare address lists, or HAProxy request-denial rules. nginx
+continues to enforce the configured API access modes and dashboard authentication.
 
-Cloudflare connects to HAProxy on HTTPS/443. HAProxy terminates TLS and
-forwards HTTP to the Docker host's published port; nginx inside the container
-chooses the virtual host using `Host`. A backend IP and port identify the
-connection destination, not the request's hostname. No per-domain or
-per-endpoint port is required.
+## Setup order
 
-Use **HTTP / HTTPS (SSL offloading)**, not TCP passthrough. TLS SNI selects
-the certificate on HAProxy; HTTP `Host` selects the domain in nginx. These
-are separate stages. Keep Cloudflare SSL mode **Full (strict)** and install
-valid domain certificates on HAProxy through the existing OPNsense certificate
-automation. Container TLS mode is `external`; the container HTTP port is 80
-unless explicitly changed in both nginx and Compose.
+1. [DNS, certificates and network access](#1-dns-certificates-and-network-access).
+2. [Prepare the getBible HTTP origin](#2-prepare-the-getbible-http-origin).
+3. [Create the Real Server](#3-create-the-real-server).
+4. [Create the Health Monitor](#4-create-the-health-monitor).
+5. [Create the Backend Pool](#5-create-the-backend-pool).
+6. [Configure headers and automatic Cloudflare address recognition](#6-headers-and-trust).
+7. [Connect hostname conditions, routing rules and the HTTPS Public Service](#7-hostname-conditions-routing-rules-and-the-public-service).
+8. [Test, apply and go live](#8-test-apply-and-go-live).
 
-The interface names below were checked against the OPNsense plugin's source.
-The equivalent directives target HAProxy 3.2 syntax. A particular appliance's
-OPNsense, os-haproxy and HAProxy versions still need to be recorded and its
-generated configuration validated. These instructions do not claim an appliance
-has been configured by this repository.
+If certificate automation and a shared HTTPS Public Service already work, reuse
+them. Check certificate coverage and add routing for the new domains. A DNS record
+alone does not necessarily enroll a domain in the appliance's certificate job.
 
-## OPNsense objects
+The illustrative addresses below are unrelated to any operator's deployment:
 
-In **Services > HAProxy**, create or adapt these objects. Enable advanced
-fields where necessary. Preserve unrelated frontends and rules.
-
-| Object | Settings |
+| Purpose | Example |
 | --- | --- |
-| Real Server `getbible_origin` | Address `192.168.10.20`, port `8080`, SSL disabled, PROXY protocol disabled |
-| Health Monitor `getbible_http` | HTTP, GET, `/healthz`, HTTP/1.1, HTTP host set to one deployed hostname; expect status 200; SSL disabled |
-| Backend Pool `getbible` | HTTP mode, server above, health checking enabled using that monitor; no cookie persistence or HAProxy cache |
-| Public Service | Listen on the intended WAN address at 443; type HTTP/HTTPS SSL offloading; SSL offloading enabled; select all relevant certificates |
-| Hostname conditions/rules | Match the getBible domains and route all of them to the same backend pool |
-| Backend timeouts | Connection `5s`, Check `5s`, Server `75s` as an initial profile |
-| Public-service timeouts | Client `75s`, HTTP Request `10s`, HTTP Keep-Alive `15s` as an initial profile |
+| Docker/native origin LAN address | `10.0.0.20` |
+| Published HTTP origin port | `8080` |
+| HAProxy LAN source address | `10.0.0.1` |
+| Public firewall IPv4 | `203.0.113.20` |
+| Public domains | `api.example.org`, `query.example.org`, `dashboard.example.org` |
 
-Leave **X-Forwarded-For header** insertion and **Forwarded header (RFC7239)**
-insertion disabled where the normalization rules below set the headers.
-Otherwise automatic append behavior can reintroduce a Cloudflare proxy address
-or an untrusted address chain. Basic Authentication is also disabled: getBible
-already enforces its bearer-token access modes.
+Replace these examples locally. Keep credentials and actual infrastructure
+details outside the repository. Field names can differ between plugin versions:
+Real Servers/Servers, Backend Pools/Backends, Public Services/Frontends and
+Health Monitors/Health Checks refer to the same respective objects.
+The examples target HAProxy 3.2 and the linked OPNsense plugin forms.
 
-The health monitor's **HTTP host** only belongs to generated health requests.
-It must not become a rule that rewrites `Host` on ordinary requests. One nginx
-health response checks that origin's listener; it does not prove every runtime
-is ready. Use getBible status/readiness checks when deploying applications.
+## 1. DNS, certificates and network access
 
-Restrict access to the published LAN port to the proxy and intended operator
-networks. A separate OPNsense machine cannot reach a port bound only to Docker
-host loopback. For a Cloudflare-only public API, allow HTTPS from Cloudflare's
-current IPv4/IPv6 ranges and reject arbitrary direct origin connections. Keep
-the WAN allowlist current from Cloudflare's published ranges; an OPNsense PF
-alias is not automatically an HAProxy ACL file.
+- Install/enable `os-haproxy` under **System > Firmware > Plugins** if necessary.
+  The remaining HAProxy objects are under **Services > HAProxy > Settings**.
+- Point each intended hostname at the firewall's reachable public address.
+  Use Cloudflare's proxied mode when its edge caching is wanted. A DNS-only
+  record or an explicit direct HTTPS connection can use the same HAProxy route.
+- On OPNsense, reuse the existing ACME/certificate automation, or install
+  `os-acme-client` and configure an ACME account, Cloudflare DNS-01 validation,
+  the domain certificate and renewal automation that updates HAProxy.
+  Select the resulting certificates on the HTTPS Public Service. Keep that
+  automation's credentials on OPNsense.
+- With Cloudflare proxying, use **Full (strict)** and a valid matching certificate
+  on HAProxy. Internal plaintext HTTP does not require Flexible SSL. For normal
+  browser access directly to HAProxy, use a publicly trusted certificate such
+  as an ACME certificate; a Cloudflare Origin CA certificate alone is not
+  trusted by ordinary browsers.
+- Allow the intended public HTTPS traffic to HAProxy's listening address/port.
+  When HAProxy listens on the firewall itself, use a WAN pass rule to that
+  listener; do not forward that same port past HAProxy to the Docker host.
+  Keep existing shared listeners, management access and routing intact.
+- Allow HAProxy to reach the origin's LAN HTTP port. Publish that origin port
+  on a reachable LAN address. A proxy on another machine cannot reach a
+  Docker port bound only to `127.0.0.1`. The plaintext origin port is not the
+  public HTTPS listener.
 
-## Headers and trust
+### IPv4-only origins and IPv6 visitors
 
-| Header | HAProxy to nginx | nginx to runtime |
+An IPv4-only origin can serve visitors who connect to Cloudflare over IPv6.
+Those are separate connections: Cloudflare accepts the visitor connection and
+connects to the configured IPv4 origin. This is proxying, not an HTTP redirect.
+
+For an IPv4-only origin, configure its real public IPv4 in the Cloudflare
+A record and do not add an origin AAAA record for an unreachable IPv6 address.
+Cloudflare can still advertise its own IPv6 edge addresses for a proxied
+hostname. The visitor's IPv6 address can also travel as header text over the
+IPv4 connection; it must not be replaced with a made-up IPv4 address.
+
+When getBible manages that hostname's DNS, set
+`GETBIBLE_SERVER_PUBLIC_IPV6=none` in Compose, or `SERVER_PUBLIC_IPV6=none`
+in native configuration. This removes the managed hostname's origin AAAA
+records; an empty setting preserves existing records. It does not turn off
+Cloudflare's edge IPv6 compatibility. Do not enable Pseudo IPv4's
+**Overwrite Headers** mode when original visitor addresses are wanted.
+
+See [Cloudflare IPv6 compatibility](https://developers.cloudflare.com/network/ipv6-compatibility/)
+and [visitor-IP headers](https://developers.cloudflare.com/fundamentals/reference/http-headers/).
+
+## 2. Prepare the getBible HTTP origin
+
+For the example Docker deployment, use these values in its private `.env`:
+
+~~~dotenv
+GETBIBLE_BIND_ADDRESS=10.0.0.20
+GETBIBLE_HTTP_PORT=8080
+GETBIBLE_TLS_MODE=external
+GETBIBLE_TRUSTED_PROXY_CIDRS=10.0.0.1/32
+GETBIBLE_PUBLIC_SCHEME=https
+GETBIBLE_ORIGIN_HTTP_PORT=80
+GETBIBLE_SERVER_PUBLIC_IPV4=203.0.113.20
+GETBIBLE_SERVER_PUBLIC_IPV6=none
+~~~
+
+Compose maps host port 8080 to container port 80. HAProxy connects to the host
+port. For native deployment, use the equivalent external-TLS settings and
+connect HAProxy to nginx's configured origin port; there is no Docker mapping.
+See [Docker environment settings](DOCKER.md#3-set-the-installation-settings)
+and [native installation](INSTALL.md).
+
+Start the container/native services and configure the domains and endpoints
+through the existing menu. The environment does not create those domains.
+One backend IP/port serves every static, query, search and dashboard domain:
+nginx selects the domain from `Host`, then the endpoint from its path.
+Keep `Host` as the requested public name.
+
+`TRUSTED_PROXY_CIDRS` identifies the HAProxy connection source that nginx
+actually receives. It is not the public WAN IP, the visitor IP, or the entire
+LAN. Use the exact proxy addresses and the appropriate /32 or /128 masks.
+
+## 3. Create the Real Server
+
+Open **Real Servers > Add**, enable advanced fields where needed, and save:
+
+| Field | Value |
+| --- | --- |
+| Enabled | Checked |
+| Name | `getbible_origin` |
+| Description | `getBible HTTP origin` |
+| FQDN or IP | `10.0.0.20` |
+| Port | `8080` |
+| SSL | Unchecked |
+| Source address | `10.0.0.1`, without a CIDR suffix |
+| Other fields | Defaults unless the deployment needs an explicit change |
+
+The backend pool below sets **Proxy Protocol: None**. The image expects
+ordinary HTTP with headers, not a PROXY-protocol preamble.
+
+## 4. Create the Health Monitor
+
+Open **Health Monitors > Add** and save:
+
+| Field | Value |
+| --- | --- |
+| Name | `getbible_http` |
+| Check type | HTTP |
+| SSL preferences | Disable SSL |
+| SSL SNI | Empty |
+| Check interval | `5000` milliseconds |
+| Port to check | Empty; use the Real Server port |
+| HTTP method | GET |
+| Request URI | `/healthz` |
+| HTTP version | HTTP/1.1 |
+| HTTP host | `api.example.org`, replaced by one deployed domain |
+| Custom HTTP check > Enabled | Checked |
+| Expression | Match HTTP status (`status`) |
+| Value | `200` |
+| Negate condition | Unchecked |
+
+The health monitor's Host applies only to its own checks; it must not become
+a rule rewriting ordinary requests to that one domain. A successful check
+verifies the nginx listener/vhost. It does not establish that every query/search
+runtime is ready; use getBible's deployment readiness checks for that.
+
+## 5. Create the Backend Pool
+
+Open **Backend Pools > Add** and turn on **advanced mode**. Save the pool
+before creating the hostname-routing rule that must select it.
+
+### General fields
+
+| Field | Value |
+| --- | --- |
+| Enabled | Checked |
+| Name | `getbible` |
+| Description | `getBible API origin` |
+| Mode | HTTP (Layer 7) |
+| Balancing Algorithm | Round Robin |
+| Random Draws | Leave default; unused with Round Robin |
+| Proxy Protocol | None |
+| Servers | Select `getbible_origin` |
+| FastCGI Application | None |
+| Resolver | None |
+| Resolver Options | Empty |
+| Prefer IP Family | None; the Real Server already uses a literal IPv4 address |
+| Source address | `10.0.0.1`, without /32 |
+
+The pool's Source address takes precedence over the Real Server setting.
+With one server, the balancing algorithm does not distribute work among
+getBible's internal processes; the container/native runtime manages those.
+
+### Health Checking
+
+| Field | Value |
+| --- | --- |
+| Enable Health Checking | Checked |
+| Health Monitor | `getbible_http` |
+| Log Status Changes | Checked |
+| Check Interval | `5000` milliseconds |
+| Down Interval | `5000` milliseconds |
+| Unhealthy Threshold | `3` |
+| Healthy Threshold | `2` |
+| E-Mail Alert | None |
+| Use Proxy Protocol | Disable for Health Check |
+
+A checked **Enable Health Checking** with **Health Monitor: None** does not
+generate an active health check. Select the monitor.
+
+### HTTP(S), Persistence and Basic Authentication
+
+| Field | Value |
+| --- | --- |
+| Enable HTTP/2 | Unchecked for this HTTP/1.1 origin |
+| HTTP/2 without TLS | Unchecked |
+| Advertise Protocols (ALPN) | HTTP/1.1 only; unused with backend SSL disabled |
+| Forwarded header (RFC7239) | Unchecked |
+| Forwarded header parameters | Empty |
+| X-Forwarded-For header | Unchecked; explicit rules below set it |
+| Persistence type | None |
+| Stick-table > Table type | None |
+| Stored data types | Empty |
+| Remaining stick-table fields | Defaults/empty; unused when Table type is None |
+| Basic Authentication > Enable | Unchecked |
+| Allowed Users / Allowed Groups | Empty |
+
+Set **Table type: None** before **Persistence type: None** if changing
+persistence hides the table section. Clearing persistence alone can leave a
+stick table configured. getBible's dashboard session cookie still passes
+normally; it does not require HAProxy persistence or Basic Authentication.
+Frontend HTTP/2 can remain enabled independently of backend HTTP/1.1.
+
+### Tuning Options, Rules and Error Messages
+
+| Field | Value |
+| --- | --- |
+| Connection Timeout | `5s` |
+| Check Timeout | `5s` |
+| Server Timeout | `75s` |
+| Retries | Leave default |
+| Option pass-through | Paste the block in section 6 |
+| Default for server | Empty |
+| Use Frontend port | Unchecked; retain the Real Server's origin port |
+| HTTP reuse | Safe |
+| Enable Caching | Unchecked |
+| Select Rules | `getbible_mark_cloudflare` after creating it in section 6 |
+| Select Error Messages | Optional proxy error responses described below |
+
+The timeout profile accommodates the documented search deadline up to 60 seconds
+with transfer headroom. Revisit it if inner application/nginx deadlines change.
+HAProxy need not cache responses: nginx and Cloudflare own the API cache policies.
+
+## 6. Headers and trust
+
+The HTTPS Public Service and this backend must not append an automatic
+X-Forwarded-For header after the explicit rules below. Leave that checkbox off
+in both places. If a shared frontend currently enables it for other sites,
+first put equivalent forwarding behavior in those sites' backend pools, then
+disable the shared frontend checkbox. Do not change their client-IP policies.
+
+The following setup assumes HAProxy sees the actual connecting peer in `src`.
+Check existing frontend rules for `set-src`, removed Cloudflare headers or
+another proxy hop before using it. A local frontend chain must preserve the
+original peer correctly; trusting an arbitrary incoming X-Forwarded-For chain
+is not a substitute.
+
+### Automatic Cloudflare recognition
+
+This uses the plugin's existing **Map Files > Download URL** support.
+The address lists identify which peers may supply a Cloudflare visitor header;
+they are not an allowlist that blocks everyone else.
+
+Under **Map Files**, create:
+
+| Field | IPv4 source list | IPv6 source list |
 | --- | --- | --- |
-| `Host` | Preserve the public domain; never replace it with the backend IP | Selected public hostname |
-| `Authorization` | Preserve unchanged; never capture it in logs | Removed after nginx token validation |
-| `CF-Connecting-IP` | Read only after verifying the TCP peer is Cloudflare, then discard | Not an authentication or direct trust input |
-| `X-Forwarded-For` | Replace with one validated client address | Constructed from nginx's trusted client identity |
-| `X-Real-IP` | Replace with the same validated address | nginx's trusted client identity |
-| `X-Forwarded-Proto` | Set `https` on the TLS frontend | Public scheme, not the plaintext backend scheme |
-| `X-Forwarded-Host` | Replace with the actual `Host` if supplied | nginx's selected hostname |
-| `X-GetBible-Token-Id` | Remove any incoming value | nginx supplies its validated token ID |
+| Name | `getbible_cloudflare_v4` | `getbible_cloudflare_v6` |
+| Type | `ip` | `ip` |
+| Content | Empty | Empty |
+| Download URL | `https://www.cloudflare.com/ips-v4/` | `https://www.cloudflare.com/ips-v6/` |
 
-Configure `GETBIBLE_TRUSTED_PROXY_CIDRS=192.168.10.1/32` in the Docker
-deployment example, using the actual source address nginx receives. Do not
-trust every private network or trust arbitrary forwarded headers. Container
-nginx's trusted peers are HAProxy's addresses; Cloudflare's public addresses
-belong at HAProxy's external trust boundary. Native direct-Cloudflare TLS uses
-the existing direct Cloudflare real-IP setup instead.
+For a strictly IPv4 origin listener, the IPv4 list is sufficient even when
+visitors use IPv6 to reach Cloudflare. Add the IPv6 source list if HAProxy
+also accepts origin connections over IPv6.
 
-Use frontend **Option pass-through** for the exact normalization directives
-if the installed plugin's Rules interface cannot express the checks as ordered
-HTTP request actions. In a frontend shared with unrelated sites, scope the
-rules to the getBible hostname condition. The following block is for a
-dedicated getBible frontend:
+Create a **Condition** per source list:
 
-```haproxy
-# An operator-maintained file containing current Cloudflare IPv4/IPv6 CIDRs.
-acl from_cloudflare src -f /conf/haproxy/cloudflare-ips.lst
-acl cf_ip_once req.hdr_cnt(CF-Connecting-IP) eq 1
-acl cf_ip_valid req.hdr_ip(CF-Connecting-IP) -m found
+| Field | IPv4 condition |
+| --- | --- |
+| Name | `getbible_from_cloudflare_v4` |
+| Condition type / expression | `src - Source IP matches specified IP` |
+| Source IP | Empty |
+| Mapfile | `getbible_cloudflare_v4` |
 
-http-request return status 403 content-type application/problem+json string '{"type":"about:blank","title":"Forbidden","status":403}' hdr Cache-Control no-store unless from_cloudflare
-http-request return status 400 content-type application/problem+json string '{"type":"about:blank","title":"Invalid client address","status":400}' hdr Cache-Control no-store unless cf_ip_once cf_ip_valid
+Use the IPv6 map in the equivalent IPv6 condition when enabled. These are
+additional source conditions, separate from the hostname conditions in step 7.
+The plugin supports an empty Source IP when Mapfile supplies the patterns.
+An OPNsense firewall alias is not automatically an HAProxy map file.
 
-http-request set-var(txn.getbible_client_ip) req.hdr_ip(CF-Connecting-IP)
+Create a **Rule**:
+
+| Field | Value |
+| --- | --- |
+| Name | `getbible_mark_cloudflare` |
+| Match mode | IF |
+| Conditions | The Cloudflare source condition(s) above |
+| Logical operator | OR when selecting both conditions |
+| Execute function / rule type | Custom rule (option pass-through) |
+| Custom rule | The single line below |
+
+~~~haproxy
+http-request set-var(txn.gb_cf_peer) str(yes)
+~~~
+
+Select this rule under the getBible **Backend Pool > Select Rules**.
+Do not put a conditional suffix on that custom line yourself: the GUI generates
+it from the chosen conditions. The plugin emits selected rules before the
+backend's Option pass-through, so this marker is available to the block below.
+Do not replace the rule with an unconditional marker.
+
+Under **System > Settings > Cron**, schedule **Reload HAProxy service** daily,
+for example minute `17`, hour `3`, other date fields `*`, enabled, no parameters.
+Choose the existing reload task, not a stop/start task. It downloads the map
+files through the plugin's built-in mechanism; no custom updater script or
+manually copied address list is required. This is a reload of the HAProxy
+service, including shared frontends, not just an in-memory ACL update.
+
+The plugin downloads on reload/restart and falls back to **Content** if the
+download fails. It does not retain the last downloaded list as that fallback.
+Empty fallback content gives an empty source match list. Forwarding then uses
+the connection-source address; it does not reject a request because the list
+is empty, stale or could not be downloaded. During that fallback, Cloudflare visitors
+may share proxy addresses in logs, rate limits and dashboard IP blocking.
+A malformed successful download can fail the configuration test; review the
+plugin log and generated configuration when diagnosing reload failures.
+
+These behaviors are documented in the
+[Map File form](https://github.com/opnsense/plugins/blob/master/net/haproxy/src/opnsense/mvc/app/controllers/OPNsense/HAProxy/forms/dialogMapfile.xml)
+and implemented by the
+[map exporter](https://github.com/opnsense/plugins/blob/master/net/haproxy/src/opnsense/scripts/OPNsense/HAProxy/exportMapFiles.php).
+
+### Backend Option pass-through
+
+Paste this entire block into **getBible Backend Pool > Tuning Options >
+Option pass-through**. Only the HTTPS Public Service should route requests to
+this pool; an HTTP listener should redirect to HTTPS separately.
+
+~~~haproxy
+http-request set-var(txn.gb_client_ip) src
+http-request set-var(txn.gb_client_ip) req.hdr_ip(CF-Connecting-IP) if { var(txn.gb_cf_peer) -m str yes } { req.hdr_cnt(CF-Connecting-IP) eq 1 } { req.hdr_ip(CF-Connecting-IP) -m found }
 http-request del-header Forwarded
-http-request set-header X-Forwarded-For %[var(txn.getbible_client_ip)]
-http-request set-header X-Real-IP %[var(txn.getbible_client_ip)]
+http-request set-header X-Forwarded-For %[var(txn.gb_client_ip)]
+http-request set-header X-Real-IP %[var(txn.gb_client_ip)]
 http-request set-header X-Forwarded-Proto https
 http-request set-header X-Forwarded-Host %[req.hdr(Host)]
 http-request del-header CF-Connecting-IP
 http-request del-header X-GetBible-Token-Id
-```
+~~~
 
-The file path is an example, not a file shipped or automatically maintained by
-getBible. Create and maintain it on OPNsense, or use the equivalent source-IP
-conditions in the plugin. When editing a shared frontend, do not paste the
-unconditional block over other applications: put the normalization in the
-getBible backend, retaining the original peer check, or add the same getBible
-hostname condition to every action. Ensure all trust checks precede rewriting.
+There are no `http-request return` or `deny` actions in this forwarding
+configuration. Direct requests use the actual connection-source IP and proceed
+to nginx. Recognized Cloudflare connections use their single valid visitor-IP
+header. Missing, duplicate or invalid visitor headers fall back to the peer
+address rather than stopping the request. A direct caller cannot choose its
+rate-limit or dashboard-block identity by inventing a Cloudflare header.
 
-Public requests sent directly to this Cloudflare-only frontend are rejected.
-For controlled direct-origin diagnosis, use a separate LAN listener with its
-own source allowlist and `src` as client identity; do not temporarily trust
-Cloudflare headers from every source. Do not enable Cloudflare Pseudo IPv4's
-header-overwrite mode if actual IPv6 caller addresses must be retained.
+| Information | Behavior |
+| --- | --- |
+| Host | Preserved automatically; selects the correct nginx domain |
+| Authorization / bearer token | Preserved to nginx for validation; never capture it in HAProxy logs |
+| Cookie / Set-Cookie | Preserved; dashboard sessions do not need proxy authentication |
+| Path, query string, request body | Forwarded without rewriting |
+| X-Forwarded-For / X-Real-IP | One normalized address chosen above |
+| X-Forwarded-Proto | `https`, because TLS terminates on the HTTPS frontend |
+| X-Forwarded-Host | The requested Host |
+| Forwarded / CF-Connecting-IP | Removed after normalization |
+| X-GetBible-Token-Id | Incoming value removed; nginx supplies its validated internal ID |
 
-Equivalent backend configuration, showing that the domain is not rewritten:
+A Joomla-style `X-Forwarded-SSL: on` line is unnecessary for getBible.
+Setting Host to its own current value is redundant. Do not set it to the
+backend IP, or to one hostname shared by all requests.
 
-```haproxy
-backend getbible
-    mode http
-    timeout connect 5s
-    timeout server 75s
-    timeout check 5s
-    option httpchk
-    http-check send meth GET uri /healthz ver HTTP/1.1 hdr Host api.example.org
-    http-check expect status 200
-    server getbible_origin 192.168.10.20:8080 check
-```
+For simple forwarding without Cloudflare address restoration, omit the map
+files, marker rule and scheduled refresh, and omit only the second line of the
+block (the conditional visitor-IP override). Traffic still passes, but requests
+through Cloudflare are identified by the Cloudflare peer address. That groups
+visitors in per-IP budgets and dashboard blocks, so use automatic recognition
+when per-visitor analytics and policies are required.
 
-Do not enable PROXY protocol unless both ends are intentionally reconfigured
-to speak it. The provided image expects ordinary HTTP with trusted headers.
+### What nginx already handles
+
+In external-TLS mode nginx trusts the configured HAProxy peer, consumes the
+normalized X-Forwarded-For value, validates bearer tokens and enforces API
+access modes/limits. The dashboard applies its own sign-in and session rules.
+The native managed-TLS Cloudflare integration refreshes nginx's Cloudflare
+ranges separately; external-TLS nginx does not do that job for HAProxy.
+
+Cloudflare-only access controls and Authenticated Origin Pulls are separate,
+optional deployment policies. They are not prerequisites for this forwarding
+setup. Requiring Cloudflare's client certificate would intentionally prevent
+ordinary direct HTTPS clients from using that listener.
+
+## 7. Hostname conditions, routing rules and the Public Service
+
+1. Under **Conditions**, create a Host-matches condition for each configured
+   domain, or one condition with all supported exact hostnames. Match the HTTP
+   Host header; do not use a URL path or the backend IP as a hostname.
+2. Under **Rules**, create `getbible_route`: IF any of those hostname conditions
+   match (logical **OR**), execute **Use specified Backend Pool** and select
+   `getbible`. AND would require one request to match different exact hostnames.
+3. Open the existing HTTPS **Public Service** or create one when none exists.
+   Use the intended WAN listener at port 443, type **HTTP / HTTPS (SSL
+   offloading)**, enable SSL offloading, and select certificates covering all
+   the routed domains. Do not create a second listener on the same address/port.
+4. Attach `getbible_route` under the Public Service's **Select Rules**. Keep its
+   existing unrelated routes. The hostname routing rule belongs here; the
+   Cloudflare marker rule belongs in the getBible backend.
+5. Leave automatic **X-Forwarded-For** insertion off as described in section 6.
+   Do not add frontend Basic Authentication for the API or overwrite Host or
+   Authorization. Use initial client timeout `75s`, HTTP request timeout
+   `10s` and HTTP keep-alive timeout `15s`, accounting for existing shared sites.
+6. If HTTP port 80 is offered, use its existing HTTPS redirect behavior,
+   preserving any certificate challenge routes. Do not attach the HTTPS-only
+   getBible backend as a plaintext public route.
+
+Every getBible domain uses the same pool. HTTPS SNI selects a certificate on
+HAProxy, while the preserved HTTP Host selects the nginx vhost. A dashboard
+domain additionally needs its existing Telegram/password/enable setup inside
+getBible; proxy routing does not enable it by itself. See [DASHBOARD.md](DASHBOARD.md).
 
 ## JSON errors, caching and timeouts
 
-Preserve origin response status and headers, including `Content-Type`,
-`Cache-Control`, `ETag`, `Last-Modified`, `Retry-After`, CORS and cache-status
-headers. Do not apply an HTML error-page rewrite to upstream JSON. HAProxy
-caching is unnecessary; nginx and Cloudflare own the documented cache policies.
+nginx and the runtime already produce application problem responses. Preserve
+their status codes and response headers, including Content-Type, Cache-Control,
+ETag, Last-Modified, Retry-After and CORS. HAProxy does not need duplicate
+application-error or request-blocking rules.
 
-Configure HAProxy's own error messages separately under **Error Messages** and
-select them on the getBible Public Service and Backend Pool. The plugin expects
-a complete HTTP response. For status 503, for example:
+HAProxy can itself generate errors before nginx answers, such as 503 when the
+origin is unavailable. To give those errors the same JSON presentation, create
+**Error Messages** and select them on the relevant pool/service. This changes
+error formatting, not which callers can reach the API. The plugin expects a
+complete HTTP response, for example:
 
-```http
+~~~http
 HTTP/1.1 503 Service Unavailable
 Content-Type: application/problem+json
 Cache-Control: no-store
 Connection: close
 
 {"type":"about:blank","title":"Service Unavailable","status":503}
-```
+~~~
 
-Provide corresponding status/title bodies for supported proxy-generated 400,
-403, 408, 429, 500, 502, 503 and 504 responses. Preserve the blank line between
-headers and body. Custom error files change HAProxy-generated errors, not
-upstream application responses. Inspect the generated configuration and use
-the plugin's configuration test before Apply. TLS-handshake failures have no
-HTTP response body to convert to JSON.
+Use the corresponding status/title for supported proxy error codes. Preserve
+the blank line between headers and body. Leave custom error selections empty
+until configured; that does not affect normal origin JSON responses. On a
+shared frontend, choose frontend-wide error formatting deliberately. TLS
+handshake failures have no HTTP body, and HAProxy cannot rewrite errors
+generated by Cloudflare before the request reaches it.
 
-Application search deadlines, nginx proxy timeouts and HAProxy inactivity
-timeouts serve different purposes. Set HAProxy's server timeout above nginx's
-configured upstream timeout and the application deadline, with transfer
-headroom. The examples allow up to 60-second configured search deadlines; do
-not blindly copy `75s` while independently raising inner deadlines. Keep
-connection/header timeouts short enough to avoid idle clients occupying the
-origin indefinitely.
+Keep HAProxy caching off. Apply the existing per-domain Cloudflare cache policy
+in [CLOUDFLARE.md](CLOUDFLARE.md), including bearer/token-only bypass. Direct
+requests naturally bypass edge caching and remain subject to origin policy.
+Search deadlines and the various proxy inactivity timeouts are different
+controls; preserve headroom when changing any inner timeout.
 
-Cloudflare-generated errors and browser challenges are a separate layer.
-Clients should send `Accept: application/json` or `application/problem+json`;
-apply the API rules in [CLOUDFLARE.md](CLOUDFLARE.md). HAProxy cannot change an
-error Cloudflare creates before contacting it.
+## 8. Test, apply and go live
 
-Optional Authenticated Origin Pulls client-certificate verification belongs
-on HAProxy because it terminates Cloudflare's TLS. Import the appropriate CA
-and configure Public Service **Client Certificate Auth** there. Do not enable
-container nginx client-certificate verification on its plaintext HTTP listener.
-If the frontend serves unrelated sites, account for their client-certificate
-requirements before enabling a frontend-wide requirement.
+1. Run OPNsense's **Test syntax / configuration test**. Inspect the generated
+   configuration: source-map conditions must guard the marker action, the
+   marker must precede the backend header block, and no frontend/backend
+   automatic forwardfor option may append a second client address. Confirm
+   the server uses HTTP at the intended port with no PROXY preamble.
+2. Apply/reload after that test succeeds. Check **HAProxy > Statistics** for
+   a healthy backend. If down, verify origin connectivity and the health
+   monitor's Host. A 301 usually indicates the wrong TLS mode or vhost.
+3. From an allowed origin-side operator path, test two configured domains:
 
-## Acceptance before public launch
+   ~~~sh
+   curl -i -H 'Host: api.example.org' http://10.0.0.20:8080/healthz
+   curl -i -H 'Host: query.example.org' http://10.0.0.20:8080/versions.json
+   ~~~
 
-1. Record OPNsense, os-haproxy and HAProxy versions; run the configuration test.
-2. Confirm HAProxy can reach the Docker LAN port and the monitor sends the
-   correct `Host`. A 301 health response usually means the wrong TLS mode;
-   a default-site response usually means a missing or wrong hostname.
-3. Request two configured domains at the same backend IP and port:
+4. Use getBible's explicit Go live for the prepared domain. In external TLS,
+   certificate provisioning is owned by HAProxy; the manager checks the local
+   HTTP origin and verifies public HTTPS after activation.
+5. Check both public hostnames and the dashboard over HTTPS. Verify correct
+   endpoint discovery and redirects without internal addresses or ports.
+6. Test direct HTTPS while preserving both SNI and Host:
 
-   ```sh
-   curl -i -H 'Host: api.example.org' http://192.168.10.20:8080/versions.json
-   curl -i -H 'Host: query.example.org' http://192.168.10.20:8080/versions.json
-   ```
+   ~~~sh
+   curl --resolve api.example.org:443:203.0.113.20 https://api.example.org/healthz
+   ~~~
 
-4. Request both public HTTPS names through Cloudflare. Verify the returned
-   domain/endpoint discovery, JSON media type, and redirects that contain
-   neither `http://` nor a private address or port.
-5. Test an uncached or authorization-bearing request and inspect origin logs:
-   the client address must be the caller, not Cloudflare or HAProxy. Send a
-   deliberately forged `X-Forwarded-For`; it must not replace that identity.
-6. Test token-only data without a token (401), with a valid token (success),
-   and after revocation (401). Do not put token secrets into URLs or logs.
-7. Make repeated anonymous public requests to the same complete URL and confirm
-   Cloudflare cache behavior. Change a search parameter and verify distinct
-   results. An authorization-bearing request must bypass the edge cache.
-8. On a disposable deployment, stop the origin and check HAProxy-generated
-   failures through a controlled LAN test route for JSON/no-store behavior;
-   separately check the public Cloudflare error response.
+   Use an external test location if LAN reflection is not configured. With a
+   publicly trusted certificate, no insecure TLS override is necessary. An
+   existing external firewall/Cloudflare-only policy may still block direct
+   traffic independently of the forwarding rules in this guide.
+7. Request an uncached API resource through Cloudflare and directly; check
+   origin analytics for the actual visitor addresses. Deliberately forged
+   X-Forwarded-For and CF-Connecting-IP headers on the direct request must not
+   change that direct client's identity. Confirm IPv6 visitor addresses remain
+   intact even with an IPv4-only origin. Edge cache hits do not reach origin logs.
+8. Test token-only data without a token, with a valid token and after revocation.
+   Keep secrets out of URLs/logs. Verify anonymous cache behavior separately
+   from token-bearing bypass and dashboard sessions.
+9. Confirm the map download and daily reload are configured. On a disposable
+   proxy, verify empty source lists still forward direct/proxied requests with
+   peer-IP fallback. Do not simulate outages on a shared production listener.
+
+These checks verify the installed appliance and its route. Repository tests
+and configuration examples alone cannot establish its live settings.
 
 ## Primary references
 
-- [OPNsense HAProxy model and supported modes](https://github.com/opnsense/plugins/blob/master/net/haproxy/src/opnsense/mvc/app/models/OPNsense/HAProxy/HAProxy.xml)
-- [OPNsense public-service form](https://github.com/opnsense/plugins/blob/master/net/haproxy/src/opnsense/mvc/app/controllers/OPNsense/HAProxy/forms/dialogFrontend.xml)
-- [OPNsense backend form](https://github.com/opnsense/plugins/blob/master/net/haproxy/src/opnsense/mvc/app/controllers/OPNsense/HAProxy/forms/dialogBackend.xml)
-- [OPNsense health-monitor form](https://github.com/opnsense/plugins/blob/master/net/haproxy/src/opnsense/mvc/app/controllers/OPNsense/HAProxy/forms/dialogHealthcheck.xml)
-- [OPNsense error-message form](https://github.com/opnsense/plugins/blob/master/net/haproxy/src/opnsense/mvc/app/controllers/OPNsense/HAProxy/forms/dialogErrorfile.xml)
-- [HAProxy 3.2 configuration manual](https://docs.haproxy.org/3.2/configuration.html)
-- [nginx virtual-host selection](https://nginx.org/en/docs/http/request_processing.html)
+- [OPNsense HAProxy model](https://github.com/opnsense/plugins/blob/master/net/haproxy/src/opnsense/mvc/app/models/OPNsense/HAProxy/HAProxy.xml)
+- [Real Server form](https://github.com/opnsense/plugins/blob/master/net/haproxy/src/opnsense/mvc/app/controllers/OPNsense/HAProxy/forms/dialogServer.xml)
+- [Backend Pool form](https://github.com/opnsense/plugins/blob/master/net/haproxy/src/opnsense/mvc/app/controllers/OPNsense/HAProxy/forms/dialogBackend.xml)
+- [Health Monitor form](https://github.com/opnsense/plugins/blob/master/net/haproxy/src/opnsense/mvc/app/controllers/OPNsense/HAProxy/forms/dialogHealthcheck.xml)
+- [Condition form](https://github.com/opnsense/plugins/blob/master/net/haproxy/src/opnsense/mvc/app/controllers/OPNsense/HAProxy/forms/dialogAcl.xml)
+- [Rule form](https://github.com/opnsense/plugins/blob/master/net/haproxy/src/opnsense/mvc/app/controllers/OPNsense/HAProxy/forms/dialogAction.xml)
+- [Public Service form](https://github.com/opnsense/plugins/blob/master/net/haproxy/src/opnsense/mvc/app/controllers/OPNsense/HAProxy/forms/dialogFrontend.xml)
+- [Generated configuration and action ordering](https://github.com/opnsense/plugins/blob/master/net/haproxy/src/opnsense/service/templates/OPNsense/HAProxy/haproxy.conf)
+- [HAProxy reload action](https://github.com/opnsense/plugins/blob/master/net/haproxy/src/opnsense/service/conf/actions.d/actions_haproxy.conf)
+- [HAProxy configuration manual](https://docs.haproxy.org/3.2/configuration.html)
 - [nginx real-IP module](https://nginx.org/en/docs/http/ngx_http_realip_module.html)
-- [Cloudflare origin TLS validation](https://developers.cloudflare.com/ssl/origin-configuration/ssl-modes/full-strict/)
-- [Cloudflare request headers](https://developers.cloudflare.com/fundamentals/reference/http-headers/)
-- [Cloudflare published IP ranges](https://www.cloudflare.com/ips/)
+- [Cloudflare Full (strict)](https://developers.cloudflare.com/ssl/origin-configuration/ssl-modes/full-strict/)

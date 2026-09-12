@@ -128,7 +128,7 @@ Documentation:
 | --- | --- |
 | [docs/DOCKER.md](docs/DOCKER.md) | private prebuilt image, Compose, configuration, commands, persistence and recovery |
 | [docs/REGISTRY_ACCESS.md](docs/REGISTRY_ACCESS.md) | package read token, one-time Docker login, production pulls and token rotation |
-| [docs/OPNSENSE_HAPROXY.md](docs/OPNSENSE_HAPROXY.md) | external TLS, multiple domains on one port, headers, JSON errors and acceptance |
+| [docs/OPNSENSE_HAPROXY.md](docs/OPNSENSE_HAPROXY.md) | OPNsense setup order, backend form fields, automatic client-IP recognition, direct access, IPv4 origins and verification |
 | [docs/DEPLOYMENT_DECISIONS.md](docs/DEPLOYMENT_DECISIONS.md) | objectives, constraints and reasons for deployment and caching behavior |
 | [docs/INSTALL.md](docs/INSTALL.md) | first setup, where things live |
 | [docs/NEW_SERVER.md](docs/NEW_SERVER.md) | fresh server setup: endpoint keys, staged domains, go-live and maintenance |
