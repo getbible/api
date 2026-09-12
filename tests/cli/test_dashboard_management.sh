@@ -13,6 +13,7 @@ GB="$ROOT/getbible.sh"
 status="$(bash "$GB" dashboard status --yes)"
 [[ "$status" == *'"enabled": false'* ]] || fail 'dashboard must be off by default'
 [[ -f "$GB_PREFIX/etc/systemd/system/getbible-telemetry.service" ]] || fail 'always-on telemetry unit is missing'
+grep -qFx 'Type=exec' "$GB_PREFIX/etc/systemd/system/getbible-telemetry.service" || fail 'collector startup must wait for its configured interpreter to execute'
 [[ -f "$GB_PREFIX/etc/systemd/system/getbible-adapt.timer" ]] || fail 'adaptive timer is missing'
 [[ -f "$GB_PREFIX/etc/systemd/system/getbible-storage.timer" ]] || fail 'independent storage timer is missing'
 grep -qF 'OnUnitInactiveSec=30s' "$GB_PREFIX/etc/systemd/system/getbible-storage.timer" || fail 'storage accounting must refresh within the admission freshness window'

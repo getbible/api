@@ -145,6 +145,8 @@ def unit_checks():
 
 
 def collector_checks(mode):
+    check(property_of("getbible-telemetry.service", "Type") == "exec",
+          "collector start waits for execution with its effective environment")
     check(property_of("getbible-telemetry.service", "ActiveState") == "active", "installed collector is active")
     values = settings(RUN / "telemetry.env")
     actual = environment(pid("getbible-telemetry.service"))

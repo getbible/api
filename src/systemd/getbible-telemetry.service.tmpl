@@ -8,7 +8,8 @@ StartLimitIntervalSec=300
 StartLimitBurst=5
 
 [Service]
-Type=simple
+# Complete sandbox setup and exec before reporting a successful service start.
+Type=exec
 User=root
 Group=getbible-dashboard
 UMask=0027
