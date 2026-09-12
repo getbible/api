@@ -6,7 +6,8 @@ container runs systemd, nginx, the existing menu, static synchronization,
 query/search runtimes and their maintenance services. OPNsense HAProxy remains
 external and terminates HTTPS. See [deployment decisions](DEPLOYMENT_DECISIONS.md)
 for the design objectives and [OPNSENSE_HAPROXY.md](OPNSENSE_HAPROXY.md) for
-firewall, header and certificate configuration.
+the complete OPNsense setup order, backend-pool field values, automatic
+Cloudflare client-IP recognition, direct HTTPS access and certificate routing.
 
 ## 1. Host requirements
 
@@ -66,12 +67,12 @@ Set the actual LAN/proxy and WAN addresses in `.env` before startup:
 ```dotenv
 GETBIBLE_IMAGE_TAG=2.0.0
 GETBIBLE_DATA_ROOT=/srv/getbible-data
-GETBIBLE_BIND_ADDRESS=192.168.10.20
+GETBIBLE_BIND_ADDRESS=10.0.0.20
 GETBIBLE_HTTP_PORT=8080
 GETBIBLE_MEMORY_LIMIT=4g
 GETBIBLE_CPU_LIMIT=2.0
 GETBIBLE_TLS_MODE=external
-GETBIBLE_TRUSTED_PROXY_CIDRS=192.168.10.1/32
+GETBIBLE_TRUSTED_PROXY_CIDRS=10.0.0.1/32
 GETBIBLE_PUBLIC_SCHEME=https
 GETBIBLE_ORIGIN_HTTP_PORT=80
 GETBIBLE_DEFAULT_DEPLOY_MODE=staged
@@ -89,6 +90,11 @@ IPv6 interface. Set unused IPv6 to `none`; an empty setting preserves existing
 AAAA records, so it does not disable IPv6. The example publishes
 one HTTP port for all domains; open that LAN route from HAProxy. The template
 defaults to `0.0.0.0`, so select the intended LAN address for production.
+
+Cloudflare can still advertise IPv6 edge addresses for a proxied hostname
+whose origin uses IPv4 only. This does not require an origin AAAA record or
+an IPv6 listener on HAProxy. Follow the [IPv4-only origin explanation](OPNSENSE_HAPROXY.md#ipv4-only-origins-and-ipv6-visitors)
+and [backend-pool form settings](OPNSENSE_HAPROXY.md#5-create-the-backend-pool).
 
 Configure the Cloudflare API token through the menu or a supported environment
 setting, with permissions described in [CLOUDFLARE.md](CLOUDFLARE.md). Starting

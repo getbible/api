@@ -223,6 +223,12 @@ External-TLS nginx trusts the configured HAProxy source addresses instead; it
 does not download/install Cloudflare real-IP or client-certificate directives.
 HAProxy must accept Cloudflare client-IP headers only from verified Cloudflare
 connections, preserve Host/Authorization and normalize the forwarded headers.
+The [OPNsense guide](OPNSENSE_HAPROXY.md#6-headers-and-trust) uses URL-backed
+map files and a scheduled built-in reload to refresh those source ranges.
+It accepts direct HTTPS requests too, using their connection-source address;
+recognizing Cloudflare is not a Cloudflare-only access restriction. Failed map
+downloads fall back to peer-IP attribution, which can group Cloudflare visitors
+in per-IP policies. A simpler peer-IP-only profile is also documented.
 
 Authenticated origin pulls are optional. Enabling them turns on Cloudflare's
 shared client certificate for the zone. **With external TLS, configure HAProxy
