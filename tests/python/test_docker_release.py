@@ -98,7 +98,7 @@ class DockerReleaseTest(unittest.TestCase):
         outputs = dict(line.split("=", 1) for line in output.read_text().splitlines()) if output.exists() else {}
         return result, events, outputs
 
-    def run_plan(self, previous="2.0.0", current="2.0.0", pr_change=None, **settings):
+    def run_plan(self, previous="1.0.0", current="2.0.0", pr_change=None, **settings):
         with tempfile.TemporaryDirectory() as directory:
             location = Path(directory)
             def git(*args):
@@ -107,13 +107,20 @@ class DockerReleaseTest(unittest.TestCase):
             git("init", "-q")
             git("config", "user.name", "Test")
             git("config", "user.email", "test@example.invalid")
+            (location / ".env.example").write_text(f"GETBIBLE_IMAGE_TAG={previous or '1.0.0'}\n")
+            git("add", ".env.example")
             if previous is not None:
                 (location / "VERSION").write_text(previous + "\n")
                 git("add", "VERSION")
             git("commit", "-qm", "Previous main", "--allow-empty")
             before = git("rev-parse", "HEAD")
             (location / "VERSION").write_text(current + "\n")
-            git("add", "VERSION")
+            (location / ".env.example").write_text(f"GETBIBLE_IMAGE_TAG={current}\n")
+            (location / "Dockerfile").write_text(f"ARG GETBIBLE_VERSION={current}\n")
+            (location / "compose.yaml").write_text("services:\n  getbible:\n    image: ${GETBIBLE_IMAGE_REPOSITORY:-ghcr.io/getbible/api}:${GETBIBLE_IMAGE_TAG:-" + current + "}\n")
+            (location / "scripts").mkdir()
+            (location / "scripts/release-version.py").write_text((ROOT / "scripts/release-version.py").read_text())
+            git("add", ".")
             git("commit", "-qm", "Merged change", "--allow-empty")
             sha = git("rev-parse", "HEAD")
             pr = {"merged_at": "2026-01-01T00:00:00Z", "merge_commit_sha": sha,
@@ -127,7 +134,7 @@ class DockerReleaseTest(unittest.TestCase):
 
     def run_publication(self, numbered="2.0.0", **settings):
         with tempfile.TemporaryDirectory() as directory:
-            result, events, _ = self.execute("Publish merged main manifest and optional numbered release",
+            result, events, _ = self.execute("Publish merged main manifest and numbered release",
                                              Path(directory), NUMBERED_VERSION=numbered, **settings)
         published = [event[event.index("-t") + 1] for event in events
                      if event[:4] == ["docker", "buildx", "imagetools", "create"]]
@@ -155,10 +162,17 @@ class DockerReleaseTest(unittest.TestCase):
         self.assertEqual(output["numbered_version"], "2.0.0")
         self.assertEqual(output["image_version"], "2.0.0")
 
-    def test_unchanged_version_keeps_numbered_release_and_uses_development_label(self):
-        result, _, output = self.run_plan()
+    def test_unchanged_and_lower_versions_stop_before_build(self):
+        for version in ("2.0.0", "1.9.9"):
+            with self.subTest(version=version):
+                result, _, output = self.run_plan(previous="2.0.0", current=version)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(output, {"build": "false"})
+
+    def test_numeric_version_ordering_accepts_double_digit_increments(self):
+        result, _, output = self.run_plan(previous="2.9.9", current="2.10.0")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(output, {"build": "true", "image_version": "2.0.0-dev", "numbered_version": ""})
+        self.assertEqual(output, {"build": "true", "image_version": "2.10.0", "numbered_version": "2.10.0"})
 
     def test_gate_uses_final_merge_commit_instead_of_pr_head(self):
         result, _, output = self.run_plan(pr_change=lambda pr: pr.update(head={"sha": "b" * 40}))
@@ -203,11 +217,13 @@ class DockerReleaseTest(unittest.TestCase):
         self.assertEqual(creates[0][-2:], [candidate + "-amd64", candidate + "-arm64"])
         self.assertTrue(all(event[-1] == candidate for event in creates[1:]))
 
-    def test_regular_merge_publishes_latest_without_numbered_lookup(self):
-        result, events, published = self.run_publication(numbered="")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(published, [f"ghcr.io/example/api:sha-{'a' * 40}", "ghcr.io/example/api:latest"])
-        self.assertFalse(any("/packages/" in arg for event in events for arg in event))
+    def test_missing_or_malformed_number_never_publishes_latest_alone(self):
+        for version in ("", "2.0.0-dev", "02.0.0", "2.0"):
+            with self.subTest(version=version):
+                result, events, published = self.run_publication(numbered=version)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(published, [])
+                self.assertEqual(events, [])
 
     def test_conflicting_numbered_release_is_never_overwritten(self):
         result, _, published = self.run_publication(TEST_RELEASE_TAGS="1.0.0\n2.0.0\nlatest",
@@ -249,9 +265,9 @@ class DockerReleaseTest(unittest.TestCase):
                 self.assertEqual(len(published), 1)
 
     def test_stale_rerun_does_not_move_latest(self):
-        result, _, published = self.run_publication(numbered="", TEST_RELEASE_MAIN="b" * 40)
+        result, _, published = self.run_publication(TEST_RELEASE_MAIN="b" * 40)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(published, [f"ghcr.io/example/api:sha-{'a' * 40}"])
+        self.assertEqual(published, [f"ghcr.io/example/api:sha-{'a' * 40}", "ghcr.io/example/api:2.0.0"])
 
     def test_main_lookup_error_or_invalid_revision_never_moves_latest(self):
         for settings in ({"TEST_RELEASE_MAIN_ERROR": "HTTP 403 Forbidden"}, {"TEST_RELEASE_MAIN": "unknown"}):

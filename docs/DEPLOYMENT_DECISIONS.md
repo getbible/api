@@ -105,8 +105,10 @@ and credentials; Bible data is obtained through the existing synchronization
 workflow rather than embedded as a production corpus in the image.
 
 Build images only after a pull request merges into `main`, then publish the
-accepted image as `latest`. A change to the tracked `VERSION` also publishes
-that numbered release from the same tested image. Default the production
+accepted image as `latest` and the reviewed number in `VERSION`. Every main
+merge must increase that number; PR validation checks the explicit
+`Release-Version:` answer and deployment defaults, and the main workflow
+rechecks against the previous main commit before building. Default the production
 example to a numbered release; operators can select `latest` to follow accepted
 main updates. Patch, minor and major numbers describe fixes, compatible features
 and breaking changes. These deployment-software versions are independent of
