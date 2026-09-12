@@ -77,6 +77,31 @@ class TelemetryTest(unittest.TestCase):
         self.assertEqual(self.store.summary(0, 200)["calls"], 2)
         self.assertEqual(len(self.store.endpoints()), 2)
 
+    def test_static_translation_rankings_include_full_books_and_chapters(self):
+        paths = ["/v2/kjv.json", "/v2/kjv/43.json", "/v2/kjv/43/3.json",
+                 "/v3/asv.json", "/kjv.json", "/kjv/1/1.json"]
+        for index, path in enumerate(paths):
+            self.append(edge(str(index), uri=path))
+        ranking = self.store.summary(0, 200)["breakdowns"]["translation"]
+        self.assertEqual({row["value"]: row["calls"] for row in ranking}, {"kjv": 5, "asv": 1})
+        rows = self.store.requests(0, 200, filters={"translation": "kjv"})["items"]
+        self.assertEqual({row["path"] for row in rows}, set(paths) - {"/v3/asv.json"})
+        self.assertEqual(self.store.summary(0, 200, filters={"book": "43"})["calls"], 2)
+        self.assertEqual(self.store.summary(0, 200, filters={"version": "v3"})["calls"], 1)
+
+    def test_static_discovery_metadata_and_runtime_paths_are_not_translations(self):
+        paths = ["/versions.json", "/v2/translations.json", "/v2/openapi.json",
+                 "/v2/index.json", "/v2/metadata.json", "/v2/kjv/books.json",
+                 "/v2/kjv/43/chapters.json", "/v2/search/1.json", "/v2/query/1/1.json",
+                 "/v2/search", "/healthz", "/v2/kjv/43/3.json/extra",
+                 "/v2/kjv.json/43.json", "/v2/kjv/zero.json"]
+        for index, path in enumerate(paths):
+            self.append(edge(str(index), uri=path))
+        rows = self.store.requests(0, 200)["items"]
+        self.assertEqual({row["path"] for row in rows}, set(paths))
+        self.assertTrue(all(not row["translation"] and not row["book"] for row in rows))
+        self.assertEqual(self.store.summary(0, 200)["calls"], len(paths))
+
     def test_secrets_redacted_rich_fields_retained(self):
         self.append(edge(uri="/v2/kjv.json?token=secret-1&q=love", auth_state="rejected",
                          user_agent="Bearer secret-2", authorization="secret-3", password="secret-4",

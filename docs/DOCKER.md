@@ -82,7 +82,7 @@ same deployment file.
 Set the actual LAN/proxy and WAN addresses in `.env` before startup:
 
 ```dotenv
-GETBIBLE_IMAGE_TAG=1.0.0
+GETBIBLE_IMAGE_TAG=2.0.0
 GETBIBLE_DATA_ROOT=/srv/getbible-data
 GETBIBLE_BIND_ADDRESS=192.168.10.20
 GETBIBLE_HTTP_PORT=8080
@@ -138,7 +138,7 @@ The full settings inventory follows.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `GETBIBLE_IMAGE_REPOSITORY` | `ghcr.io/getbible/api` | Registry/repository without a tag |
-| `GETBIBLE_IMAGE_TAG` | `1.0.0` | Numbered stable release; `latest` is optional |
+| `GETBIBLE_IMAGE_TAG` | `2.0.0` | Numbered stable release; `latest` is optional |
 | `GETBIBLE_DATA_ROOT` | `/srv/getbible-data` | Absolute host parent for persistent subdirectory mounts |
 | `GETBIBLE_HOSTNAME` | `getbible` | Container hostname |
 | `TZ` | `UTC` | Installed IANA time zone |
@@ -440,7 +440,7 @@ GHCR images and stable tags after
 its build/acceptance gates. Initial publication still requires the organization
 to permit package publishing and the package to grant the intended pull access.
 
-Use release versions `1.0.0`, `1.0.1` for fixes, `1.1.0` for compatible new
+Use release versions `2.0.0`, `2.0.1` for fixes, `2.1.0` for compatible new
 features and a new major version for breaking changes. `latest` follows stable
 releases, not every branch build. Endpoint `v2`/`v3` are independent API
 contracts, not image tags.
@@ -450,7 +450,7 @@ contracts, not image tags.
 | Pull request or push to `main`/`master` | Build and acceptance on native AMD64 and ARM64; no publication |
 | Push to the implementation branch `agent/docker-deployment` | Build and acceptance, then publish only the private commit-SHA candidate tag |
 | Manual dispatch with `publish_candidate=true` | Publish accepted images as `sha-COMMIT` and architecture-specific SHA tags; never update stable tags |
-| Push `vMAJOR.MINOR.PATCH`, for example `v1.0.0` | After both architectures pass, publish `1.0.0` and update `latest` if this is the newest stable version |
+| Push `vMAJOR.MINOR.PATCH`, for example `v2.0.0` | After both architectures pass, publish `2.0.0` and update `latest` if this is the newest stable version |
 
 Publication loads the exact images that passed acceptance rather than rebuilding
 them in a separate publishing job. The workflow refuses an existing numbered
@@ -459,6 +459,25 @@ private. Native ARM64 runners and package publishing must be available under
 the organization's GitHub Actions policy. Candidate tags let maintainers test
 an image before selecting a stable release; they do not require version changes
 on every commit.
+
+To release version `2.0.0`, first merge the release changes and verify that the
+native, runtime, dashboard and Docker checks pass on that commit. From an
+authenticated maintainer checkout containing that exact commit, create and
+push its Git tag:
+
+```sh
+git tag -a v2.0.0 <verified-commit-sha> -m 'getBible API 2.0.0'
+git push origin refs/tags/v2.0.0
+```
+
+Replace `<verified-commit-sha>` with the full tested commit ID. The tag push
+starts a new Docker workflow, which rebuilds and tests both architectures
+before publishing `ghcr.io/getbible/api:2.0.0` and, when appropriate, `latest`.
+Adding a version to a commit message, merging a pull request or publishing a
+candidate does not publish the numbered image. Wait for the tagged workflow's
+publication jobs to succeed before selecting the new image in production.
+The publication guard stops on registry/API errors and refuses an existing
+numbered version; never delete and recreate a release tag to replace an image.
 
 On a disposable compatible Docker host, maintainers can run the same image
 acceptance locally after installing HAProxy and the test tools:

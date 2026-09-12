@@ -203,6 +203,49 @@ class RuntimeControlTest(unittest.TestCase):
         smaller, _ = adapt.decide({"ADAPTIVE_ALLOW_IDLE_SHRINK": "true"}, {"low": 10}, sample, target)
         self.assertEqual(smaller["workers"], 3)
 
+    def test_controller_uses_explicit_environment_bounds_and_preserves_endpoint_defaults(self):
+        cases = (
+            ("captured upper", {"QUERY_WORKERS_MAX": "6"}, {}, 4, 5, 5),
+            ("direct upper", {}, {"GETBIBLE_QUERY_WORKERS_MAX": "6"}, 4, 5, 5),
+            ("blank direct", {}, {"GETBIBLE_QUERY_WORKERS_MAX": ""}, 4, 5, None),
+            ("blank preserves captured", {"QUERY_WORKERS_MAX": "6"}, {"GETBIBLE_QUERY_WORKERS_MAX": ""}, 4, 5, 5),
+            ("captured lower", {"QUERY_WORKERS_MIN": "1"}, {}, 2, 0, 1),
+            ("saved lower", {}, {}, 2, 0, None),
+        )
+        for name, captured, direct, workers, inflight, expected in cases:
+            with self.subTest(name=name):
+                directory = self.root / name
+                active = directory / "runtime" / "active"
+                active.mkdir(parents=True)
+                (active / "runtime.env").write_text(f"QUERY_WORKERS={workers}\nQUERY_THREADS=1\n")
+                settings = directory / "manager.conf"
+                settings.write_text("ADAPTIVE_SUSTAINED_SAMPLES=1\nADAPTIVE_ALLOW_IDLE_SHRINK=true\nQUERY_WORKERS_MIN=1\nQUERY_WORKERS_MAX=12\n")
+                environment = directory / "environment.conf"
+                environment.write_text("".join(f"{key}={value}\n" for key, value in captured.items()))
+                state = directory / "adaptive.json"
+                args = SimpleNamespace(state=str(state), config=str(settings), environment=str(environment),
+                                       registry=str(directory), runtime_root=str(directory), cache_root=str(directory),
+                                       systemctl="systemctl", control="control", manager="manager")
+                item = {"domain": "query.example.test", "kind": "query", "label": "v2",
+                        "config": {"WORKERS_MIN": "2", "WORKERS_MAX": "4"}, "root": str(active.parent)}
+                planner = SimpleNamespace(inventory=lambda *_: [item], WEIGHT={"query": 1})
+                def reply(command, **_):
+                    if command[0] == "systemctl":
+                        return SimpleNamespace(returncode=0, stdout="CPUUsageNSec=100\nMemoryCurrent=1\nMemoryMax=10\nActiveState=active")
+                    if command[0] == "control":
+                        return SimpleNamespace(stdout=json.dumps({"complete": True, "workers": [{"activity": {"inflight": inflight}}]}))
+                    return SimpleNamespace(returncode=0, stdout="", stderr="")
+                with patch.dict(os.environ, direct, clear=True), patch.object(adapt, "module", return_value=planner), \
+                        patch.object(adapt.time, "time", return_value=2000), patch.object(adapt.subprocess, "run", side_effect=reply) as run:
+                    result = adapt.run(args)
+                saved = json.loads(state.read_text())
+                if expected is None:
+                    self.assertEqual(result["status"], "sampled")
+                    self.assertFalse(any(call.args[0][0] == "manager" for call in run.call_args_list))
+                else:
+                    self.assertEqual(result["status"], "applied")
+                    self.assertEqual(saved["targets"]["query.example.test/v2"]["workers"], expected)
+
 
 if __name__ == "__main__":
     unittest.main()
