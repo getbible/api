@@ -50,22 +50,12 @@ jobs:
             echo 'No pull request was merged into main at this commit; image build skipped.'
             exit 0
           fi
-          version="$(cat VERSION)"
-          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'VERSION must be MAJOR.MINOR.PATCH.' >&2; exit 1; }
-          previous_version=
-          if [[ ! "$PREVIOUS_MAIN" =~ ^0+$ ]]; then
-            git cat-file -e "$PREVIOUS_MAIN^{commit}"
-            if [[ -n "$(git ls-tree --name-only "$PREVIOUS_MAIN" -- VERSION)" ]]; then
-              previous_version="$(git show "$PREVIOUS_MAIN:VERSION")"
-            fi
-          fi
-          numbered_version=
-          image_version="$version-dev"
-          if [[ "$version" != "$previous_version" ]]; then
-            numbered_version="$version"
-            image_version="$version"
-          fi
-          printf 'build=true\nimage_version=%s\nnumbered_version=%s\n' "$image_version" "$numbered_version" >> "$GITHUB_OUTPUT"
+          # The committed version is the reviewed release input. Recheck it
+          # against the actual previous main commit, including merges that
+          # raced another release after their pull-request checks completed.
+          python3 scripts/release-version.py check --base-ref "$PREVIOUS_MAIN"
+          version="$(python3 -c 'from pathlib import Path; print(Path("VERSION").read_text().strip())')"
+          printf 'build=true\nimage_version=%s\nnumbered_version=%s\n' "$version" "$version" >> "$GITHUB_OUTPUT"
 
   validate:
     name: Image / ${{ matrix.arch }}
@@ -180,11 +170,12 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Publish merged main manifest and optional numbered release
+      - name: Publish merged main manifest and numbered release
         env:
           NUMBERED_VERSION: ${{ needs.plan.outputs.numbered_version }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          [[ "$NUMBERED_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || { echo 'A numbered release is required.' >&2; exit 1; }
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
           sources=("$image:sha-$GITHUB_SHA-amd64" "$image:sha-$GITHUB_SHA-arm64")
           candidate="$image:sha-$GITHUB_SHA"

@@ -429,20 +429,18 @@ acceptance tests. Publication loads those exact tested images and publishes
 their private commit-SHA tags and multi-architecture manifest. It does not
 rebuild them in the publication jobs.
 
-The tracked [VERSION](../VERSION) file controls numbered releases. Version
-`2.0.0` is introduced in this change. A merge that adds or changes `VERSION`
-publishes that immutable number from the same tested images used for `latest`.
-Subsequent merges with an unchanged version publish `latest` and commit-SHA
-tags with a `VERSION-dev` image label, leaving all numbered releases intact.
-No Git tag or version in a commit message is needed. For the next numbered
-release, change `VERSION` and the numbered deployment examples in a reviewed
-pull request; merge it after the source checks pass.
+The tracked [VERSION](../VERSION) file controls the release number. Every
+accepted main merge publishes that immutable number and `latest` from the same
+tested images. Operators can pin a numbered tag indefinitely or follow `latest`.
+The first release using this workflow is `2.0.0`. Each subsequent main merge
+requires a greater version; unchanged or lower versions stop before the image
+build. No Git tag or version in a commit message is needed.
 
 | Change | Image publication after merge and acceptance |
 | --- | --- |
 | Add `VERSION` containing `2.0.0` | `2.0.0`, `latest` and commit-SHA tags, all from the same tested images |
-| Merge with unchanged `VERSION` | Update `latest` and commit-SHA tags; preserve `2.0.0` and other numbered images |
-| Change `VERSION` to a new number | Publish that immutable number, `latest` and commit-SHA tags |
+| Merge with unchanged or lower `VERSION` | Validation fails; no image build or publication |
+| Increase `VERSION` to a reviewed number | Publish that immutable number, `latest` and commit-SHA tags |
 | Open or update a pull request | Source checks only; no Docker build or publication |
 
 The main build/publication pipeline is serialized and an active run is not
@@ -462,6 +460,55 @@ the repository and existing package remain private. Native ARM64 runners must
 also be available under the organization's GitHub Actions policy. Wait for the
 merged commit's publication jobs to succeed before pulling its new images.
 Endpoint `v2`/`v3` names are independent API contracts, not image versions.
+
+### Choose the release version
+
+The pull-request template asks **Which version should this merge release?**
+Answer with one plain-text line in the PR description, for example:
+
+```text
+Release-Version: 2.0.1
+```
+
+The **Release version** check shows the current main version, proposed version
+and the next patch, minor and major choices in its Actions summary. It fails
+if the answer is missing, repeated, invalid or different from the committed
+`VERSION`. It also checks that the number is greater than current main and that
+the Dockerfile, Compose and environment defaults agree. Editing the PR
+description or pushing a commit reruns this check without building an image.
+GitHub's native PR templates are Markdown prompts, rather than interactive
+issue forms; the workflow supplies the validation and current version details.
+
+Use semantic versioning: patch for compatible fixes, minor for compatible new
+features and major for breaking changes. A helper updates `VERSION` and all
+three deployment defaults together:
+
+```sh
+# Choose one, run it in the source checkout, then commit the changed files:
+python3 scripts/release-version.py set patch
+python3 scripts/release-version.py set minor
+python3 scripts/release-version.py set major
+python3 scripts/release-version.py set 2.1.0
+```
+
+Increment commands use the version in the checkout; the explicit form accepts
+your chosen number. Copy the resulting `Release-Version:` line into the PR
+description and review the version change with the code. Published numbered
+images remain available when a newer number becomes `latest`. Documentation
+examples show sample releases; the tracked deployment defaults carry the
+current release number.
+
+The workflow reports a failing check for an unanswered version question. To
+make GitHub itself disable merging until it passes, a maintainer must select
+the **Release version** job as a required status check in the repository's
+existing merge rules. This source change does not alter repository rules.
+The main image workflow independently repeats version validation against the
+actual previous main commit, so a stale PR or bypassed review check cannot
+reuse a release number. If another release merged first, update the branch
+and choose a higher number before merging.
+
+See [GitHub's PR template documentation](https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests/creating-a-pull-request-template-for-your-repository)
+and [semantic versioning](https://semver.org/) for the underlying conventions.
 
 On a disposable compatible Docker host, maintainers can run the same image
 acceptance locally after installing HAProxy and the test tools:
