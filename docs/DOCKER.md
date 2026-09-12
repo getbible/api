@@ -44,38 +44,20 @@ and service test on the actual host, not only a successful image build.
 
 ## 2. Obtain deployment files and authenticate
 
-Save [compose.yaml](../compose.yaml) and [.env.example](../.env.example) from
-the authenticated private repository into a directory on the server, such as
-`/srv/getbible-deployment`. Name the settings file `.env`. Downloading these
-two files is sufficient; no Git checkout or host management wrapper is needed.
-Use the deployment files shipped with the selected image release.
+Download [compose.yaml](../compose.yaml) and [.env.example](../.env.example)
+from the authenticated private repository on your workstation, then copy them
+into the deployment directory on the Docker host, such as
+`/srv/getbible-deployment`. Name the settings file `.env`. Use the files from
+the same release as the image; the server needs no Git checkout or build tools.
 
-The image name is `ghcr.io/getbible/api`. The package is private and access
-must be granted to the GitHub account used to pull it. An SSH repository deploy
-key cannot authenticate to the container registry. Create a personal access
-token **classic** with `read:packages`, authorize it for organization SSO if
-required, and log in on the Docker host:
-
-```bash
-read -rp 'GitHub username: ' GETBIBLE_GH_USER
-read -rsp 'GitHub package read token: ' GETBIBLE_GH_TOKEN
-printf '\n'
-printf '%s' "$GETBIBLE_GH_TOKEN" | docker login ghcr.io --username "$GETBIBLE_GH_USER" --password-stdin
-unset GETBIBLE_GH_TOKEN GETBIBLE_GH_USER
-```
-
-Run login and Compose as the same host user. If Docker is administered through
-`sudo`, use `sudo docker login` and `sudo docker compose` consistently. Docker
-stores credentials using the host's configured credential mechanism. Do not
-pass this token into the container or put it in the application `.env`.
-Cloudflare API tokens and endpoint SSH keys are separate credentials.
-
-Private image publication uses the repository workflow's `GITHUB_TOKEN` with
-package-write permission. Maintainers must check the package's private
-visibility and repository access linkage on first publication. There is no
-need for an external registry unless organization policy or operational needs
-prevent GHCR use. `GETBIBLE_IMAGE_REPOSITORY` permits a private mirror using the
-same deployment file.
+The image is `ghcr.io/getbible/api`. It stays private. Authenticate Docker once
+with a dedicated account's read-only package token, using the same host user
+that runs Compose. Docker retains that login for subsequent pulls; selecting
+`GETBIBLE_IMAGE_TAG=latest` does not require authenticating again for each image.
+See [private registry access](REGISTRY_ACCESS.md) for account/package access,
+token permissions, credential storage and the complete login/update commands.
+Registry credentials stay on the host and are not application environment
+variables or endpoint SSH deploy keys.
 
 ## 3. Set the installation settings
 
@@ -395,8 +377,8 @@ docker compose exec --user root getbible getbible doctor
 docker compose exec --user root getbible getbible status
 ```
 
-`latest` follows the newest stable publication only when pulled. Numbered tags
-must not be overwritten. Image replacement restarts the whole system;
+`latest` follows accepted pull-request merges into `main`, and changes locally
+only when pulled. Numbered tags remain fixed and must not be overwritten. Image replacement restarts the whole system;
 in-container runtime updates preserve the existing readiness and drain
 mechanism. Explicitly apply a release's templates/application changes with
 `getbible update [DOMAIN]` when ready. For runtime domains this also adopts
@@ -434,50 +416,52 @@ backup if newer persisted settings are incompatible.
 ## 8. Build and acceptance for maintainers
 
 The production Compose file contains `image:` and no `build:`. The repository
-Dockerfile installs OS packages and builds the reviewed runtime bundle during
-CI. The [release workflow](../.github/workflows/docker.yml) publishes private
-GHCR images and stable tags after
-its build/acceptance gates. Initial publication still requires the organization
-to permit package publishing and the package to grant the intended pull access.
+Dockerfile installs OS packages and builds the reviewed runtime bundle. The
+[image workflow](../.github/workflows/docker.yml) starts only for a push to
+`main`, then verifies that a pull request was actually merged at that commit.
+Pull-request commits, feature branches, direct unmerged pushes, Git tags and
+manual dispatches do not build or publish images. Source, native deployment
+and dashboard checks still run on pull requests before merge.
 
-Use release versions `2.0.0`, `2.0.1` for fixes, `2.1.0` for compatible new
-features and a new major version for breaking changes. `latest` follows stable
-releases, not every branch build. Endpoint `v2`/`v3` are independent API
-contracts, not image tags.
+Each accepted main merge builds once per architecture. Both AMD64 and ARM64
+must pass the complete image, offline runtime, service, proxy and persistence
+acceptance tests. Publication loads those exact tested images and publishes
+their private commit-SHA tags and multi-architecture manifest. It does not
+rebuild them in the publication jobs.
 
-| Workflow event | Result |
+The tracked [VERSION](../VERSION) file controls numbered releases. Version
+`2.0.0` is introduced in this change. A merge that adds or changes `VERSION`
+publishes that immutable number from the same tested images used for `latest`.
+Subsequent merges with an unchanged version publish `latest` and commit-SHA
+tags with a `VERSION-dev` image label, leaving all numbered releases intact.
+No Git tag or version in a commit message is needed. For the next numbered
+release, change `VERSION` and the numbered deployment examples in a reviewed
+pull request; merge it after the source checks pass.
+
+| Change | Image publication after merge and acceptance |
 | --- | --- |
-| Pull request or push to `main`/`master` | Build and acceptance on native AMD64 and ARM64; no publication |
-| Push to the implementation branch `agent/docker-deployment` | Build and acceptance, then publish only the private commit-SHA candidate tag |
-| Manual dispatch with `publish_candidate=true` | Publish accepted images as `sha-COMMIT` and architecture-specific SHA tags; never update stable tags |
-| Push `vMAJOR.MINOR.PATCH`, for example `v2.0.0` | After both architectures pass, publish `2.0.0` and update `latest` if this is the newest stable version |
+| Add `VERSION` containing `2.0.0` | `2.0.0`, `latest` and commit-SHA tags, all from the same tested images |
+| Merge with unchanged `VERSION` | Update `latest` and commit-SHA tags; preserve `2.0.0` and other numbered images |
+| Change `VERSION` to a new number | Publish that immutable number, `latest` and commit-SHA tags |
+| Open or update a pull request | Source checks only; no Docker build or publication |
 
-Publication loads the exact images that passed acceptance rather than rebuilding
-them in a separate publishing job. The workflow refuses an existing numbered
-release tag and checks that the repository and an existing GHCR package are
-private. Native ARM64 runners and package publishing must be available under
-the organization's GitHub Actions policy. Candidate tags let maintainers test
-an image before selecting a stable release; they do not require version changes
-on every commit.
+The main build/publication pipeline is serialized and an active run is not
+cancelled by a newer merge. Up to 100 pending runs are queued, so a newer merge
+does not replace a waiting version-release build. Before moving `latest`, the
+workflow verifies that its commit is still the main head. An older run or rerun cannot replace a
+newer main image; the previous `latest` remains available until a current main
+image passes acceptance. Registry/API errors stop publication, and an existing
+numbered image is never overwritten. Retrying publication may reuse that
+number only when its complete manifest exactly matches the accepted image;
+a conflicting manifest stops the job. Use a new version for a changed numbered
+release rather than deleting or recreating an existing one.
 
-To release version `2.0.0`, first merge the release changes and verify that the
-native, runtime, dashboard and Docker checks pass on that commit. From an
-authenticated maintainer checkout containing that exact commit, create and
-push its Git tag:
-
-```sh
-git tag -a v2.0.0 <verified-commit-sha> -m 'getBible API 2.0.0'
-git push origin refs/tags/v2.0.0
-```
-
-Replace `<verified-commit-sha>` with the full tested commit ID. The tag push
-starts a new Docker workflow, which rebuilds and tests both architectures
-before publishing `ghcr.io/getbible/api:2.0.0` and, when appropriate, `latest`.
-Adding a version to a commit message, merging a pull request or publishing a
-candidate does not publish the numbered image. Wait for the tagged workflow's
-publication jobs to succeed before selecting the new image in production.
-The publication guard stops on registry/API errors and refuses an existing
-numbered version; never delete and recreate a release tag to replace an image.
+Private GHCR publication requires the organization to permit package publishing
+and the package to grant the intended pull access. The workflow verifies that
+the repository and existing package remain private. Native ARM64 runners must
+also be available under the organization's GitHub Actions policy. Wait for the
+merged commit's publication jobs to succeed before pulling its new images.
+Endpoint `v2`/`v3` names are independent API contracts, not image versions.
 
 On a disposable compatible Docker host, maintainers can run the same image
 acceptance locally after installing HAProxy and the test tools:
