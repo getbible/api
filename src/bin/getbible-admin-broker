@@ -70,10 +70,12 @@ EO = field("endpoint", "endpoint", required=False)
 OPS = {}
 
 
-def operation(name, title, command, fields=(), *, category="Domains", mutates=True, destructive=False, secret_output=False):
+def operation(name, title, command, fields=(), *, category="Domains", mutates=True, destructive=False, secret_output=False, description=None):
     OPS[name] = {"id": name, "name": name, "title": title, "category": category,
                  "fields": list(fields), "mutates": mutates, "destructive": destructive,
                  "secret_output": secret_output, "_command": command}
+    if description:
+        OPS[name]["description"] = description
 
 
 operation("domain.status", "Domain status", ["status", "{domain}"], [D], mutates=False)
@@ -136,6 +138,8 @@ operation("cloudflare.zone_settings", "Change zone-wide settings", ["cloudflare"
 operation("logs.view", "View endpoint diagnostics", ["logs", "{domain}", "{kind}", "{endpoint?}", ("--lines", "lines")], [D, field("kind", choices="access|error|app|journal", default="error"), EO, field("lines", "integer", default="200")], category="Diagnostics", mutates=False)
 operation("logs.archives", "List retained log archives", ["logs", "archives", "{domain}"], [D], category="Diagnostics", mutates=False)
 operation("logs.rotate", "Rotate diagnostics", ["logs", "rotate"], category="Diagnostics")
+operation("logs.reset", "Reset canonical traffic history", ["logs", "reset", "--discard-history"], category="Diagnostics", destructive=True,
+          description="Permanently discard stored request, event and metric history and start collecting fresh traffic. Raw logs, dashboard authentication and configuration remain unchanged.")
 operation("analytics", "Traffic report", ["analytics", ("--window", "window"), ("--domain", "domain"), "--json"], [field("window", choices="today|24h|7d|30d|all", default="24h"), field("domain", "domain", required=False)], category="Diagnostics", mutates=False)
 operation("system.doctor", "Check this host", ["doctor"], category="System", mutates=False)
 operation("system.selftest", "Run manager tests", ["selftest"], category="System")
@@ -253,7 +257,7 @@ class Broker:
                 CREATE INDEX IF NOT EXISTS jobs_created ON jobs(created);
                 CREATE TABLE IF NOT EXISTS management_state (id INTEGER PRIMARY KEY CHECK(id=1), refresh TEXT NOT NULL);
             """)
-            db.execute("UPDATE jobs SET status='interrupted',finished=?,output=output || '\nBroker restarted; inspect current system state before retrying.' WHERE status IN ('running','queued')", (time.time(),))
+            db.execute("UPDATE jobs SET status='interrupted',finished=?,output=output || '\nBroker restarted; inspect current system state before retrying.' WHERE status IN ('running','waiting','queued')", (time.time(),))
         # Starting this process loads the current installed code and unit. Old
         # jobs remain durable; only the completed refresh request is cleared.
         self.persist_refresh()
@@ -504,12 +508,28 @@ class Broker:
             child.stdin.write((values["secret"] + "\n").encode())
         child.stdin.close()
         lines, size, last_flush = [], 0, 0.0
+        waiting = False
         secret_result = []
         while True:
             raw = child.stdout.readline(MAX_OUTPUT + 1)
             if not raw:
                 break
             text = raw.decode("utf-8", "replace")
+            # The trusted CLI reports lock acquisition for this particular
+            # job. This is not an error-message heuristic or a retry: the
+            # original process waits before it can perform the operation.
+            if text == f"__GETBIBLE_ADMIN_JOB__:{job}:waiting\n":
+                waiting = True
+                text = "Waiting for another management command. Close any idle CLI menu to let this job continue automatically.\n"
+                with self.connect() as db:
+                    db.execute("UPDATE jobs SET status='waiting',started=NULL,output=? WHERE id=?", ("".join(lines) + text, job))
+            elif text == f"__GETBIBLE_ADMIN_JOB__:{job}:running\n":
+                with self.connect() as db:
+                    db.execute("UPDATE jobs SET status='running',started=? WHERE id=?", (time.time(), job))
+                if not waiting:
+                    continue
+                text = "Management lock acquired; operation is running.\n"
+                waiting = False
             if values.get("secret"):
                 text = text.replace(values["secret"], "[hidden]")
             if spec["secret_output"]:
@@ -572,7 +592,7 @@ class Broker:
         return [dict(row) for row in rows]
 
     def endpoints(self):
-        rows = []
+        rows, domains = [], []
         root = Path(self.prefix + "/etc/getbible/endpoints")
         safe_keys = {"DOMAIN", "TYPE", "KIND", "LIVE", "ACCESS_MODE", "DEFAULT_VERSION", "RATE_PER_SECOND", "RATE_BURST", "QUOTA_HOUR", "QUOTA_DAY", "CONN_LIMIT", "CACHE_TTL", "CLOUDFLARE_MODE", "CLOUDFLARE_CACHE"}
         for path in sorted(root.glob("*/endpoint.conf")):
@@ -580,11 +600,13 @@ class Broker:
             name = path.parent.name
             if not re.fullmatch(DOMAIN, name):
                 continue
+            domains.append({"domain": name, "type": config.get("TYPE"), "kind": config.get("KIND", "static"),
+                            "live": config.get("LIVE") == "true", "settings": {k: v for k, v in config.items() if k in safe_keys}})
             versions = []
             for version in sorted((path.parent / "versions").glob("*.conf")):
                 values = read_config(version)
                 # A positive allowlist excludes credential fields by design.
-                allowed = {"LABEL", "VERSION", "APP_VERSION", "REPOSITORY", "REPO_URL", "REPO_REF", "REPO_PATH", "SCHEDULE", "WORKERS", "THREADS", "WARM_TRANSLATIONS", "CACHE_TTL", "PYTHON_VERSION", "DEFAULT_TRANSLATION", "DEFAULT_REFERENCE"}
+                allowed = {"LABEL", "VERSION", "APP_VERSION", "REPO_URL", "REPO_REF", "REPO_PATH", "SCHEDULE", "PYTHON_VERSION"} | set(RUNTIME_KEYS.split("|"))
                 versions.append({"label": version.stem, "settings": {k: v for k, v in values.items() if k in allowed}})
             for version in versions:
                 values = version["settings"]
@@ -596,7 +618,7 @@ class Broker:
                         state = read_config(state_path)
                         break
                 rows.append({"domain": name, "label": version["label"], "type": config.get("TYPE"), "kind": config.get("KIND", "static"), "live": config.get("LIVE") == "true", "repository": values.get("REPOSITORY", values.get("REPO_URL")), "branch": values.get("REPO_REF"), "last_check": state.get("LAST_CHECK"), "last_sync": state.get("LAST_SYNC"), "last_error": state.get("LAST_ERROR"), "settings": {k: v for k, v in config.items() if k in safe_keys}, "endpoint_settings": values})
-        return {"endpoints": rows}
+        return {"domains": domains, "endpoints": rows}
 
     def storage(self, refresh=False):
         now = time.monotonic()

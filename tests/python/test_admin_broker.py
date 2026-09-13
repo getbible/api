@@ -1,10 +1,15 @@
 """The root management boundary uses typed operations and durable, redacted jobs."""
 import importlib.machinery
 import importlib.util
+from contextlib import contextmanager
+import fcntl
 import json
+import os
 from pathlib import Path
+import shlex
 import tempfile
 import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import patch
 import unittest
@@ -49,6 +54,15 @@ class OperationTests(unittest.TestCase):
         values = broker.validate_arguments(broker.OPS["runtime.set"], {"domain": "query.example.test", "key": "WARM_TRANSLATIONS", "value": ""})
         self.assertEqual(broker.command_arguments(broker.OPS["runtime.set"], values)[-3:], ["WARM_TRANSLATIONS", "", "--yes"])
 
+    def test_history_reset_has_explicit_cli_flag_and_destructive_review(self):
+        spec = broker.OPS["logs.reset"]
+        values = broker.validate_arguments(spec, {})
+        self.assertTrue(spec["destructive"])
+        self.assertIn("Permanently discard", spec["description"])
+        self.assertEqual(broker.command_arguments(spec, values), ["logs", "reset", "--discard-history", "--yes"])
+        with self.assertRaises(ValueError):
+            broker.validate_arguments(spec, {"domain": "example.test"})
+
 
 class JobTests(unittest.TestCase):
     def setUp(self):
@@ -61,6 +75,74 @@ class JobTests(unittest.TestCase):
         self.manager.write_text("#!/usr/bin/python3\nimport sys\nif 'token' in sys.argv:\n print(" + repr(json.dumps({"token": self.token})) + ")\nelse:\n print(sys.stdin.read())\n")
         self.manager.chmod(0o755)
         self.app = broker.Broker(self.root / "admin", self.manager, str(self.root))
+
+    def wait_for_status(self, job_id, status):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            job = self.app.job(job_id, "operator")
+            if job["status"] == status:
+                return job
+            time.sleep(0.01)
+        self.fail(f"Job did not reach {status}: {job}")
+
+    @contextmanager
+    def management_lock(self):
+        directory = self.root / "var/lib/getbible"
+        directory.mkdir(parents=True, exist_ok=True)
+        with (directory / "manage.lock").open("w") as lock:
+            # Even an inheritable lock in the privileged broker's process
+            # must not cross its child-process boundary.
+            os.set_inheritable(lock.fileno(), True)
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
+    def locked_manager(self, after=""):
+        self.manager.write_text("#!/bin/bash\nset -Eeuo pipefail\n"
+                                f"source {shlex.quote(str(ROOT / 'src/lib/core.sh'))}\n"
+                                # A normal background caller would fail with
+                                # 75 immediately; a durable broker job waits.
+                                "GB_MANAGEMENT_LOCK_WAIT_SECONDS=0\n"
+                                "printf '%s\\n' \"$2\" >> \"$GB_PREFIX/invocations\"\n"
+                                "gb_management_lock\n"
+                                "printf '%s\\n' \"$2\" >> \"$GB_PREFIX/effects\"\n" + after)
+
+    def test_busy_cli_keeps_gui_job_waiting_and_queue_resumes_exactly_once(self):
+        self.locked_manager()
+        with self.management_lock():
+            first = self.app.submit({"operation": "domain.apply", "arguments": {"domain": "first.example.test"}}, "operator")
+            waiting = self.wait_for_status(first["id"], "waiting")
+            second = self.app.submit({"operation": "domain.apply", "arguments": {"domain": "second.example.test"}}, "operator")
+            self.assertIsNone(waiting["started"])
+            self.assertIsNone(waiting["finished"])
+            self.assertIn("idle CLI menu", waiting["output"])
+            self.assertEqual(self.app.job(second["id"], "operator")["status"], "queued")
+            # Status and inventory reads remain responsive during contention.
+            self.assertEqual({item["status"] for item in self.app.jobs()}, {"queued", "waiting"})
+            self.assertEqual(self.app.state()["pending_jobs"], 2)
+            self.assertEqual(self.app.endpoints()["endpoints"], [])
+            self.assertFalse((self.root / "effects").exists())
+        first_result = self.wait_for_status(first["id"], "succeeded")
+        self.wait_for_status(second["id"], "succeeded")
+        self.app.work.join()
+        expected = ["first.example.test", "second.example.test"]
+        self.assertEqual((self.root / "invocations").read_text().splitlines(), expected)
+        self.assertEqual((self.root / "effects").read_text().splitlines(), expected)
+        self.assertIsNotNone(first_result["started"])
+        self.assertIn("lock acquired", first_result["output"])
+        self.assertNotIn("__GETBIBLE_ADMIN_JOB__", first_result["output"])
+
+    def test_failure_after_lock_and_mutation_is_never_retried(self):
+        self.locked_manager('if [[ "$2" == first.example.test ]]; then exit 75; fi\n')
+        first = self.app.submit({"operation": "domain.apply", "arguments": {"domain": "first.example.test"}}, "operator")
+        second = self.app.submit({"operation": "domain.apply", "arguments": {"domain": "second.example.test"}}, "operator")
+        self.wait_for_status(first["id"], "failed")
+        self.wait_for_status(second["id"], "succeeded")
+        self.app.work.join()
+        self.assertEqual(self.app.job(first["id"], "operator")["exit_code"], 75)
+        self.assertEqual((self.root / "effects").read_text().splitlines(), ["first.example.test", "second.example.test"])
 
     def test_token_secret_is_not_persisted_and_is_returned_only_once_to_issuer(self):
         result = self.app.submit({"operation": "token.add", "arguments": {"domain": "api.example.test", "label": "integration"}}, "session-A")
@@ -87,6 +169,8 @@ class JobTests(unittest.TestCase):
     def test_destructive_actions_require_explicit_confirmation(self):
         with self.assertRaises(ValueError):
             self.app.submit({"operation": "domain.remove", "arguments": {"domain": "api.example.test", "purge": True}}, "session-A")
+        with self.assertRaises(ValueError):
+            self.app.submit({"operation": "logs.reset", "arguments": {}}, "session-A")
         self.assertEqual(self.app.jobs(), [])
 
     def test_one_time_secret_follows_issuer_session_across_address_changes(self):
@@ -101,9 +185,11 @@ class JobTests(unittest.TestCase):
     def test_broker_restart_reports_interruption_without_replaying_mutation(self):
         with self.app.connect() as database:
             database.execute("INSERT INTO jobs(id,operation,arguments,actor,status,created) VALUES('old-job','domain.apply','{}','operator','running',1)")
+            database.execute("INSERT INTO jobs(id,operation,arguments,actor,status,created) VALUES('waiting-job','domain.apply','{}','operator','waiting',2)")
         replacement = broker.Broker(self.root / "admin", self.manager, str(self.root))
         job = replacement.job("old-job", "operator")
         self.assertEqual(job["status"], "interrupted")
+        self.assertEqual(replacement.job("waiting-job", "operator")["status"], "interrupted")
         self.assertTrue(replacement.work.empty())
 
     def test_refresh_signal_only_sets_a_flag_and_rejects_new_work(self):
@@ -213,7 +299,30 @@ class JobTests(unittest.TestCase):
         (endpoint / "versions/v2.conf").write_text("REPO_URL=https://example.test/repo.git\nSECRET=do-not-show\n")
         data = self.app.endpoints()
         self.assertEqual(data["endpoints"][0]["label"], "v2")
+        self.assertEqual(data["domains"][0]["domain"], "api.example.test")
         self.assertNotIn("do-not-show", json.dumps(data))
+
+    def test_domain_without_endpoints_remains_in_management_inventory(self):
+        domain = self.root / "etc/getbible/endpoints/query.example.test"
+        domain.mkdir(parents=True)
+        (domain / "endpoint.conf").write_text("TYPE=runtime\nKIND=query\nLIVE=false\nSECRET=do-not-show\n")
+        result = self.app.endpoints()
+        self.assertEqual(result["endpoints"], [])
+        self.assertEqual(result["domains"][0]["domain"], "query.example.test")
+        self.assertEqual(result["domains"][0]["kind"], "query")
+        self.assertFalse(result["domains"][0]["live"])
+        self.assertNotIn("do-not-show", json.dumps(result))
+
+    def test_runtime_settings_inventory_contains_every_editable_nonsecret_key(self):
+        domain = self.root / "etc/getbible/endpoints/query.example.test"
+        (domain / "versions").mkdir(parents=True)
+        (domain / "endpoint.conf").write_text("TYPE=runtime\nKIND=query\nLIVE=false\n")
+        keys = broker.RUNTIME_KEYS.split("|")
+        (domain / "versions/v2.conf").write_text("\n".join(f"{key}=current-{key}" for key in keys) + "\nSECRET=do-not-show\n")
+        result = self.app.endpoints()
+        settings = result["endpoints"][0]["endpoint_settings"]
+        self.assertEqual(settings, {key: "current-" + key for key in keys})
+        self.assertNotIn("do-not-show", json.dumps(result))
 
     def test_browser_cannot_publish_private_files_or_symlinked_imports(self):
         imports = self.root / "var/lib/getbible/imports"

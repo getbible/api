@@ -242,7 +242,7 @@ gb_management_lock() {
     if [[ "${GB_MANAGER_LOCKED:-false}" == true && "$(readlink /proc/self/fd/7 2>/dev/null || true)" == "$GB_VAR/manage.lock" ]]; then
         return 0
     fi
-    local wait_seconds="${GB_MANAGEMENT_LOCK_WAIT_SECONDS-30}"
+    local wait_seconds="${GB_MANAGEMENT_LOCK_WAIT_SECONDS-30}" admin_job="${GB_ADMIN_JOB_ID:-}"
     [[ "$wait_seconds" =~ ^(0|[1-9][0-9]{0,2})$ ]] && (( wait_seconds <= 300 )) || {
         gb_warn 'GB_MANAGEMENT_LOCK_WAIT_SECONDS must be an integer between 0 and 300.'
         return 1
@@ -250,17 +250,28 @@ gb_management_lock() {
     gb_ensure_dir "$GB_VAR" 0755 || return 1
     exec 7>"$GB_VAR/manage.lock" || return 1
     if ! flock -n 7; then
-        if (( wait_seconds == 0 )); then
+        if [[ "$admin_job" =~ ^[A-Za-z0-9_-]{1,128}$ ]]; then
+            # A durable dashboard job may wait without keeping a web request
+            # open. Acquire once in this process; never replay a CLI command
+            # after a failure that might have followed a partial mutation.
+            printf '__GETBIBLE_ADMIN_JOB__:%s:waiting\n' "$admin_job"
+            flock 7 || return 1
+        elif (( wait_seconds == 0 )); then
             gb_warn 'Another endpoint management command is running; deferring this operation.'
             return 75
+        else
+            gb_warn "Waiting up to ${wait_seconds}s for the current endpoint management command."
+            flock -w "$wait_seconds" 7 || {
+                gb_warn 'Another endpoint management command is still running. Retry this operation shortly.'
+                return 75
+            }
         fi
-        gb_warn "Waiting up to ${wait_seconds}s for the current endpoint management command."
-        flock -w "$wait_seconds" 7 || {
-            gb_warn 'Another endpoint management command is still running. Retry this operation shortly.'
-            return 75
-        }
     fi
     GB_MANAGER_LOCKED=true
+    if [[ "$admin_job" =~ ^[A-Za-z0-9_-]{1,128}$ ]]; then
+        printf '__GETBIBLE_ADMIN_JOB__:%s:running\n' "$admin_job"
+    fi
+    return 0
 }
 
 gb_prune_backups() {
