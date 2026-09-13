@@ -112,6 +112,46 @@ export function endpointScopeLabel(spec) {
     return 'All endpoints';
 }
 
+export function runtimeDeploymentOptions(spec, values = {}, domain) {
+    const id = spec && operationId(spec);
+    if (!spec?.runtime_kinds || !['domain.deploy_runtime', 'endpoint.add_runtime'].includes(id)) return null;
+    const kind = id === 'endpoint.add_runtime' ? domain?.kind : values.kind;
+    const implementation = spec.runtime_kinds[kind];
+    const served = id === 'endpoint.add_runtime' ? new Set((domain?.endpoints || []).map(endpoint => endpoint.label)) : new Set();
+    const rootEndpoint = served.has('root');
+    const versions = rootEndpoint ? [] : (implementation?.versions || []).filter(version => !served.has(version));
+    const defaultVersion = versions.includes(implementation?.default_version) ? implementation.default_version : versions[0] || '';
+    const versionField = id === 'endpoint.add_runtime' ? 'endpoint' : 'version';
+    const version = values[versionField] || defaultVersion;
+    return {kind, kinds: Object.keys(spec.runtime_kinds), versions, defaultVersion, versionField, version, rootEndpoint,
+        repositories: (spec.repositories || []).filter(repository => repository.version === version)};
+}
+
+export function runtimeDeploymentFields(spec, values, domain) {
+    const options = runtimeDeploymentOptions(spec, values, domain);
+    return operationFields(spec).map(field => {
+        if (!options) return field;
+        if (field.name === 'kind') return {...field, choices: options.kinds};
+        if (field.name === options.versionField) return {...field, label: 'API version', choices: options.versions,
+            disabled: !options.kind || !options.versions.length,
+            description: !options.kind ? 'Choose a runtime kind to see its API versions.' : options.rootEndpoint ? 'This domain serves a root endpoint, which cannot coexist with version folders.' : !options.versions.length ? 'This domain already serves every available version.' : field.description};
+        if (field.name === 'repository') return {...field, type: 'runtime_repository', label: 'Local Bible source',
+            repositories: options.repositories, disabled: !options.kind || !options.versions.length};
+        return field;
+    });
+}
+
+export function changedOperationValues(spec, values, name, value, domain) {
+    const next = {...values, [name]: value};
+    const options = runtimeDeploymentOptions(spec, next, domain);
+    if (options && values[name] !== value && ['kind', 'version', 'endpoint', 'domain'].includes(name)) {
+        delete next.repository;
+        delete next._repositoryMode;
+        if (name === 'kind' || name === 'domain') next[options.versionField] = options.defaultVersion;
+    }
+    return next;
+}
+
 export function operationDefaults(spec, {domain, endpoint} = {}) {
     const fields = operationFields(spec);
     const values = Object.fromEntries(fields.filter(field => field.default !== undefined).map(field => [field.name, field.default]));
@@ -125,7 +165,10 @@ export function operationDefaults(spec, {domain, endpoint} = {}) {
         id === 'endpoint.change_source' ? {repository: endpointSettings.REPO_URL, ref: endpointSettings.REPO_REF, source_path: endpointSettings.REPO_PATH} :
         id === 'cloudflare.mode' ? {value: settings.CLOUDFLARE_MODE} :
         id === 'cloudflare.cache' ? {value: settings.CLOUDFLARE_CACHE} : {};
-    return {...values, ...Object.fromEntries(Object.entries(currentFields).filter(([, value]) => value !== undefined))};
+    const defaults = {...values, ...Object.fromEntries(Object.entries(currentFields).filter(([, value]) => value !== undefined))};
+    const runtime = runtimeDeploymentOptions(spec, defaults, domain);
+    if (runtime) defaults[runtime.versionField] = runtime.defaultVersion;
+    return defaults;
 }
 
 export function submittedArguments(spec, values) {

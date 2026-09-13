@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import {sections, operationLocations, inventoryDomains, sectionGroups, needsExistingDomain,
-    needsExistingEndpoint, operationDefaults, submittedArguments} from '../src/management.js';
+    needsExistingEndpoint, operationDefaults, submittedArguments, runtimeDeploymentOptions,
+    runtimeDeploymentFields, changedOperationValues} from '../src/management.js';
 
 const domainField = {name: 'domain', required: true};
 const endpointField = {name: 'endpoint', required: true};
@@ -53,4 +54,82 @@ test('current access and repository settings initialize the selected action with
 test('submission retains intentional empty settings and boolean false but excludes stale arguments', () => {
     const spec = action('runtime.set', [domainField, {name: 'endpoint'}, {name: 'value', allow_empty: true}, {name: 'force'}]);
     assert.deepEqual(submittedArguments(spec, {domain: 'query.example', endpoint: '', value: '', force: false, stale: 'secret'}), {domain: 'query.example', value: '', force: false});
+});
+
+const runtimeMetadata = {
+    runtime_kinds: {query: {versions: ['v2', 'v3'], default_version: 'v2'}, search: {versions: ['v2', 'v3'], default_version: 'v2'},
+        study: {versions: ['v4'], default_version: 'v4'}},
+    repositories: [
+        {value: '/srv/getbible/api.example', label: 'api.example (v2)', version: 'v2'},
+        {value: '/srv/getbible/api.example', label: 'api.example (v3)', version: 'v3'},
+        {value: '/srv/getbible/bible.example', label: 'bible.example (v3)', version: 'v3'},
+    ],
+};
+const deployRuntime = action('domain.deploy_runtime', [domainField, {name: 'kind'}, {name: 'version'}, {name: 'repository'}], runtimeMetadata);
+const addRuntime = action('endpoint.add_runtime', [domainField, endpointField, {name: 'repository'}], runtimeMetadata);
+
+test('runtime choices and defaults come from manifests without forcing the newest version', () => {
+    const initial = operationDefaults(deployRuntime);
+    assert.equal(initial.version, '');
+    assert.equal(runtimeDeploymentFields(deployRuntime, initial).find(field => field.name === 'version').disabled, true);
+    const query = changedOperationValues(deployRuntime, initial, 'kind', 'query');
+    assert.equal(query.version, 'v2');
+    const options = runtimeDeploymentOptions(deployRuntime, query);
+    assert.deepEqual(options.kinds, ['query', 'search', 'study']);
+    assert.deepEqual(options.versions, ['v2', 'v3']);
+    assert.equal(changedOperationValues(deployRuntime, query, 'kind', 'study').version, 'v4');
+});
+
+test('runtime repository selection includes only sources published for the selected version', () => {
+    const v2 = runtimeDeploymentOptions(deployRuntime, {kind: 'query', version: 'v2'});
+    assert.deepEqual(v2.repositories.map(repository => repository.label), ['api.example (v2)']);
+    const v3 = runtimeDeploymentOptions(deployRuntime, {kind: 'search', version: 'v3'});
+    assert.deepEqual(v3.repositories.map(repository => repository.label), ['api.example (v3)', 'bible.example (v3)']);
+    assert.equal(runtimeDeploymentFields(deployRuntime, {kind: 'query', version: 'v3'}).find(field => field.name === 'repository').type, 'runtime_repository');
+});
+
+test('changing kind, version or endpoint clears a previously selected or custom source', () => {
+    for (const [spec, name, value, domain] of [
+        [deployRuntime, 'version', 'v3'], [deployRuntime, 'kind', 'search'],
+        [addRuntime, 'endpoint', 'v3', {kind: 'query', endpoints: []}],
+    ]) {
+        const previous = {kind: 'query', version: 'v2', endpoint: 'v2', repository: '/srv/custom', _repositoryMode: 'manual'};
+        const next = changedOperationValues(spec, previous, name, value, domain);
+        assert.equal(next.repository, undefined);
+        assert.equal(next._repositoryMode, undefined);
+        assert.equal(previous.repository, '/srv/custom');
+    }
+    assert.equal(changedOperationValues(deployRuntime, {kind: 'query', version: 'v2', repository: '/srv/custom'}, 'version', 'v2').repository, '/srv/custom');
+});
+
+test('adding a runtime endpoint uses its domain kind and excludes existing versions', () => {
+    const domain = {domain: 'query.example', kind: 'query', endpoints: [{label: 'v2'}]};
+    const defaults = operationDefaults(addRuntime, {domain});
+    assert.deepEqual(defaults, {domain: 'query.example', endpoint: 'v3'});
+    const options = runtimeDeploymentOptions(addRuntime, defaults, domain);
+    assert.deepEqual(options.versions, ['v3']);
+    assert.deepEqual(options.repositories.map(repository => repository.version), ['v3', 'v3']);
+    domain.endpoints.push({label: 'v3'});
+    assert.deepEqual(runtimeDeploymentOptions(addRuntime, {}, domain).versions, []);
+    assert.equal(runtimeDeploymentFields(addRuntime, {}, domain).find(field => field.name === 'endpoint').disabled, true);
+});
+
+test('automatic sources omit the repository argument and custom paths pass through unchanged', () => {
+    assert.deepEqual(submittedArguments(deployRuntime, {domain: 'query.example', kind: 'query', version: 'v3', repository: '', _repositoryMode: 'published'}),
+        {domain: 'query.example', kind: 'query', version: 'v3'});
+    assert.deepEqual(submittedArguments(deployRuntime, {domain: 'query.example', kind: 'query', version: 'v3', repository: '/mnt/bibles/local-v3', _repositoryMode: 'manual'}),
+        {domain: 'query.example', kind: 'query', version: 'v3', repository: '/mnt/bibles/local-v3'});
+});
+
+test('a runtime root endpoint prevents adding version folders to the same domain', () => {
+    const domain = {domain: 'query.example', kind: 'query', endpoints: [{label: 'root'}]};
+    const defaults = operationDefaults(addRuntime, {domain});
+    const options = runtimeDeploymentOptions(addRuntime, defaults, domain);
+    assert.equal(options.rootEndpoint, true);
+    assert.deepEqual(options.versions, []);
+    assert.deepEqual(options.repositories, []);
+    assert.equal(defaults.endpoint, '');
+    const field = runtimeDeploymentFields(addRuntime, defaults, domain).find(field => field.name === 'endpoint');
+    assert.equal(field.disabled, true);
+    assert.match(field.description, /root endpoint.*cannot coexist with version folders/);
 });
