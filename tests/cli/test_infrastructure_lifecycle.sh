@@ -105,4 +105,67 @@ for action in 'restart getbible-telemetry.service' 'restart getbible-dashboard.s
     grep -qFx -- "$action" "$SERVICE_ACTIONS" || fail "missing lifecycle action: $action"
 done
 [[ "$(sha256sum "$GB_GLOBAL_CONF" "$GB_TELEGRAM_CONF")" == "$persisted" ]] || fail 'explicit infrastructure update mutated saved configuration'
+
+# Deployment metadata distinguishes copied source from the running process.
+dashboard_release_manifest > "$TEST_ROOT/source-release.json"
+cmp "$TEST_ROOT/source-release.json" "$GB_LIBEXEC/apps/dashboard/release.json" || fail 'installed release marker does not match reviewed manager source'
+# shellcheck disable=SC2329 # Called indirectly by dashboard_status.
+dashboard_health() {
+    printf '{"release":%s}\n' "$(cat "$GB_LIBEXEC/apps/dashboard/release.json")"
+}
+dashboard_status > "$TEST_ROOT/current-status.json"
+"$GB_PYTHON" - "$TEST_ROOT/current-status.json" <<'PY'
+import json, sys
+status = json.load(open(sys.argv[1]))
+assert status['running_latest'] is True
+assert status['manager_release'] == status['installed_release'] == status['serving_release']
+PY
+dashboard_health() { printf '{"release":{"version":"0.0.0","revision":"old","fingerprint":"old"}}\n'; }
+dashboard_status > "$TEST_ROOT/stale-status.json"
+"$GB_PYTHON" - "$TEST_ROOT/stale-status.json" <<'PY'
+import json, sys
+status = json.load(open(sys.argv[1]))
+assert status['running_latest'] is False
+assert status['serving_release']['revision'] == 'old'
+assert status['manager_release'] == status['installed_release']
+PY
+
+# Reporting services recover independently. A collector startup error cannot
+# prevent an operator from replacing the dashboard backend to diagnose it.
+sd_available() { return 0; }
+sd_enable() {
+    local IFS=' '
+    printf 'enable %s\n' "$*" >> "$SERVICE_ACTIONS"
+    [[ "$*" != *getbible-telemetry.service* ]]
+}
+: > "$SERVICE_ACTIONS"
+if infrastructure_update > "$TEST_ROOT/reporting-failure" 2>&1; then
+    fail 'full infrastructure update must report a failed collector'
+fi
+[[ "$GB_INFRASTRUCTURE_TELEMETRY_FAILED" == true ]] || fail 'collector-only failure must allow unrelated API deployment to proceed'
+grep -qFx 'restart getbible-dashboard.service' "$SERVICE_ACTIONS" || fail 'collector failure prevented dashboard recovery'
+"$GB_PYTHON" - "$SERVICE_ACTIONS" <<'PY'
+from pathlib import Path
+import sys
+calls = Path(sys.argv[1]).read_text().splitlines()
+reset = 'reset-failed getbible-telemetry.service getbible-dashboard.service getbible-admin.service'
+assert calls.index(reset) < calls.index('enable --now getbible-telemetry.service')
+PY
+infrastructure_update --dashboard > "$TEST_ROOT/dashboard-recovery" 2>&1 || fail 'dashboard update was blocked by unrelated collector failure'
+(
+    # shellcheck disable=SC2329 # Called indirectly by infrastructure_update.
+    infrastructure_install() { GB_TELEMETRY_START_FAILED=true; return 1; }
+    if infrastructure_update; then fail 'essential installation failure must fail the update'; fi
+    [[ "$GB_INFRASTRUCTURE_TELEMETRY_FAILED" == false ]] || fail 'essential installation failure was incorrectly treated as collector-only failure'
+)
+
+# Dashboard apply/update must use the code-replacement path, not only SIGHUP.
+dashboard_require_telegram() { :; }
+nginx_conflicts() { :; }
+dashboard_render() { mkdir -p "$1/sites-available"; : > "$1/sites-available/getbible-dashboard.conf"; }
+nginx_apply_stage() { return 0; }
+gb_global_set DASHBOARD_DOMAIN dashboard.example.test
+: > "$SERVICE_ACTIONS"
+dashboard_cli update
+grep -qFx 'restart getbible-dashboard.service' "$SERVICE_ACTIONS" || fail 'dashboard update did not replace the running backend'
 printf 'ok: native boot preparation, effective overrides, live reload, and explicit source refresh\n'

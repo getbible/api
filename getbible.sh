@@ -107,7 +107,9 @@ Observability
   logs archives DOMAIN | logs rotate
   logs reset --discard-history           start a fresh traffic history; keep raw logs and settings
   analytics [--window today|24h|7d|30d|all] [--domain D] [--json]
-  dashboard status|enable DOMAIN|apply|disable
+  dashboard status|enable DOMAIN|apply|update|disable
+                                         update installs/restarts the current dashboard;
+                                         status compares manager, installed and running releases
   dashboard password set [--stdin]|reset
   dashboard sessions [revoke ID|all] | blocks | unblock IP
                                          private management dashboard; password and

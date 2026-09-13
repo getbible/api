@@ -74,18 +74,23 @@ update_manager() {
 }
 
 update_domain() {
-    local domain="$1"
-    if [[ "${GB_INFRASTRUCTURE_UPDATED:-false}" != true ]]; then infrastructure_update || return 1; fi
+    local domain="$1" reporting_failed=0
+    if [[ "${GB_INFRASTRUCTURE_UPDATED:-false}" != true ]] && ! infrastructure_update; then
+        [[ "${GB_INFRASTRUCTURE_TELEMETRY_FAILED:-false}" == true ]] || return 1
+        reporting_failed=1
+        gb_warn 'Telemetry is unavailable; continuing the independent API update.'
+    fi
     if gb_is_docker && [[ "$(ep_get "$domain" TYPE)" == runtime ]]; then
         endpoint_source_type runtime
-        rt_update "$domain"
+        rt_update "$domain" || return 1
     else
-        endpoint_apply "$domain"
+        endpoint_apply "$domain" || return 1
     fi
+    return "$reporting_failed"
 }
 
 update_all() {
-    local commit dirty failures=0 count=0 domain
+    local commit dirty failures=0 count=0 domain reporting_failed=false
     commit="$(git -C "$GB_REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
     dirty="$(git -C "$GB_REPO_DIR" status --porcelain 2>/dev/null || true)"
     if [[ -n "$dirty" && "$GB_YES" != true ]]; then
@@ -93,7 +98,11 @@ update_all() {
     fi
     exec 8>"$GB_VAR/update.lock"
     flock -n 8 || gb_die "Another update is running."
-    infrastructure_update || return 1
+    if ! infrastructure_update; then
+        [[ "${GB_INFRASTRUCTURE_TELEMETRY_FAILED:-false}" == true ]] || return 1
+        reporting_failed=true
+        gb_warn 'Telemetry is unavailable; continuing the independent API updates.'
+    fi
     local GB_INFRASTRUCTURE_UPDATED=true
     gb_step "Updating every domain from commit $commit"
     tg_notify start "Update started" "getbible.sh update at commit $commit on $(ep_list | wc -l) domain(s)."
@@ -110,12 +119,13 @@ update_all() {
     if [[ -n "${GB_CLOUDFLARE_LOADED:-}" ]]; then
         cloudflare_refresh_ips_if_enabled || true
     fi
-    if (( failures == 0 )); then
+    if (( failures == 0 )) && [[ "$reporting_failed" == false ]]; then
         tg_notify ok "Update complete" "$count domain(s) are at commit $commit."
         gb_log "Update complete: $count domain(s) at $commit."
     else
-        tg_notify fail "Update finished with failures" "$failures of $count domain(s) failed at commit $commit. Check getbible.sh status."
+        tg_notify fail "Update finished with failures" "$failures of $count domain(s) failed at commit $commit. Telemetry unavailable: $reporting_failed. Check getbible.sh status and dashboard status."
         gb_warn "Update finished with $failures failure(s)."
+        [[ "$reporting_failed" == false ]] || gb_warn 'API updates finished, but telemetry still needs attention. Check dashboard status and the getbible-telemetry.service journal.'
         return 1
     fi
 }

@@ -315,3 +315,41 @@ grep -qx 'menu:continued' "$GB_TEST_EVENTS" || fail 'dry-run unexpectedly closed
 assert_source_only
 
 printf 'ok: source-only self-update, tracked upstream, SSH, worktrees, menu, refusals and dry-run\n'
+
+# Reporting is auxiliary: a collector failure is visible in the final outcome
+# while otherwise valid API updates still run. Essential install failures abort.
+# shellcheck disable=SC2329 # These hooks are called by the sourced update helpers.
+(
+    export GB_REPO_DIR="$ROOT" GB_VAR="$T/update-state" GB_YES=true
+    mkdir -p "$GB_VAR"
+    # shellcheck source=/dev/null
+    source "$ROOT/src/lib/update.sh"
+    gb_warn() { :; }
+    gb_step() { :; }
+    gb_log() { :; }
+    gb_die() { exit 1; }
+    gb_is_docker() { return 1; }
+    tg_notify() { :; }
+    logs_render_rotation() { :; }
+    ep_list() { printf '%s\n' api.example.test query.example.test; }
+    endpoint_apply() { printf '%s\n' "$1" >> "$T/applied"; }
+    infrastructure_update() {
+        GB_INFRASTRUCTURE_TELEMETRY_FAILED="$reporting_failure"
+        return "$infrastructure_result"
+    }
+    reporting_failure=true infrastructure_result=1
+    : > "$T/applied"
+    if update_domain api.example.test; then fail 'reporting failure was hidden'; fi
+    assert_eq "$(cat "$T/applied")" api.example.test 'reporting blocked domain update'
+    : > "$T/applied"
+    if update_all; then fail 'all-domain update hid reporting failure'; fi
+    assert_eq "$(cat "$T/applied")" $'api.example.test\nquery.example.test' 'reporting blocked remaining domains'
+    reporting_failure=false
+    : > "$T/applied"
+    if update_all; then fail 'essential infrastructure failure was ignored'; fi
+    [[ ! -s "$T/applied" ]] || fail 'domains updated after essential infrastructure failure'
+    infrastructure_result=0
+    update_all || fail 'healthy update failed'
+    assert_eq "$(cat "$T/applied")" $'api.example.test\nquery.example.test' 'healthy update missed a domain'
+)
+printf 'ok: reporting failures remain visible without blocking API updates\n'
