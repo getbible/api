@@ -1,0 +1,47 @@
+version: 2
+
+# Updates are proposed for review. Releases still require the version decision
+# in .github/PULL_REQUEST_TEMPLATE.md and the existing acceptance checks.
+updates:
+  - package-ecosystem: pip
+    directories:
+      - /src/apps/common
+      - /src/apps/query
+      - /src/apps/search
+      - /src/python
+    schedule:
+      interval: daily
+    open-pull-requests-limit: 10
+    groups:
+      python-security:
+        applies-to: security-updates
+        patterns: ["*"]
+      python-versions:
+        applies-to: version-updates
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /src/apps/dashboard/ui
+    schedule:
+      interval: daily
+    open-pull-requests-limit: 10
+    groups:
+      dashboard-security:
+        applies-to: security-updates
+        patterns: ["*"]
+      dashboard-versions:
+        applies-to: version-updates
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
