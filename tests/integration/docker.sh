@@ -2,6 +2,7 @@
 # Disposable acceptance of the actual production Compose profile and image.
 # Uses fixture scripture only; no Cloudflare or certificate requests are made.
 set -Eeuo pipefail
+trap 'printf "Docker acceptance failed at line %s (exit %s).\n" "$LINENO" "$?" >&2' ERR
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 command -v docker >/dev/null
 command -v haproxy >/dev/null
@@ -225,7 +226,13 @@ container env GB_CI_DISPOSABLE_HOST=1 "GB_TEST_QUERY_TOKEN=$TOKEN" /usr/bin/pyth
 container /usr/share/getbible/api/docker/healthcheck.sh
 
 # The selected image must deploy both supported API versions using local data.
-# Existing assertions above intentionally run with the original two endpoints.
+# The reduced-capacity checks above cover two endpoints. Restore the original
+# capacity for four endpoints and their reserved domain-update overlap.
+compose down --timeout 120
+export GETBIBLE_MEMORY_LIMIT=4g
+compose up -d --wait --wait-timeout 240
+CONTAINER="$(compose ps -q getbible)"
+wait_image_update "$BASE_VERSION"
 docker network disconnect "${PROJECT}_default" "$CONTAINER"
 for kind in query search; do
     manager version add "$kind.example.test" v3 --repository /srv/getbible/ci-fixture \
