@@ -35,6 +35,65 @@ Cloudflare responses served without contacting this origin do not appear in
 local history. A separate Cloudflare analytics integration would be needed to
 measure them.
 
+## Stored request classification
+
+The collector stores endpoint kind, version, operation, translation, book IDs
+and book names when it ingests each request. Runtime-resolved fields take
+precedence over path inference. Private response metadata carries resolved
+translation and book identities into nginx access records, including origin
+cache hits; nginx hides these headers from public responses. Query and search
+text comes from their request paths/parameters and runtime records.
+
+Static translation files, `books.json`, chapter/book files and their `.sha`
+requests identify their translation. Numeric book IDs are resolved using the
+local translation's `v2/<translation>/books.json`, including additional books.
+The collector caches this small metadata; reports use stored names and do not
+read or download Bible data. Unknown names retain their book ID. Runtime
+defaults are recorded as the translation actually selected (normally KJV).
+Global discovery files, `robots.txt` and other non-scripture requests do not
+become KJV requests merely because their translation is absent.
+
+| Usage ranking | Included origin traffic |
+| --- | --- |
+| Popular translations | Successful static scripture/translation metadata and runtime query/search operations |
+| Frequent searches | Successful operations on search endpoints, including references entered as searches |
+| Scripture references | Successful scripture operations on query endpoints |
+| Books of the Bible | Successful scripture operations with resolved book identities |
+
+Success means HTTP 2xx or 304. Errors, redirects, preflights and unrelated
+requests remain in Traffic and endpoint totals, but do not inflate these usage
+rankings. Each ranking carries its own scope into the matching Traffic view.
+Referrers and user agents are stored separately, with independent rankings,
+exact filters and substring searches. Their audience counts include errors so
+operators can investigate attempted access. Missing referrers are not replaced
+by user agents. Traffic also supports a free-text search across request fields.
+
+## Start a fresh history
+
+The corrected classification uses telemetry schema 2. An earlier schema must
+be explicitly reset; it is never silently converted or discarded by an update.
+Apply the reviewed manager/runtime changes, then run this once if the collector
+reports an earlier schema:
+
+```sh
+getbible logs reset --discard-history
+```
+
+If the first update stopped because the earlier-schema collector could not
+start, reset it and repeat `getbible update` to finish applying every endpoint.
+Reset once more after that update to exclude observations made during the
+transition. The reset clears failed-service restart limits before recovery.
+
+The CLI **Logs > Start a fresh traffic history** menu and dashboard
+**Manage > Logs > History** expose the same action. It stops telemetry and
+dashboard services while resetting canonical requests, events and metrics,
+then restores services which were active or enabled. Authentication, settings,
+API data and producer log files are retained. Producer offsets and the journal
+cursor are retained, and a collection cutoff prevents earlier buffered records
+from repopulating the new history. The reset itself is recorded as a retention
+event. A reset is irreversible for the canonical history; it does not promise
+that already-pruned producer files can reconstruct it.
+
 ## Retention and durability
 
 | Setting | Default | Purpose |

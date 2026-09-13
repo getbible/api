@@ -103,6 +103,7 @@ Pages and OpenAPI (every domain page, endpoint page and document is public)
 Observability
   logs DOMAIN [access|error|app|journal] [ENDPOINT] [--lines N]
   logs archives DOMAIN | logs rotate
+  logs reset --discard-history           start a fresh traffic history; keep raw logs and settings
   analytics [--window today|24h|7d|30d|all] [--domain D] [--json]
   dashboard status|enable DOMAIN|apply|disable
   dashboard password set [--stdin]|reset
@@ -395,6 +396,11 @@ cmd_logs() {
     local domain="${1:-}" which="${2:-access}" lines=200 label=""
     case "$domain" in
         rotate) gb_system_init; logs_rotate_now; return ;;
+        reset)
+            [[ $# -eq 2 && "$2" == --discard-history ]] || gb_die "logs reset requires --discard-history"
+            gb_system_init
+            logs_reset_history --discard-history
+            return ;;
         archives) logs_archives "${2:?domain}"; return ;;
         "") gb_die "logs DOMAIN [access|error|app|journal] [ENDPOINT] [--lines N]" ;;
     esac
