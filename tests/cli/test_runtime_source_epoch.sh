@@ -23,7 +23,7 @@ cfg_set "$(ep_version_conf "$domain" v2)" APP_VERSION v2
 first="$(rt_source_epoch "$domain" v2)"
 site="$(nginx_site_file "$domain")"
 # shellcheck disable=SC2016 # These are literal nginx variables.
-printf 'server {\n    # operator marker\n    proxy_cache_key "%s:$scheme$request_method$host$request_uri"; # getbible-source=v2\n}\n' "$first" > "$site"
+printf 'server {\n    # operator marker\n    proxy_cache_key "%s:telemetry2:$scheme$request_method$host$request_uri"; # getbible-source=v2\n}\n' "$first" > "$site"
 gb_ledger_record "$site"
 ln -s release-second "$repository/next"
 mv -Tf "$repository/next" "$repository/v2"

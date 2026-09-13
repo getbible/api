@@ -4,6 +4,7 @@ import json
 import unittest
 from dataclasses import replace
 from unittest.mock import patch
+from urllib.parse import unquote
 
 from getbible_api_common.settings import LibrarianSettings, ServiceSettings
 from getbible_query_api.app import create_app
@@ -38,6 +39,8 @@ class QueryAppTest(EndpointCase, unittest.TestCase):
         self.assertEqual(second.data, b"")
         self.assertEqual(second.headers["ETag"], first.headers["ETag"])
         self.assertEqual(second.headers["Cache-Control"], first.headers["Cache-Control"])
+        self.assertEqual(json.loads(unquote(second.headers["X-GetBible-Telemetry-Books"])), [1])
+        self.assertEqual(second.headers["X-GetBible-Telemetry-Operation"], "scripture")
 
     def test_head_and_changed_scripture_preserve_validator_semantics(self) -> None:
         path = "/v2/test/Ge1:1"
@@ -154,7 +157,8 @@ class QueryAppTest(EndpointCase, unittest.TestCase):
                 self.assertEqual(response.headers["CDN-Cache-Control"], "no-store")
 
     def test_security_headers_and_request_id(self) -> None:
-        response = self.client.get("/v2/test/Ge1:1", headers={"X-Request-ID": "trace-1", "X-GetBible-Token-Id": "tk_abc"})
+        response = self.client.get("/v2/test/Ge1:1", headers={"X-Request-ID": "trace-1", "X-GetBible-Token-Id": "tk_abc",
+                                   "Referer": "https://reader.example/page", "User-Agent": "Reader Test"})
         self.assertEqual(response.headers["X-Request-ID"], "trace-1")
         self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
         self.assertEqual(response.headers["Access-Control-Allow-Origin"], "*")
@@ -163,6 +167,10 @@ class QueryAppTest(EndpointCase, unittest.TestCase):
         self.assertEqual(entry["translation"], "test")
         self.assertEqual(entry["token"], "tk_abc")
         self.assertEqual(entry["verses"], 1)
+        self.assertEqual(entry["endpoint_kind"], "query")
+        self.assertEqual(entry["referrer"], "https://reader.example/page")
+        self.assertEqual(entry["user_agent"], "Reader Test")
+        self.assertEqual(response.headers["X-GetBible-Telemetry-Translation"], "test")
 
     def test_invalid_request_id_is_replaced(self) -> None:
         response = self.client.get("/healthz", headers={"X-Request-ID": "bad id"})

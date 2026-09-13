@@ -30,7 +30,8 @@ class AnalyticsTests(unittest.TestCase):
                           "auth": "anonymous"}, endpoint="query.example.test", source="edge", record_key="e1")
             store.append({"time": 1700000001, "request_id": "one", "event": "request",
                           "method": "GET", "path": "/v2/", "status": 200, "version": "v2",
-                          "translation": "kjv", "reference": "John 3:16", "duration_ms": 15},
+                          "translation": "kjv", "reference": "John 3:16", "duration_ms": 15,
+                          "operation": "scripture", "endpoint_kind": "query"},
                          endpoint="query.example.test", source="runtime", record_key="r1")
             store.append_metric({"cpu": {"usage_percent": 10}, "memory": {"current_bytes": 1024}}, stamp=1700000002)
             store.db.commit()
@@ -64,6 +65,20 @@ class AnalyticsTests(unittest.TestCase):
                       {"start": "2024-01-01T00:00:00", "end": "2024-01-02T00:00:00Z"}):
             with self.assertRaises(ValueError):
                 query_range(query)
+
+    def test_audience_ranks_distinct_fields_and_keeps_filters(self):
+        with TelemetryStore(self.path) as store:
+            store.append({"time": 1700000001, "request_id": "audience", "method": "GET", "uri": "/robots.txt",
+                          "status": 404, "referer": "https://reader.example/page", "user_agent": "Robot Test"},
+                         endpoint="query.example.test", source="edge", record_key="audience")
+            store.db.commit()
+        result = self.analytics.report("audience", {**self.query, "q": "robot", "top": "1000"})
+        self.assertEqual(result["referrers"][0]["value"], "https://reader.example/page")
+        agent = result["user_agents"][0]
+        self.assertEqual(agent["value"], "Robot Test")
+        self.assertEqual(len(self.analytics.report("requests", {**self.query, **agent["filters"]})["items"]), agent["calls"])
+        with self.assertRaises(ValueError):
+            self.analytics.report("audience", {**self.query, "top": "1001"})
 
 
 class ConfigurationTests(unittest.TestCase):

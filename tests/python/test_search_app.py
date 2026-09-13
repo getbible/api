@@ -167,6 +167,27 @@ class SearchAppTest(EndpointCase, unittest.TestCase):
         self.assertEqual(entry["kind"], "search")
         self.assertEqual(entry["criteria"]["limit"], 2)
         self.assertEqual(entry["query"], "limit=2")
+        self.assertEqual(entry["endpoint_kind"], "search")
+        self.assertEqual(entry["books"], [1])
+
+    def test_default_post_translation_is_logged_after_resolution(self) -> None:
+        response = self.client.post("/v2", json={"q": "beginning"})
+        self.assertEqual(response.status_code, 200)
+        entry = json.loads(self.log_lines()[-1])
+        self.assertEqual((entry["translation"], entry["search"], entry["operation"]), ("test", "beginning", "search"))
+        self.assertEqual(response.headers["X-GetBible-Telemetry-Translation"], "test")
+        response = self.client.get("/v2/test/Ge1:1")
+        self.assertEqual(response.headers["X-GetBible-Telemetry-Operation"], "reference")
+        self.assertEqual(response.headers["X-GetBible-Telemetry-Endpoint-Kind"], "search")
+
+    def test_invalid_translation_cannot_expand_proxy_response_headers(self) -> None:
+        response = self.client.post("/v2", json={"q": "beginning", "translation": "漢" * 2000})
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.get_json()["code"], "translation_not_found")
+        self.assertFalse(any(name.lower().startswith("x-getbible-telemetry-") for name in response.headers.keys()))
+        entry = json.loads(self.log_lines()[-1])
+        self.assertEqual(entry["status"], 404)
+        self.assertEqual(entry["translation"], "漢" * 2000)
 
     def test_capacity_gate_answers_503(self) -> None:
         gate = self.app.extensions["getbible"]

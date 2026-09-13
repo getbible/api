@@ -6,7 +6,9 @@
         proxy_hide_header Cache-Control;
         add_header Cache-Control "private, no-store" always;
 {{/IF}}        proxy_cache_methods GET HEAD;
-        proxy_cache_key "{{SOURCE_EPOCH}}:$scheme$request_method$host$request_uri"; # getbible-source={{LABEL}}
+        # New responses carry resolved traffic metadata, including book IDs.
+        # Retire older responses without touching the runtime corpus caches.
+        proxy_cache_key "{{SOURCE_EPOCH}}:telemetry2:$scheme$request_method$host$request_uri"; # getbible-source={{LABEL}}
         proxy_cache_valid 200 {{CACHE_TTL}}s;
         proxy_cache_valid 301 302 300s;
         proxy_cache_valid 404 10s;

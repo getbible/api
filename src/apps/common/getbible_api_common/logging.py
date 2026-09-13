@@ -16,7 +16,7 @@ EXTRA_FIELDS = (
     "references", "verses", "search", "criteria", "kind", "total", "returned", "expensive",
     "cache_stale", "error_type", "problem", "dropped",
     "auth_state", "worker_pid", "in_flight", "source_generation", "resident_bytes_estimate",
-    "books", "matched_books",
+    "books", "matched_books", "referrer", "endpoint_kind",
 )
 
 
