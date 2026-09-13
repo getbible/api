@@ -111,12 +111,18 @@ in the [v3 builder schemas](https://github.com/getbible/v3_builder/tree/master/s
 - `/{version}/{translation}/{reference}` is the only data route. It takes no
   parameters; a query string answers `400 parameters_not_accepted`.
 - References follow the librarian's grammar; several are joined with `;`.
-  One unresolvable reference rejects the whole request with `400
-  invalid_reference` (the librarian's behaviour, kept on purpose).
-- Every shorter form is a `301` to the canonical route: `/{version}` and
-  `/{version}/{translation}` go to the default reference (`Mat7:7`), `/{reference}`
-  and `/{translation}/{reference}` fill in `kjv` for a missing or unknown
-  translation and the default reference for an unresolvable one.
+  One unresolvable reference rejects the whole request with an RFC 9457
+  `404` problem document (`invalid_reference`, or `not_found` when the requested
+  scripture is unavailable).
+- A missing reference, such as `/{version}/{translation}`, returns `404
+  missing_reference`. An explicitly supplied unknown translation returns `404
+  translation_not_found`. No missing or invalid input is replaced by a default
+  verse or another translation.
+- Valid shorter references redirect with `301` to their canonical route.
+  `/{reference}` and `/{version}/{reference}` use the configured default
+  translation when no translation was supplied. `/{translation}/{reference}`
+  retains the supplied translation. Public documentation and health routes
+  remain available independently of scripture requests.
 - Responses are the librarian's chapter-keyed object, with an ETag and public
   caching in open/metered mode. Token-only responses use `private, no-store`
   and bypass both reads and writes of nginx's shared response cache.
@@ -263,6 +269,12 @@ remove a version and choose the default. Supported `set` keys: `WORKERS`,
 `THREADS`, `WARM_TRANSLATIONS`, `DEFAULT_TRANSLATION`, `DEFAULT_REFERENCE`,
 `ALLOWED_TRANSLATIONS`, `REPOSITORY`, `CACHE_TTL`. Values are checked before
 activation.
+
+For query endpoints, the saved `DEFAULT_REFERENCE` setting (environment
+`QUERY_DEFAULT_REFERENCE`, CLI `--default-reference`) configures the readiness
+probe and its documentation example only. Its default remains `Mat7:7`; it is
+never substituted for a missing or unresolved client reference. This query
+error policy does not change search's reference detection or search results.
 
 `update DOMAIN` preserves each endpoint's selected exact Python patch while
 applying checked-out code and dependency changes. Explicit `runtime DOMAIN

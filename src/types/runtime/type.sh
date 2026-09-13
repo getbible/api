@@ -1449,7 +1449,7 @@ rt_settings_menu() {
     cp -p -- "$backup" "$stage" || return 1
     for key in WORKERS:"Gunicorn workers" THREADS:"Threads per worker" WARM_TRANSLATIONS:"Translations to warm at start (comma separated)" \
                CPU_QUOTA:"CPU quota (auto shares the container CPU allowance)" MEMORY_CACHE_TTL:"Resident cache lifetime in seconds" CACHE_TTL:"HTTP cache lifetime in seconds" \
-               DEFAULT_TRANSLATION:"Default translation" DEFAULT_REFERENCE:"Default reference (query only)" \
+               DEFAULT_TRANSLATION:"Default translation" DEFAULT_REFERENCE:"Readiness probe reference (query only)" \
                ALLOWED_TRANSLATIONS:"Allowed translations (comma separated, empty for all)"; do
         text="${key#*:}"; key="${key%%:*}"
         value="$(ui_input "$domain $label" "$text" "$(cfg_get "$stage" "$key")")" || { rm -f -- "$backup" "$stage"; return 0; }

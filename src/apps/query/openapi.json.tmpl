@@ -1,7 +1,7 @@
 {
   "info": {
     "contact": {"name":"getBible","url":"https://getbible.net"},
-    "description": "Scripture references in, verses out. The reference is the last path segment; multiple references are separated by semicolons. The endpoint takes no query parameters. Documentation, OpenAPI, liveness and readiness are public without a token. Conditional GET and HEAD are supported; API data uses the domain's selected access policy.",
+    "description": "Scripture references in, verses out. The reference is the last path segment; multiple references are separated by semicolons. Missing or unresolved references and explicitly supplied unknown translations return RFC 9457 HTTP 404 errors; requests never fall back to another verse. The endpoint takes no query parameters. Documentation, OpenAPI, liveness and readiness are public without a token. Conditional GET and HEAD are supported; API data uses the domain's selected access policy.",
     "title": "getBible query endpoint",
     "version": "{{VERSION}}"
   },
@@ -24,7 +24,8 @@
           "503": {"$ref":"#/components/responses/Problem"}
         },
         "security": [],
-        "summary": "Readiness: read a verse from the default translation"
+        "description": "Reads the configured readiness reference {{DEFAULT_REFERENCE}} in the default translation. This reference is only a health probe, never a fallback for scripture requests.",
+        "summary": "Readiness: read the configured probe reference"
       }
     },
 {{#UNLESS IS_ROOT}}    "/{reference}": {
@@ -32,7 +33,7 @@
         "operationId": "redirectReference",
         "parameters": [{"in":"path","name":"reference","required":true,"schema":{"type":"string"}}],
         "responses": {
-          "301": {"description":"Location: {{PREFIX}}{{DEFAULT_TRANSLATION}}/{reference}; an unresolvable reference falls back to {{DEFAULT_REFERENCE}}"},
+          "301": {"description":"A valid reference redirects to {{PREFIX}}{{DEFAULT_TRANSLATION}}/{reference}. Missing or unresolved references return 404."},
           "400": {"$ref":"#/components/responses/Problem"},
           "401": {"$ref":"#/components/responses/Problem"},
           "404": {"$ref":"#/components/responses/Problem"},
@@ -56,7 +57,7 @@
         ],
         "responses": {
           "301": {
-            "description": "Redirect to {{PREFIX}}{translation}/{reference}, using defaults for unrecognised values.",
+            "description": "A valid reference in a known translation redirects to {{PREFIX}}{translation}/{reference}. Unknown translations and missing or unresolved references return 404.",
             "headers": {"Location":{"schema":{"type":"string"}}}
           },
           "400": {"$ref":"#/components/responses/Problem"},
@@ -75,9 +76,8 @@
     },{{/UNLESS}}
 {{#UNLESS IS_ROOT}}    "/{{VERSION}}": {
       "get": {
-        "operationId": "redirectVersion",
+        "operationId": "missingReference",
         "responses": {
-          "301": {"description":"Location: {{PREFIX}}{{DEFAULT_TRANSLATION}}/{{DEFAULT_REFERENCE}}"},
           "400": {"$ref":"#/components/responses/Problem"},
           "401": {"$ref":"#/components/responses/Problem"},
           "404": {"$ref":"#/components/responses/Problem"},
@@ -89,7 +89,8 @@
           "503": {"$ref":"#/components/responses/Problem"},
           "504": {"$ref":"#/components/responses/Problem"}
         },
-        "summary": "Redirect to the default translation and reference"
+        "description": "This API request supplies no scripture reference and returns a 404 missing_reference problem document. The public documentation page is at {{PREFIX}}.",
+        "summary": "A scripture reference is required"
       }
     },{{/UNLESS}}
     "{{PREFIX}}openapi.json": {
@@ -118,7 +119,7 @@
         "operationId": "redirectTranslation",
         "parameters": [{"in":"path","name":"translation","required":true,"schema":{"type":"string"}}],
         "responses": {
-          "301": {"description":"Location: {{PREFIX}}{translation}/{{DEFAULT_REFERENCE}}"},
+          "301": {"description":"Only when this segment is a valid scripture reference: redirect to {{PREFIX}}{{DEFAULT_TRANSLATION}}/{reference}. A translation without a reference returns 404 missing_reference; an unresolved reference returns a 404 problem document."},
           "400": {"$ref":"#/components/responses/Problem"},
           "401": {"$ref":"#/components/responses/Problem"},
           "404": {"$ref":"#/components/responses/Problem"},
@@ -130,12 +131,13 @@
           "503": {"$ref":"#/components/responses/Problem"},
           "504": {"$ref":"#/components/responses/Problem"}
         },
-        "summary": "Redirect to the default reference in a translation (or, for a reference, to the default translation)"
+        "summary": "Resolve a reference in the default translation; a translation alone returns 404"
       }
     },
     "{{PREFIX}}{translation}/{reference}": {
       "get": {
         "operationId": "getScripture",
+        "description": "Every reference must resolve in the requested translation. A missing or unresolved reference returns a 404 problem document, including a mixed list containing an unresolved reference. Unknown translations also return 404. No default verse is substituted.",
         "parameters": [
           {"description":"Translation abbreviation, e.g. {{DEFAULT_TRANSLATION}}","in":"path","name":"translation","required":true,"schema":{"type":"string"}},
           {

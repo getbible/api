@@ -2,9 +2,9 @@
 
     GET /{version}/{translation}/{reference}   -> the librarian's select()
 
-Every shorter form is a permanent redirect to that canonical path, with the
-default translation and the default reference substituted for anything that
-does not resolve. The endpoint takes no parameters: a query string is a 400.
+Shorter forms redirect only when the requested reference resolves. Missing or
+unresolved references return 404; no default scripture is substituted. The
+endpoint takes no parameters: a query string is a 400.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from __future__ import annotations
 from urllib.parse import quote
 
 from flask import Flask, Response, g, request
+from getbible import ReferenceValidationError
 
 from getbible_api_common.control import install_control
 from getbible_api_common import detect
@@ -19,7 +20,7 @@ from getbible_api_common.bible import query_client
 from getbible_api_common.health import register_health
 from getbible_api_common.http import install_request_hooks, json_response, redirect_permanent
 from getbible_api_common.logging import configure_logging
-from getbible_api_common.problems import ProblemError, register_error_handlers
+from getbible_api_common.problems import ProblemError, problem, register_error_handlers
 
 from .config import Settings
 
@@ -33,6 +34,11 @@ def create_app(settings: Settings | None = None) -> Flask:
     install_request_hooks(app, settings.service, logger)
     register_error_handlers(app, logger)
 
+    @app.errorhandler(ReferenceValidationError)
+    def reference_not_found(error: ReferenceValidationError) -> Response:
+        # This HTTP policy belongs to query; search retains its own errors.
+        return problem(app, 404, "invalid_reference", str(error))
+
     bible = query_client(
         settings.librarian,
         reference_cache_limit=settings.reference_cache_limit,
@@ -45,18 +51,36 @@ def create_app(settings: Settings | None = None) -> Flask:
     install_control(app, bible, settings.librarian, "query")
     version = settings.librarian.version
     default_translation = settings.service.default_translation
-    default_reference = settings.default_reference
     max_length = settings.service.max_input_length
     allowed = settings.service.translation_allowed
 
     def canonical(translation: str, reference: str) -> str:
         return "/" + "/".join(quote(part, safe=":;,") for part in (version, translation, reference))
 
-    def translation_or_default(segment: str) -> str:
-        return segment.casefold() if detect.is_translation(bible, segment, allowed) else default_translation
+    def missing_reference() -> Response:
+        raise ProblemError(404, "missing_reference",
+                           f"No scripture reference was supplied. Request /{version}/{{translation}}/{{reference}}.")
 
-    def reference_or_default(segment: str, translation: str) -> str:
-        return segment if detect.is_reference(bible, segment, translation, max_length) else default_reference
+    def select_reference(translation: str, reference: str) -> dict:
+        code = translation.casefold()
+        g.translation = code
+        g.reference = reference
+        if not allowed(code):
+            raise ProblemError(404, "translation_not_found", f"Translation ({translation}) not found.")
+        if len(reference) > max_length:
+            raise ProblemError(404, "invalid_reference", f"Reference cannot exceed {max_length} characters.")
+        result = bible.select(reference, code)
+        if not any(chapter.get("verses") for chapter in result.values()):
+            raise ProblemError(404, "invalid_reference",
+                               "The requested reference did not resolve to any scripture. Check the reference and try again.")
+        return result
+
+    def redirect_reference(translation: str, reference: str) -> Response:
+        # Resolve first: a syntactically plausible but unavailable reference
+        # must not send callers to another request or substitute scripture.
+        select_reference(translation, reference)
+        g.operation = "redirect"
+        return redirect_permanent(canonical(translation.casefold(), reference))
 
     @app.before_request
     def _no_parameters() -> None:
@@ -64,35 +88,37 @@ def create_app(settings: Settings | None = None) -> Flask:
             raise ProblemError(400, "parameters_not_accepted",
                                "This endpoint takes no parameters. Put the translation and the reference in the path.")
 
-    register_health(app, bible, default_translation, logger, reference=default_reference)
+    register_health(app, bible, default_translation, logger, reference=settings.default_reference)
 
     @app.get("/")
     def index() -> Response:
-        g.operation = "redirect"
-        return redirect_permanent(canonical(default_translation, default_reference))
+        return missing_reference()
 
     @app.get("/<segment>")
     def one_segment(segment: str) -> Response:
-        g.operation = "redirect"
+        g.operation = "scripture"
+        g.version = version
         if detect.is_known_version(segment, version):
-            return redirect_permanent(canonical(default_translation, default_reference))
+            return missing_reference()
         if detect.looks_like_version(segment):
             raise ProblemError(404, "unknown_version", f"API version {segment} is not served here; use {version}.")
         if detect.is_translation(bible, segment, allowed):
-            return redirect_permanent(canonical(segment.casefold(), default_reference))
-        return redirect_permanent(canonical(default_translation, reference_or_default(segment, default_translation)))
+            g.translation = segment.casefold()
+            return missing_reference()
+        return redirect_reference(default_translation, segment)
 
     @app.get("/<first>/<second>")
     def two_segments(first: str, second: str) -> Response:
-        g.operation = "redirect"
+        g.operation = "scripture"
+        g.version = version
         if detect.is_known_version(first, version):
             if detect.is_translation(bible, second, allowed):
-                return redirect_permanent(canonical(second.casefold(), default_reference))
-            return redirect_permanent(canonical(default_translation, reference_or_default(second, default_translation)))
+                g.translation = second.casefold()
+                return missing_reference()
+            return redirect_reference(default_translation, second)
         if detect.looks_like_version(first):
             raise ProblemError(404, "unknown_version", f"API version {first} is not served here; use {version}.")
-        translation = translation_or_default(first)
-        return redirect_permanent(canonical(translation, reference_or_default(second, translation)))
+        return redirect_reference(first, second)
 
     @app.get("/<requested_version>/<translation>/<reference>")
     def scripture(requested_version: str, translation: str, reference: str) -> Response:
@@ -100,14 +126,7 @@ def create_app(settings: Settings | None = None) -> Flask:
         g.version = requested_version
         if requested_version != version:
             raise ProblemError(404, "unknown_version", f"API version {requested_version} is not served here; use {version}.")
-        code = translation.casefold()
-        g.translation = code
-        if not allowed(code):
-            raise ProblemError(404, "translation_not_found", f"Translation ({translation}) not found.")
-        if len(reference) > max_length:
-            raise ProblemError(400, "invalid_reference", f"Reference cannot exceed {max_length} characters.")
-        g.reference = reference
-        result = bible.select(reference, code)
+        result = select_reference(translation, reference)
         g.books = sorted({chapter["book_nr"] for chapter in result.values() if "book_nr" in chapter})
         g.references = len([part for part in reference.split(";") if part.strip()])
         g.verses = sum(len(chapter["verses"]) for chapter in result.values())

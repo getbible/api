@@ -130,6 +130,30 @@ class ContractTest(unittest.TestCase):
                 self.assertTrue(schemas["VerseSpan"]["additionalProperties"])
                 self.assertNotIn("editorial", schemas["Scripture"]["additionalProperties"]["properties"])
 
+    def test_query_contract_documents_missing_and_unresolved_references_as_404(self) -> None:
+        for root, version in product((False, True), ("v2", "v3")):
+            with self.subTest(root=root, version=version):
+                doc = contract("query", root, version=version)
+                prefix = "/" if root else f"/{version}/"
+                scripture = doc["paths"][prefix + "{translation}/{reference}"]["get"]
+                self.assertIn("404", scripture["responses"])
+                self.assertIn("400", scripture["responses"])
+                self.assertIn("No default verse is substituted", scripture["description"])
+                translation = doc["paths"][prefix + "{translation}"]["get"]
+                self.assertIn("404 missing_reference", translation["responses"]["301"]["description"])
+                for path, operations in doc["paths"].items():
+                    if "get" not in operations:
+                        continue
+                    redirect = operations["get"]["responses"].get("301")
+                    if redirect:
+                        self.assertNotIn("Ge1:1", json.dumps(redirect), path)
+                if not root:
+                    missing = doc["paths"][f"/{version}"]["get"]
+                    self.assertIn("404", missing["responses"])
+                    self.assertNotIn("301", missing["responses"])
+                    self.assertIn("missing_reference", missing["description"])
+                self.assertIn("only a health probe", doc["paths"]["/readyz"]["get"]["description"])
+
     def test_documentation_renders_selected_version_and_source_metadata(self) -> None:
         for kind, root, version in product(("query", "search"), (False, True), ("v2", "v3")):
             with self.subTest(kind=kind, root=root, version=version):
@@ -155,6 +179,11 @@ class ContractTest(unittest.TestCase):
                 self.assertIn("<code>tokens</code>", rendered)
                 self.assertIn("<code>spans</code>", rendered)
                 self.assertIn("<code>editorial</code>", rendered)
+                if kind == "query":
+                    self.assertIn("<td>404</td><td>missing_reference</td>", rendered)
+                    self.assertIn("<td>404</td><td>invalid_reference</td>", rendered)
+                    self.assertNotIn("<td>400</td><td>invalid_reference</td>", rendered)
+                    self.assertIn("No request is replaced with a default verse", rendered)
 
 
 class ResponseContractTest(EndpointCase, unittest.TestCase):
