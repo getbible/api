@@ -132,19 +132,6 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Require private repository and private existing package
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          test "$(gh api "repos/$GITHUB_REPOSITORY" --jq .private)" = true
-          if gh api "orgs/$GITHUB_REPOSITORY_OWNER/packages/container/api" > /tmp/package.json 2>/tmp/package-error; then
-            test "$(jq -r .visibility /tmp/package.json)" = private
-          elif ! grep -q 'HTTP 404' /tmp/package-error; then
-            cat /tmp/package-error >&2
-            exit 1
-          fi
-          # New GHCR packages are private by default. The source label links
-          # the package to this private repository; never change visibility.
       - name: Push the image that passed acceptance
         env:
           IMAGE_ARCH: ${{ matrix.arch }}

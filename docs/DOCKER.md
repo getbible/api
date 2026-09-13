@@ -1,6 +1,6 @@
 # Docker deployment
 
-The production deployment pulls a private, prepared image. The Docker host
+The production deployment pulls a prepared image. The Docker host
 does not clone the manager repository or build a Dockerfile. A single
 container runs systemd, nginx, the existing menu, static synchronization,
 query/search runtimes and their maintenance services. OPNsense HAProxy remains
@@ -46,14 +46,14 @@ and service test on the actual host, not only a successful image build.
 ## 2. Obtain deployment files and authenticate
 
 Download [compose.yaml](../compose.yaml) and [.env.example](../.env.example)
-from the authenticated private repository on your workstation, then copy them
+from the repository on your workstation, then copy them
 into the deployment directory on the Docker host, such as
 `/srv/getbible-deployment`. Name the settings file `.env`. Use the files from
 the same release as the image; the server needs no Git checkout or build tools.
 
-The image is `ghcr.io/getbible/api`. It stays private. Authenticate Docker once
-with a dedicated account's read-only package token, using the same host user
-that runs Compose. Docker retains that login for subsequent pulls; selecting
+The image is `ghcr.io/getbible/api`. For a private package, authenticate Docker
+once with a dedicated account's read-only package token, using the same host
+user that runs Compose. Docker retains that login for subsequent pulls; selecting
 `GETBIBLE_IMAGE_TAG=latest` does not require authenticating again for each image.
 See [private registry access](REGISTRY_ACCESS.md) for account/package access,
 token permissions, credential storage and the complete login/update commands.
@@ -432,7 +432,7 @@ and dashboard checks still run on pull requests before merge.
 Each accepted main merge builds once per architecture. Both AMD64 and ARM64
 must pass the complete image, offline runtime, service, proxy and persistence
 acceptance tests. Publication loads those exact tested images and publishes
-their private commit-SHA tags and multi-architecture manifest. It does not
+their commit-SHA tags and multi-architecture manifest. It does not
 rebuild them in the publication jobs.
 
 The tracked [VERSION](../VERSION) file controls the release number. Every
@@ -460,10 +460,11 @@ number only when its complete manifest exactly matches the accepted image;
 a conflicting manifest stops the job. Use a new version for a changed numbered
 release rather than deleting or recreating an existing one.
 
-Private GHCR publication requires the organization to permit package publishing
-and the package to grant the intended pull access. The workflow verifies that
-the repository and existing package remain private. Native ARM64 runners must
-also be available under the organization's GitHub Actions policy. Wait for the
+GHCR publication requires the organization to permit package publishing and
+the package to grant the intended pull access. Manage repository and package
+visibility in GitHub settings; the workflow does not check or change either.
+Native ARM64 runners must also be available under the organization's GitHub
+Actions policy. Wait for the
 merged commit's publication jobs to succeed before pulling its new images.
 Endpoint `v2`/`v3` names are independent API contracts, not image versions.
 

@@ -2,7 +2,7 @@ name: getbible
 
 services:
   getbible:
-    # Production deployment only pulls the prebuilt private image. No checkout
+    # Production deployment only pulls the prebuilt image. No checkout
     # or Dockerfile is required on the server. See docs/DOCKER.md for login.
     image: ${GETBIBLE_IMAGE_REPOSITORY:-ghcr.io/getbible/api}:${GETBIBLE_IMAGE_TAG:-2.2.0}
     restart: unless-stopped

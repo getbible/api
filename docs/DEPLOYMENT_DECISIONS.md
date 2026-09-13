@@ -95,7 +95,7 @@ belong in [CLOUDFLARE.md](CLOUDFLARE.md).
 
 ## 5. Prepared images and explicit releases
 
-GitHub Actions builds the image and publishes it privately to GitHub Container
+GitHub Actions builds the image and publishes it to GitHub Container
 Registry. The server Compose file pulls it and does not build it. The image
 contains OS dependencies, management code, reviewed Python distributions and
 the pinned runtime dependency artifacts needed to deploy the offered runtime
