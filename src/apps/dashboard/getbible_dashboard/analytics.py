@@ -5,7 +5,9 @@ import time
 
 
 FILTERS = frozenset({"endpoint", "version", "status", "auth", "ip", "path", "translation",
-                     "book", "search", "reference", "cache", "method", "token", "user_agent", "operation"})
+                     "book", "search", "reference", "cache", "method", "token", "user_agent", "operation",
+                     "endpoint_kind", "referrer", "successful", "origin_only", "usage", "q",
+                     "referrer_contains", "user_agent_contains", "path_contains"})
 
 
 def timestamp(value, default):
@@ -49,6 +51,13 @@ class Analytics:
         start, end = query_range(query)
         filters = {key: value for key, value in query.items() if key in FILTERS and value != ""}
         with self.store() as store:
+            if kind == "audience":
+                top = int(query.get("top", 100))
+                if not 1 <= top <= 1000:
+                    raise ValueError("top must be between 1 and 1000")
+                return {"referrers": store.breakdown("referrer", start, end, filters=filters, top=top),
+                        "user_agents": store.breakdown("user_agent", start, end, filters=filters, top=top),
+                        "start": start, "end": end, "top": top}
             if kind == "overview":
                 result = store.summary(start, end, filters=filters)
                 metrics = store.metrics(max(start, end - 300), end, bucket_seconds=5)

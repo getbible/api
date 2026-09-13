@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import signal
 import sys
 import time
+from pathlib import Path
 
 from .collector import Collector
-from .store import TelemetryStore, timestamp
+from .store import TelemetryStore, reset_history, timestamp
+from .catalog import LocalCatalog
 from .settings import numeric_setting
 
 
@@ -25,9 +28,12 @@ def _number(name: str):
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("collect", "summary", "series", "requests", "events",
-                                          "metrics", "storage", "endpoints", "export", "rotate"))
+                                          "metrics", "storage", "endpoints", "export", "rotate", "reset"))
     parser.add_argument("--db", default=_env("DB", "/var/lib/getbible/telemetry/traffic.sqlite3"))
     parser.add_argument("--log-root", default=_env("LOG_ROOT", "/var/log/getbible"))
+    parser.add_argument("--registry", default=_env("REGISTRY", "/etc/getbible/endpoints"))
+    parser.add_argument("--data-root", default=_env("DATA_ROOT", "/srv/getbible"))
+    parser.add_argument("--discard-history", action="store_true", help="Explicitly discard old history when using reset")
     parser.add_argument("--from", dest="start", default="")
     parser.add_argument("--to", dest="end", default="")
     parser.add_argument("--endpoint")
@@ -51,10 +57,28 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-journal", action="store_true", help="Disable collection of getBible systemd service events")
     parser.add_argument("--systemctl", default="/usr/bin/systemctl")
     args = parser.parse_args(argv)
+    if args.action == "reset":
+        if not args.discard_history:
+            parser.error("reset requires --discard-history; stop the telemetry collector before resetting")
+        path = Path(args.db)
+        path.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+        with path.with_suffix(".collector.lock").open("a", encoding="ascii") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                parser.error("stop the telemetry collector before resetting history")
+            os.umask(0o027)
+            result = reset_history(args.db)
+            os.chmod(args.db, 0o640)
+            print(json.dumps(result))
+        return 0
+    if args.discard_history:
+        parser.error("--discard-history is only valid with reset")
     end = timestamp(args.end) if args.end else time.time()
     start = timestamp(args.start) if args.start else end - 86400
     os.umask(0o027)
-    with TelemetryStore(args.db, readonly=args.action not in {"collect", "rotate"}) as store:
+    with TelemetryStore(args.db, readonly=args.action not in {"collect", "rotate"},
+                        catalog=LocalCatalog(args.registry, args.data_root)) as store:
         if args.action in {"collect", "rotate"}:
             collector = Collector(store, args.log_root, batch_size=args.batch_size,
                                   rotate_bytes=int(args.rotate_mib * 1024**2),

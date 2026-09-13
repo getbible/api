@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import re
 import time
 import uuid
 from typing import Any
+from urllib.parse import quote
 
 from flask import Flask, Response, g, request
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -52,6 +54,17 @@ def install_request_hooks(app: Flask, settings: ServiceSettings, logger: logging
         )
         duration_ms = round((time.perf_counter() - g.get("started", time.perf_counter())) * 1000, 3)
         operation = g.get("operation")
+        endpoint_kind = settings.prefix.casefold()
+        # nginx stores these private headers with the cached response and
+        # includes them in its access log, so a cache HIT retains the exact
+        # runtime resolution without running the librarian again.
+        semantic = {"translation": g.get("translation"), "version": g.get("version"),
+                    "endpoint_kind": endpoint_kind, "operation": operation, "books": g.get("books")}
+        if 200 <= response.status_code < 300 or response.status_code == 304:
+            for key, value in semantic.items():
+                if value is not None:
+                    encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":")) if isinstance(value, (list, dict)) else str(value)
+                    response.headers["X-GetBible-Telemetry-" + key.replace("_", "-")] = quote(encoded, safe="")
         if operation in {"health", "readiness"} and response.status_code < 500:
             return response
         extra: dict[str, Any] = {
@@ -70,6 +83,8 @@ def install_request_hooks(app: Flask, settings: ServiceSettings, logger: logging
             "source_generation": g.get("source_generation"),
             "resident_bytes_estimate": g.get("resident_bytes_estimate"),
             "user_agent": request.headers.get("User-Agent", ""),
+            "referrer": request.headers.get("Referer", ""),
+            "endpoint_kind": endpoint_kind,
             "response_bytes": response.calculate_content_length(),
             "operation": operation,
             "version": g.get("version"),

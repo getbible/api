@@ -52,7 +52,7 @@ class TelemetryTest(unittest.TestCase):
         for source_order in (("runtime", "edge"), ("edge", "runtime")):
             rid = "-".join(source_order)
             runtime = edge(rid, event="request", translation="kjv", reference="John 3:16",
-                           duration_ms=7, criteria={"words": "love"}, status=201)
+                           duration_ms=7, criteria={"words": "love"}, status=201, operation="scripture", endpoint_kind="query")
             for source in source_order:
                 self.append(runtime if source == "runtime" else edge(rid), source=source)
             self.append(edge(rid))
@@ -91,8 +91,8 @@ class TelemetryTest(unittest.TestCase):
 
     def test_static_discovery_metadata_and_runtime_paths_are_not_translations(self):
         paths = ["/versions.json", "/v2/translations.json", "/v2/openapi.json",
-                 "/v2/index.json", "/v2/metadata.json", "/v2/kjv/books.json",
-                 "/v2/kjv/43/chapters.json", "/v2/search/1.json", "/v2/query/1/1.json",
+                 "/v2/index.json", "/v2/metadata.json",
+                 "/v2/search/1.json", "/v2/query/1/1.json",
                  "/v2/search", "/healthz", "/v2/kjv/43/3.json/extra",
                  "/v2/kjv.json/43.json", "/v2/kjv/zero.json"]
         for index, path in enumerate(paths):

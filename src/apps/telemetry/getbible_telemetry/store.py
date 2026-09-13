@@ -17,7 +17,9 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
+
+from .catalog import LocalCatalog
 
 _SECRET_KEYS = frozenset({
     "authorization", "proxy_authorization", "password", "passwd", "otp",
@@ -40,7 +42,35 @@ _DIMENSIONS = {
     "translation": "translation", "book": "book", "search": "search",
     "reference": "reference", "cache": "cache", "method": "method",
     "token": "token_id", "user_agent": "user_agent", "operation": "operation",
+    "referrer": "referrer", "endpoint_kind": "endpoint_kind",
 }
+_USAGE = frozenset({"translation", "book", "search", "reference"})
+SCHEMA_VERSION = 2
+
+
+def reset_history(path: str | os.PathLike[str]) -> dict[str, Any]:
+    """Explicit clean start; retain ingestion cursors, never remodel old rows.
+
+    The caller must hold the collector lifetime lock. A cutoff also excludes
+    old buffered producer records that have not yet reached a source cursor.
+    """
+    cutoff = time.time()
+    db = sqlite3.connect(path, timeout=5)
+    try:
+        db.executescript("BEGIN IMMEDIATE;"
+                        "DROP TABLE IF EXISTS requests; DROP TABLE IF EXISTS events;"
+                        "DROP TABLE IF EXISTS metrics; DROP TABLE IF EXISTS retention;" + _SCHEMA)
+        db.execute("DELETE FROM metadata WHERE key!='journal_cursor'")
+        db.execute("INSERT INTO metadata(key,value) VALUES('collection_started',?)", (json.dumps(cutoff),))
+        db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        db.execute("INSERT INTO retention(stamp,reason,request_rows,event_rows,metric_rows,detail) "
+                   "VALUES(?, 'explicit_reset', 0, 0, 0, ?)",
+                   (cutoff, "Operator requested a fresh traffic history; producer cursors retained and earlier buffered requests excluded."))
+        db.commit()
+        db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        db.close()
+    return {"schema_version": SCHEMA_VERSION, "collection_started": cutoff, "history_reset": True}
 
 
 def _key(value: str) -> str:
@@ -63,7 +93,7 @@ not a bearer token. Credentials embedded in URLs are always redacted.
         value = _BEARER.sub("Bearer [REDACTED]", value)
         value = _SECRET_ASSIGNMENT.sub(lambda match: match[1] + "=[REDACTED]", value)
         value = _TELEGRAM_BOT.sub("bot[REDACTED]", value)
-        if _key(field) in {"uri", "query", "referer", "url"}:
+        if _key(field) in {"uri", "query", "referer", "referrer", "url"}:
             return redact_url(value, query_only=_key(field) == "query")
         return value
     return value
@@ -114,29 +144,30 @@ def _text(value: Any) -> str:
 
 
 def _static_bible_path(pieces: list[str]) -> tuple[str, str]:
-    """Recognise corpus files without reading a repository on the ingest path."""
+    """Recognise text, translation metadata and checksum paths."""
     if not pieces:
         return "", ""
-    translation = pieces[0].removesuffix(".json")
+    translation = re.sub(r"\.(json|sha)$", "", pieces[0]).casefold()
     if (translation in _STATIC_METADATA
-            or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", translation)):
+            or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", translation)):
         return "", ""
-    if len(pieces) == 1 and pieces[0].endswith(".json"):
+    if len(pieces) == 1 and pieces[0].endswith((".json", ".sha")):
         return translation, ""
-    if pieces[0] != translation:
+    if pieces[0].casefold() != translation:
         return "", ""
-    # Book and chapter files have numeric identities. Translation metadata,
-    # documentation and arbitrary deeper paths remain available in request
-    # details without being counted as Bible text downloads.
-    if len(pieces) == 2 and re.fullmatch(r"[1-9][0-9]*\.json", pieces[1]):
-        return translation, pieces[1].removesuffix(".json")
+    if len(pieces) == 2 and pieces[1] in {"books.json", "books.sha", "checksums.json", "checksums.sha"}:
+        return translation, ""
+    if len(pieces) == 2 and re.fullmatch(r"[1-9][0-9]*\.(json|sha)", pieces[1]):
+        return translation, pieces[1].split(".", 1)[0]
     if (len(pieces) == 3 and re.fullmatch(r"[1-9][0-9]*", pieces[1])
-            and re.fullmatch(r"[1-9][0-9]*\.json", pieces[2])):
+            and (re.fullmatch(r"[1-9][0-9]*\.(json|sha)", pieces[2])
+                 or pieces[2] in {"chapters.json", "chapters.sha", "checksums.json", "checksums.sha"})):
         return translation, pieces[1]
     return "", ""
 
 
-def _normalise(entry: dict[str, Any], endpoint: str, source: str, record_key: str) -> dict[str, Any]:
+def _normalise(entry: dict[str, Any], endpoint: str, source: str, record_key: str,
+               catalog: LocalCatalog) -> dict[str, Any]:
     entry = redact(entry)
     endpoint = endpoint or _text(entry.get("endpoint") or entry.get("host"))
     uri = _text(entry.get("uri") or entry.get("path"))
@@ -146,19 +177,72 @@ def _normalise(entry: dict[str, Any], endpoint: str, source: str, record_key: st
         params = dict(parse_qsl(query, keep_blank_values=True))
     except ValueError:
         params = {}
-    pieces = [part for part in path.split("/") if part]
+    pieces = [unquote(part) for part in path.split("/") if part]
     version = _text(entry.get("version"))
     if pieces and re.fullmatch(r"v\d+", pieces[0]):
         version = version or pieces.pop(0)
-    translation = _text(entry.get("translation") or params.get("translation"))
-    book = _text(entry.get("books") or entry.get("book") or params.get("books") or params.get("book"))
-    if not translation:
-        translation, static_book = _static_bible_path(pieces)
+    configured = catalog.endpoint(endpoint, version)
+    # Edge semantic headers are emitted by the runtime and kept with nginx's
+    # cached response. They describe the resolved request even on cache HITs.
+    semantic = {}
+    for key in ("translation", "books", "reference", "search", "operation", "version", "endpoint_kind"):
+        value = entry.get("resolved_" + key)
+        if value not in (None, "", "-"):
+            semantic[key] = redact(unquote(str(value)), field=key)
+        elif key in entry:
+            semantic[key] = entry[key]
+    version = _text(semantic.get("version")) or version
+    operation = _text(semantic.get("operation"))
+    kind = _text(semantic.get("endpoint_kind")) or configured["kind"]
+    if not kind and source == "runtime":
+        logger = _text(entry.get("logger"))
+        kind = "query" if logger == "getbible.query" or operation == "scripture" else "search" if logger == "getbible.search" or operation in {"search", "reference"} else ""
+    translation = _text(semantic.get("translation")).casefold()
+    reference = _text(semantic.get("reference"))
+    search = _text(semantic.get("search"))
+    book = semantic.get("books") or entry.get("book") or []
+    static_translation, static_book = _static_bible_path(pieces)
+    if not kind and static_translation:
+        kind = "static"
+    if kind == "static":
+        translation = translation or static_translation
         book = book or static_book
-    reference = _text(entry.get("reference") or entry.get("references") or params.get("ref")
-                      or params.get("reference") or params.get("references"))
-    search = _text(entry.get("search") or entry.get("criteria") or params.get("search")
-                   or params.get("query") or params.get("q"))
+        operation = operation or ("static" if static_translation else "http")
+    elif kind in {"query", "search"}:
+        # For uncached requests the runtime supplies all resolved facts. Path
+        # inference is limited to canonical forms; it never guesses what the
+        # librarian would resolve from a reference or from a search body.
+        canonical = len(pieces) == 2 and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", pieces[0].casefold())
+        if canonical:
+            translation = translation or pieces[0].casefold()
+            if kind == "query":
+                reference = reference or pieces[1]
+                operation = operation or "scripture"
+            else:
+                search = search or pieces[1]
+                operation = operation or "search"
+        elif kind == "search" and params.get("q") and len(pieces) <= 1:
+            translation = translation or (pieces[0] if pieces else params.get("translation") or configured["default_translation"])
+            search = search or params["q"]
+            operation = operation or "search"
+        if operation in {"scripture", "search", "reference"} and not translation:
+            translation = configured["default_translation"]
+        if operation in {"scripture", "search", "reference"} and not version:
+            version = configured["version"]
+        if kind == "search":
+            search = search.strip()
+    translation = translation.casefold()
+    if isinstance(book, str):
+        try:
+            book = json.loads(book) if book.startswith("[") else [book]
+        except ValueError:
+            book = [book]
+    if not isinstance(book, (list, tuple)):
+        book = [book]
+    names = catalog.books(endpoint, version, translation) if translation and book else {}
+    aliases = {name.casefold(): number for number, name in names.items()}
+    books = list(dict.fromkeys(aliases.get(str(value).casefold(), str(value)) for value in book if str(value)))
+    book_names = {number: names[number] for number in books if number in names}
     token_id = _text(entry.get("token_id") or entry.get("token"))
     if not _TOKEN_ID.fullmatch(token_id):
         token_id = ""
@@ -182,9 +266,11 @@ def _normalise(entry: dict[str, Any], endpoint: str, source: str, record_key: st
         "bytes": int(_number(entry.get("bytes", entry.get("response_bytes")))),
         "remote_addr": address, "token_id": token_id, "auth": auth,
         "cache": _text(entry.get("cache")), "translation": translation,
-        "book": book, "reference": reference, "search": search,
-        "operation": _text(entry.get("operation")),
+        "book": _text(books) if books else "", "book_names": _text(book_names),
+        "reference": reference, "search": search, "endpoint_kind": kind,
+        "operation": operation,
         "user_agent": _text(entry.get("user_agent")),
+        "referrer": "" if entry.get("referrer", entry.get("referer")) == "-" else _text(entry.get("referrer") or entry.get("referer")),
         "payload": json.dumps(entry, ensure_ascii=False, separators=(",", ":")),
     }
 
@@ -203,6 +289,7 @@ CREATE TABLE IF NOT EXISTS requests (
     remote_addr TEXT NOT NULL, token_id TEXT NOT NULL, auth TEXT NOT NULL,
     cache TEXT NOT NULL, translation TEXT NOT NULL, book TEXT NOT NULL,
     reference TEXT NOT NULL, search TEXT NOT NULL, operation TEXT NOT NULL, user_agent TEXT NOT NULL,
+    endpoint_kind TEXT NOT NULL, referrer TEXT NOT NULL, book_names TEXT NOT NULL,
     edge_json TEXT, runtime_json TEXT, UNIQUE(endpoint, request_id)
 );
 CREATE INDEX IF NOT EXISTS requests_time ON requests(stamp, id);
@@ -230,10 +317,11 @@ class TelemetryStore:
     """One connection per process/thread; use a context manager to close it."""
 
     def __init__(self, path: str | os.PathLike[str], *, readonly: bool = False,
-                 query_timeout: float = 15.0) -> None:
+                 query_timeout: float = 15.0, catalog: LocalCatalog | None = None) -> None:
         self.path = Path(path)
         self.readonly = readonly
         self.query_timeout = max(0.1, query_timeout)
+        self.catalog = catalog or LocalCatalog()
         self._read_deadline = time.monotonic() + self.query_timeout if readonly else None
         if readonly:
             self.db = sqlite3.connect(self.path.absolute().as_uri() + "?mode=ro", uri=True, timeout=2)
@@ -245,6 +333,10 @@ class TelemetryStore:
         self.db.execute("PRAGMA busy_timeout=2000")
         self.db.execute("PRAGMA temp_store=FILE")
         self.db.execute("PRAGMA cache_size=-8192")
+        schema = self.db.execute("PRAGMA user_version").fetchone()[0]
+        if schema not in ({SCHEMA_VERSION} if readonly else {0, SCHEMA_VERSION}):
+            self.db.close()
+            raise RuntimeError("Traffic history uses an earlier schema. Run getbible logs reset --discard-history to start fresh; no history conversion is performed.")
         if readonly:
             self.db.execute("PRAGMA query_only=ON")
         else:
@@ -255,8 +347,10 @@ class TelemetryStore:
             self.db.execute("PRAGMA synchronous=FULL")
             self.db.execute("PRAGMA wal_autocheckpoint=1000")
             self.db.executescript(_SCHEMA)
-            self.db.execute("PRAGMA user_version=1")
+            self.db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             self.db.commit()
+        cutoff = self.db.execute("SELECT value FROM metadata WHERE key='collection_started'").fetchone()
+        self.collection_started = float(json.loads(cutoff[0])) if cutoff else 0
 
     def __enter__(self) -> "TelemetryStore":
         return self
@@ -274,6 +368,8 @@ class TelemetryStore:
     def append(self, entry: dict[str, Any], *, endpoint: str, source: str,
                record_key: str) -> None:
         """Append within the caller's transaction; no per-record commit/fsync."""
+        if self.collection_started and timestamp(entry.get("time")) < self.collection_started:
+            return
         if source not in {"edge", "runtime"} or (source == "runtime" and entry.get("event") != "request"):
             clean = redact(entry)
             self.db.execute(
@@ -284,7 +380,7 @@ class TelemetryStore:
                  separators=(",", ":")), record_key),
             )
             return
-        row = _normalise(entry, endpoint, source, record_key)
+        row = _normalise(entry, endpoint, source, record_key, self.catalog)
         payload = row.pop("payload")
         row["edge_json"] = payload if source == "edge" else None
         row["runtime_json"] = payload if source == "runtime" else None
@@ -292,8 +388,8 @@ class TelemetryStore:
         # Edge owns transport facts. Semantic fields prefer nonempty runtime
         # facts, regardless of which buffered producer arrives first.
         transport = {"stamp", "method", "path", "query", "status", "duration_ms", "bytes",
-                     "remote_addr", "token_id", "auth", "cache", "user_agent"}
-        semantic = {"version", "translation", "book", "reference", "search", "operation"}
+                     "remote_addr", "token_id", "auth", "cache", "user_agent", "referrer"}
+        semantic = {"version", "translation", "book", "book_names", "reference", "search", "operation", "endpoint_kind"}
         assignments = []
         for name in columns:
             if name in {"endpoint", "request_id"}:
@@ -304,7 +400,7 @@ class TelemetryStore:
                 assignments.append(f"{name}=CASE WHEN excluded.edge_json IS NOT NULL "
                                    f"OR requests.edge_json IS NULL THEN excluded.{name} ELSE requests.{name} END")
             elif name in semantic:
-                assignments.append(f"{name}=CASE WHEN excluded.{name}!='' AND "
+                assignments.append(f"{name}=CASE WHEN excluded.{name} NOT IN ('','{{}}') AND "
                                    f"(excluded.runtime_json IS NOT NULL OR requests.{name}='') "
                                    f"THEN excluded.{name} ELSE requests.{name} END")
         self.db.execute(
@@ -338,6 +434,30 @@ class TelemetryStore:
                 terms.append("requests." + name + "=?")
                 values.append(value)
         for name, value in (filters or {}).items():
+            if name == "usage":
+                if value not in _USAGE:
+                    raise ValueError("unsupported usage ranking")
+                terms.append("(status BETWEEN 200 AND 299 OR status=304)")
+                terms.append("edge_json IS NOT NULL")
+                terms.append("method IN ('GET','HEAD','POST')")
+                if value == "search":
+                    terms.append("endpoint_kind='search' AND operation IN ('search','reference')")
+                elif value == "reference":
+                    terms.append("endpoint_kind='query' AND operation='scripture'")
+                else:
+                    terms.append("operation IN ('static','scripture','search','reference')")
+                continue
+            if name in {"successful", "origin_only"}:
+                if str(value).lower() not in {"true", "false", "1", "0"}:
+                    raise ValueError(name + " must be true or false")
+                if str(value).lower() in {"true", "1"}:
+                    terms.append("(status BETWEEN 200 AND 299 OR status=304)" if name == "successful" else "edge_json IS NOT NULL")
+                continue
+            if name in {"q", "referrer_contains", "user_agent_contains", "path_contains"}:
+                columns = ["path", "query", "translation", "reference", "search", "remote_addr", "referrer", "user_agent", "book_names"] if name == "q" else [name.removesuffix("_contains")]
+                terms.append("(" + " OR ".join("instr(lower(requests." + column + "),lower(?))>0" for column in columns) + ")")
+                values.extend([str(value)] * len(columns))
+                continue
             if name not in _DIMENSIONS:
                 raise ValueError("unsupported filter: " + name)
             if name == "book":
@@ -354,21 +474,59 @@ class TelemetryStore:
                   filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         if dimension not in _DIMENSIONS:
             raise ValueError("unsupported dimension: " + dimension)
+        scoped = dict(filters or {})
+        if dimension in _USAGE:
+            scoped["successful"] = "true"
+        if dimension == "search":
+            scoped["endpoint_kind"] = "search"
+        elif dimension == "reference":
+            scoped["endpoint_kind"] = "query"
+        # Scope constraints intersect with existing view filters; selecting a
+        # query domain must not silently replace that filter with search.
         where, values = self._where(start, end, endpoint, version, filters=filters)
+        extra, extra_values = self._where(start, end, origin_only=True,
+                                         filters={key: value for key, value in scoped.items() if key not in (filters or {}) or (filters or {})[key] != value})
+        where += " AND " + extra
+        values.extend(extra_values)
+        if dimension == "search":
+            where += " AND operation IN ('search','reference')"
+        elif dimension == "reference":
+            where += " AND operation='scripture'"
+        elif dimension in {"translation", "book"}:
+            where += " AND operation IN ('static','scripture','search','reference')"
         self._deadline()
         column = _DIMENSIONS[dimension]
+        if dimension in _USAGE | {"referrer", "user_agent"}:
+            where += f" AND {column} NOT IN ('','-','[]')"
+        if dimension in _USAGE:
+            where += " AND method IN ('GET','HEAD','POST')"
         if dimension == "book":
-            return [dict(row) for row in self.db.execute(
+            rows = [dict(row) for row in self.db.execute(
                 "SELECT CAST(b.value AS TEXT) AS value,count(DISTINCT requests.id) AS calls,sum(bytes) AS bytes,"
-                "avg(duration_ms) AS duration_ms,sum(status>=500) AS errors FROM requests,"
+                "avg(duration_ms) AS duration_ms,sum(status>=500) AS errors,"
+                "min((SELECT n.value FROM json_each(book_names) n WHERE n.key=CAST(b.value AS TEXT))) AS label FROM requests,"
                 "json_each(CASE WHEN json_valid(book) AND substr(book,1,1)='[' THEN book ELSE json_array(book) END) b "
                 f"WHERE {where} GROUP BY b.value ORDER BY calls DESC,value LIMIT ?",
                 [*values, max(1, min(int(top), 1000))])]
-        return [dict(row) for row in self.db.execute(
-            f"SELECT {column} AS value, count(*) AS calls, sum(bytes) AS bytes, "
-            f"avg(duration_ms) AS duration_ms, sum(status>=500) AS errors "
-            f"FROM requests WHERE {where} GROUP BY {column} ORDER BY calls DESC,value LIMIT ?",
-            [*values, max(1, min(int(top), 1000))])]
+        else:
+            rows = [dict(row) for row in self.db.execute(
+                f"SELECT {column} AS value, count(*) AS calls, sum(bytes) AS bytes, "
+                f"avg(duration_ms) AS duration_ms, sum(status>=500) AS errors "
+                f"FROM requests WHERE {where} GROUP BY {column} ORDER BY calls DESC,value LIMIT ?",
+                [*values, max(1, min(int(top), 1000))])]
+        for row in rows:
+            row["filters"] = {**scoped, dimension: row["value"], "origin_only": "true"}
+            if endpoint is not None:
+                row["filters"]["endpoint"] = endpoint
+            if version is not None:
+                row["filters"]["version"] = version
+            # Exact operation restrictions must also survive the drill-down.
+            if dimension in _USAGE:
+                inherited = scoped.get("usage")
+                row["filters"]["usage"] = inherited if inherited in {"search", "reference"} else dimension
+            if dimension == "book" and not row["label"]:
+                row["label"] = "Book " + row["value"] if row["value"].isdigit() else row["value"]
+        return rows
 
     def endpoints(self) -> list[dict[str, Any]]:
         """Observed endpoint/version pairs, including rows awaiting an edge log."""
@@ -464,6 +622,7 @@ class TelemetryStore:
             item = dict(record)
             item["edge"] = json.loads(item.pop("edge_json") or "null")
             item["runtime"] = json.loads(item.pop("runtime_json") or "null")
+            item["book_names"] = json.loads(item["book_names"])
             rows.append(item)
         return {"items": rows, "next_cursor": rows[-1]["id"] if len(rows) == limit else None}
 

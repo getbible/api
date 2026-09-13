@@ -211,7 +211,6 @@ def create_app(settings: Settings | None = None) -> Flask:
         g.operation = "search"
         criteria = parse_criteria(values)
         g.criteria = dataclasses.asdict(criteria)
-        g.books = list(criteria.books)
         g.expensive = criteria.expensive
         held = gate.acquire(criteria.expensive)
         try:
@@ -221,6 +220,9 @@ def create_app(settings: Settings | None = None) -> Flask:
                 semaphore.release()
         result["query"]["kind"] = "search"
         g.matched_books = sorted({item["book_nr"] for item in result.get("matches", []) if "book_nr" in item})
+        # Record the book identities actually served; requested aliases and
+        # filters remain available verbatim in criteria.books.
+        g.books = g.matched_books
         g.total = result["query"].get("total")
         g.returned = result["query"].get("returned")
         g.cache_stale = result["query"].get("cache", {}).get("stale")
