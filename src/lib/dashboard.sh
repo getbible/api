@@ -6,6 +6,84 @@ GB_DASHBOARD_LOADED=1
 dashboard_config() { printf '%s/dashboard.conf\n' "$GB_RUN"; }
 dashboard_domain() { gb_global DASHBOARD_DOMAIN; }
 
+# Identify the reviewed source independently of a running Python process. The
+# service captures this marker at startup, so a configuration reload cannot
+# claim that newly copied application code is already running.
+dashboard_release_manifest() (
+    local version revision fingerprint
+    cd "$GB_REPO_DIR" || return 1
+    version="$(cat VERSION)" || return 1
+    revision="$(git rev-parse HEAD 2>/dev/null || true)"
+    [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+    [[ "$revision" =~ ^[a-f0-9]{40,64}$ ]] || revision=unknown
+    fingerprint="$(
+        {
+            find src/apps/dashboard/getbible_dashboard src/apps/dashboard/static src/apps/telemetry/getbible_telemetry \
+                -type f ! -name '*.pyc' ! -path '*/__pycache__/*' -print0
+            printf '%s\0' src/bin/getbible-dashboard src/bin/getbible-telemetry \
+                src/systemd/getbible-dashboard.service.tmpl src/systemd/getbible-telemetry.service.tmpl
+        } | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum
+    )" || return 1
+    printf '{"version":"%s","revision":"%s","fingerprint":"%s"}\n' "$version" "$revision" "${fingerprint%% *}"
+)
+
+dashboard_health() {
+    curl --silent --show-error --fail --max-time 3 \
+        --unix-socket "$GB_PREFIX/run/getbible-dashboard/http.sock" \
+        --header "Host: $(dashboard_domain)" --header 'X-GetBible-Client-IP: 127.0.0.1' \
+        http://localhost/health
+}
+
+dashboard_wait_current() {
+    [[ "$GB_DRY_RUN" != true && -z "$GB_PREFIX" ]] || return 0
+    local response deadline=$((SECONDS + 20))
+    response="$(gb_tmpdir)/dashboard-health.json"
+    while (( SECONDS < deadline )); do
+        if dashboard_health > "$response" 2>/dev/null && "$GB_PYTHON" - "$GB_LIBEXEC/apps/dashboard/release.json" "$response" <<'PY'
+import json
+from pathlib import Path
+import sys
+try:
+    installed, response = (json.loads(Path(path).read_text()) for path in sys.argv[1:])
+    raise SystemExit(0 if installed == response.get("release") else 1)
+except (OSError, ValueError):
+    raise SystemExit(1)
+PY
+        then return 0; fi
+        sleep 1
+    done
+    gb_warn 'The dashboard did not confirm the installed release. Check getbible dashboard status and journalctl -u getbible-dashboard.service.'
+    return 1
+}
+
+dashboard_status() {
+    local status source serving
+    status="$(gb_tmpdir)/dashboard-status.json"
+    source="$(gb_tmpdir)/dashboard-source.json"
+    serving="$(gb_tmpdir)/dashboard-serving.json"
+    dashboard_auth_cli status > "$status" || return 1
+    dashboard_release_manifest > "$source" || return 1
+    dashboard_health > "$serving" 2>/dev/null || : > "$serving"
+    "$GB_PYTHON" - "$status" "$source" "$GB_LIBEXEC/apps/dashboard/release.json" "$serving" \
+        "$(sd_status_line getbible-dashboard.service)" "$(sd_status_line getbible-telemetry.service)" <<'PY'
+import json
+from pathlib import Path
+import sys
+def read(path):
+    try:
+        return json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return {}
+status, source, installed, health = (read(path) for path in sys.argv[1:5])
+serving = health.get("release") or {}
+status.update(manager_release=source, installed_release=installed or None,
+              serving_release=serving or None,
+              running_latest=bool(serving and source == installed == serving),
+              dashboard_service=sys.argv[5], telemetry_service=sys.argv[6])
+print(json.dumps(status, indent=2))
+PY
+}
+
 dashboard_save_setting() {
     if gb_environment_managed "$GB_GLOBAL_CONF" "$1"; then
         [[ "$(gb_global "$1")" == "$2" ]] && return 0
@@ -68,6 +146,7 @@ infrastructure_environment_write() {
         printf '%s=%s\n' "$key" "$(gb_global "$key" "$default")" >> "$stage"
     done
     printf 'TELEMETRY_DB=%s/telemetry/traffic.sqlite3\nBROKER_SOCKET=%s/run/getbible-admin/broker.sock\nTELEGRAM_CONF=%s/telegram.conf\n' "$GB_VAR" "$GB_PREFIX" "$GB_RUN" >> "$stage"
+    printf 'DASHBOARD_RELEASE_FILE=%s/apps/dashboard/release.json\n' "$GB_LIBEXEC" >> "$stage"
     gb_install_file "$stage" "$(dashboard_config)" 0640 root:getbible-dashboard || return 1
     for stage in telemetry adaptive; do
         : > "$(gb_tmpdir)/$stage.env"
@@ -102,12 +181,15 @@ infrastructure_environment_write() {
 
 infrastructure_install() {
     local unit helper package stage python
+    GB_INFRASTRUCTURE_TELEMETRY_FAILED=false
+    GB_TELEMETRY_START_FAILED=false
     gb_ensure_group getbible-dashboard || return 1
     gb_ensure_system_user getbible-dashboard "$GB_NGINX_USER" "$GB_VAR/dashboard" "getbible-dashboard,$GB_NOTIFY_GROUP" || return 1
     gb_ensure_dir "$GB_VAR/dashboard" 0700 getbible-dashboard:getbible-dashboard || return 1
     gb_ensure_dir "$GB_VAR/admin" 0700 root:root || return 1
     gb_ensure_dir "$GB_VAR/imports" 0750 root:root || return 1
     gb_ensure_dir "$GB_VAR/telemetry" 02750 root:getbible-dashboard || return 1
+    infrastructure_reporting_permissions || return 1
     gb_ensure_dir "$GB_VAR/storage" 02770 "root:$GB_READERS_GROUP" || return 1
     gb_ensure_dir "$GB_LOG/dashboard" 0750 root:getbible-dashboard || return 1
     gb_ensure_dir "$GB_LOG/dashboard/app" 0750 getbible-dashboard:getbible-dashboard || return 1
@@ -131,6 +213,9 @@ infrastructure_install() {
         find "$GB_LIBEXEC/apps/$package" -type d -exec chmod 0755 {} + || return 1
         find "$GB_LIBEXEC/apps/$package" -type f -exec chmod 0644 {} + || return 1
     done
+    stage="$(gb_tmpdir)/dashboard-release.json"
+    dashboard_release_manifest > "$stage" || return 1
+    gb_install_file "$stage" "$GB_LIBEXEC/apps/dashboard/release.json" 0644 root:root || return 1
     infrastructure_environment || return 1
     stage="$(gb_tmpdir)/infrastructure-units"
     gb_ensure_dir "$stage" 0755 || return 1
@@ -144,10 +229,31 @@ infrastructure_install() {
     done
     sd_daemon_reload || return 1
     infrastructure_storage_initial_sample || return 1
-    sd_enable --now getbible-telemetry.service getbible-adapt.timer getbible-storage.timer || return 1
+    # A repaired collector must be allowed to start even after exhausting its
+    # previous restart allowance. Its failure must not prevent dashboard repair.
+    if sd_available && [[ "$GB_DRY_RUN" != true ]]; then
+        "$GB_SYSTEMCTL" reset-failed getbible-telemetry.service getbible-dashboard.service getbible-admin.service || return 1
+    fi
+    if ! sd_enable --now getbible-telemetry.service; then
+        GB_TELEMETRY_START_FAILED=true
+        gb_warn 'Telemetry could not start. Existing APIs remain available. Inspect journalctl -u getbible-telemetry.service; the dashboard installation will continue.'
+    fi
+    sd_enable --now getbible-adapt.timer getbible-storage.timer || return 1
     if [[ "$(gb_global DASHBOARD_ENABLED false)" == true && -n "$(dashboard_domain)" ]]; then
         sd_enable --now getbible-admin.service getbible-dashboard.service || return 1
     fi
+}
+
+infrastructure_reporting_permissions() {
+    local file
+    [[ "$GB_DRY_RUN" != true && -z "$GB_PREFIX" ]] || return 0
+    # Only the managed SQLite files need repair; never traverse API data or
+    # replace database contents. Existing sidecars predate a repaired setgid dir.
+    for file in "$GB_VAR/telemetry/traffic.sqlite3" "$GB_VAR/telemetry/traffic.sqlite3-wal" "$GB_VAR/telemetry/traffic.sqlite3-shm"; do
+        [[ -f "$file" && ! -L "$file" ]] || continue
+        chown root:getbible-dashboard "$file" || [[ ! -e "$file" ]] || return 1
+        chmod 0640 "$file" || [[ ! -e "$file" ]] || return 1
+    done
 }
 
 infrastructure_storage_initial_sample() {
@@ -187,19 +293,32 @@ infrastructure_ensure() {
 # Applying a reviewed manager release refreshes installed code even when its
 # units already exist. Ordinary commands only refresh effective configuration.
 infrastructure_update() {
-    local telemetry_active=false dashboard_active=false admin_active=false
+    local telemetry_active=false dashboard_active=false admin_active=false status=0
+    GB_INFRASTRUCTURE_TELEMETRY_FAILED=false
     if sd_is_active getbible-telemetry.service; then telemetry_active=true; fi
     if sd_is_active getbible-dashboard.service; then dashboard_active=true; fi
     if sd_is_active getbible-admin.service; then admin_active=true; fi
     infrastructure_install || return 1
     [[ "$GB_DRY_RUN" != true ]] || return 0
-    if [[ "$telemetry_active" == true ]]; then sd_restart getbible-telemetry.service || return 1; fi
-    if [[ "$dashboard_active" == true ]]; then sd_restart getbible-dashboard.service || return 1; fi
+    if [[ "$telemetry_active" == true ]] && ! sd_restart getbible-telemetry.service; then
+        GB_TELEMETRY_START_FAILED=true
+    fi
+    if [[ "$dashboard_active" == true ]]; then
+        sd_restart getbible-dashboard.service || status=1
+        dashboard_wait_current || status=1
+    fi
     # An update can itself be a broker job. Let the broker drain and persist its
     # results (including unclaimed credentials) before it replaces itself.
     if [[ "$admin_active" == true ]]; then
-        "$GB_SYSTEMCTL" kill --kill-who=main --signal=SIGUSR1 getbible-admin.service || return 1
+        "$GB_SYSTEMCTL" kill --kill-who=main --signal=SIGUSR1 getbible-admin.service || status=1
     fi
+    # Callers may continue API deployment only when every installation step
+    # completed and the collector is the sole failed auxiliary service.
+    if (( status == 0 )) && [[ "${GB_TELEMETRY_START_FAILED:-false}" == true && "${1:-}" != --dashboard ]]; then
+        GB_INFRASTRUCTURE_TELEMETRY_FAILED=true
+        status=1
+    fi
+    return "$status"
 }
 
 dashboard_require_telegram() {
@@ -273,7 +392,7 @@ dashboard_apply() {
     ep_exists "$domain" && { gb_warn 'The dashboard requires its own hostname, separate from API domains.'; return 1; }
     conflicts="$(nginx_conflicts "$domain" | grep -v '/getbible-dashboard.conf' || true)"
     [[ -z "$conflicts" ]] || { gb_warn "The dashboard hostname is already served by another nginx configuration: $conflicts"; return 1; }
-    infrastructure_install || return 1
+    infrastructure_update --dashboard || return 1
     sd_enable --now getbible-admin.service getbible-dashboard.service || return 1
     stage="$(gb_tmpdir)/dashboard-nginx"
     dashboard_render "$stage" "$domain" || return 1
@@ -287,9 +406,7 @@ dashboard_apply() {
         nginx_test && nginx_reload || true
         return 1
     fi
-    if sd_available && [[ "$GB_DRY_RUN" != true ]]; then
-        "$GB_SYSTEMCTL" reload getbible-dashboard.service || return 1
-    fi
+    dashboard_wait_current || return 1
     tg_notify ok 'Dashboard configured' "The private dashboard is served at https://$domain."
 }
 
@@ -430,11 +547,11 @@ dashboard_cli() {
     local action="${1:-status}" sub="${2:-}"
     [[ $# == 0 ]] || shift
     case "$action" in
-        status) dashboard_auth_cli status ;;
+        status) dashboard_status ;;
         enable)
             [[ $# -le 1 || $# == 3 && "$2" == --cert ]] || { gb_warn 'dashboard enable DOMAIN [--cert auto|http|dns-cloudflare]'; return 1; }
             dashboard_enable "${1:-$(dashboard_domain)}" "${3:-auto}" ;;
-        apply) dashboard_apply ;;
+        apply|update) dashboard_apply ;;
         disable) dashboard_disable ;;
         password) dashboard_password_set "${1:-set}" "${2:-}" ;;
         sessions)
@@ -446,7 +563,7 @@ dashboard_cli() {
         unblock)
             dashboard_auth_cli unblock "${1:?IP address}" || return 1
             tg_notify info 'Dashboard address unblocked' "Address: $1" ;;
-        *) gb_warn 'dashboard status|enable DOMAIN|apply|disable|password set [--stdin]|password reset|sessions [revoke ID|all]|blocks|unblock IP'; return 1 ;;
+        *) gb_warn 'dashboard status|enable DOMAIN|apply|update|disable|password set [--stdin]|password reset|sessions [revoke ID|all]|blocks|unblock IP'; return 1 ;;
     esac
 }
 
@@ -454,7 +571,7 @@ menu_dashboard() {
     local choice value output
     while true; do
         choice="$(ui_menu 'Management dashboard' "Domain: $(dashboard_domain)\nEnabled: $(gb_global DASHBOARD_ENABLED false)\nPassword and Telegram are required. Unblocking is only available here or through the CLI." \
-            status 'Show status' enable 'Set domain and enable' apply 'Apply dashboard configuration' disable 'Disable dashboard domain' \
+            status 'Show installed and running release' enable 'Set domain and enable' update 'Update dashboard to installed manager release' apply 'Apply dashboard configuration' disable 'Disable dashboard domain' \
             password 'Set a password and revoke sessions' reset 'Generate a new password and revoke sessions' \
             sessions 'List sessions' revoke 'Revoke a session or all sessions' blocks 'List blocked addresses' unblock 'Unblock an address' back 'Back')" || return 0
         case "$choice" in
@@ -462,7 +579,8 @@ menu_dashboard() {
             enable)
                 value="$(ui_input 'Dashboard domain' 'Separate dashboard hostname (TLS terminator must serve HTTPS)' "$(dashboard_domain)")" || continue
                 ui_run 'Enable dashboard' dashboard_enable "$value" || true ;;
-            apply|disable) ui_run 'Dashboard' "dashboard_$choice" || true ;;
+            apply|update) ui_run 'Update dashboard' dashboard_apply || true ;;
+            disable) ui_run 'Dashboard' dashboard_disable || true ;;
             password) dashboard_password_set set || true ;;
             reset)
                 ui_yesno 'Reset password' 'Generate a new password and revoke all dashboard sessions?' no || continue

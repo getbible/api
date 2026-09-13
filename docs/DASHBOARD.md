@@ -44,8 +44,10 @@ GETBIBLE_DASHBOARD_TOKEN_SECONDS=60
 Environment values are authoritative. Leave `GETBIBLE_DASHBOARD_ENABLED` and the
 domain empty to manage them from the menu; the saved/default enabled state starts
 as false. An explicit environment value of false prevents the CLI from enabling
-the dashboard until that override is changed. Applying configuration explicitly
-reloads the dashboard settings with SIGHUP and preserves existing sessions.
+the dashboard until that override is changed. Settings changes reload the
+dashboard configuration with SIGHUP. `dashboard apply` and `dashboard update`
+install the current manager's dashboard files, restart its backend, and verify
+the running release. Saved authentication sessions are preserved.
 
 Native installations use the same built-in settings without requiring Compose
 or an environment file. Run these commands as root through `./getbible.sh` from
@@ -54,6 +56,20 @@ regenerates temporary service settings before the collector and dashboard start.
 `self-update` fetches manager source, and a subsequent `update` applies it to the
 installed management services and API domains. Docker receives manager updates
 from a replacement image.
+
+To update only the dashboard and its reporting services, run
+`sudo ./getbible.sh dashboard update`, then `sudo ./getbible.sh dashboard status`.
+The status includes `manager_release`, `installed_release`, `serving_release`
+and `running_latest`. The last value is true only when all three match; it
+compares against the local manager, so fetch native source with `self-update`
+or replace the Docker image first. This does not redeploy the public runtimes.
+
+If reporting is unavailable, inspect
+`sudo journalctl -u getbible-telemetry.service -n 80 --no-pager`.
+The dashboard retries temporary storage failures while a viewer remains active
+and reports permission, disk, and incompatible-schema errors separately.
+An incompatible history is preserved until the operator explicitly chooses
+whether to reset it; dashboard updates never discard history.
 
 The initial password is an undisclosed random value; set or reset it through the
 CLI before the first login. Passwords are hashed and never stored in plaintext.

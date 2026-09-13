@@ -104,12 +104,17 @@ before restarting; issued credentials remain available until collected or their
 existing one-use window expires. Saved settings and state stay outside the
 checkout under `/etc/getbible` and `/var/lib/getbible`. Updating source never
 replaces those values with the example configuration.
+An unavailable telemetry collector is reported as an update failure, but does
+not prevent independent API domain updates from proceeding. Use `dashboard
+update` to refresh the dashboard and reporting services without redeploying
+API domains, then `dashboard status` to verify the running release.
 
 ## Choose the operation
 
 | Operation | Result |
 | --- | --- |
 | `self-update` | Fetches the current branch's upstream and fast-forwards the clean manager checkout. The next invocation loads the updated code; hosted domains are not applied. |
+| `dashboard update` | Installs the current manager's dashboard and reporting code, restarts the dashboard backend, and verifies its running release. API runtimes are not redeployed. |
 | `update [DOMAIN]` | Applies current templates, helpers, configuration, documentation and runtime changes. Native retains the selected exact Python patch; Docker adopts the newest bundled patch of the selected family. |
 | `runtime DOMAIN update` | Rebuilds application dependencies and adopts the latest reviewed patch of each endpoint's selected Python family. `runtime DOMAIN v3 update` does it for one endpoint. |
 | `runtime DOMAIN [vN] update --python 3.14` | Explicitly selects the catalog's current 3.14 patch and creates a new runtime release. An exact catalog patch is also accepted. |
