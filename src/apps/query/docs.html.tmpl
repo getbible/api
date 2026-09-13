@@ -31,16 +31,14 @@
 <p>Scripture comes from the selected <code>{{VERSION}}</code> data source. Chapter entries carry compact translation metadata. Verse objects retain their source fields, including nested metadata: v3 can include <code>paragraph</code>, word-level <code>tokens</code> and annotation <code>spans</code>. These fields are optional and are not added when absent from the source. Chapter-level <code>editorial</code> from static v3 documents is excluded from assembled results. See the <a href="https://api.getbible.net/{{VERSION}}/openapi.json">source data contract</a> for the static documents.</p>
 
 <h2>Short forms</h2>
-<p>Anything shorter than the full route is a permanent redirect (<code>301</code>) to it. A missing translation becomes <code>{{DEFAULT_TRANSLATION}}</code>; a reference that cannot be resolved becomes <code>{{DEFAULT_REFERENCE}}</code>.</p>
+<p>A valid reference in a shorter route is a permanent redirect (<code>301</code>) to its canonical route. When a translation is omitted, the reference is resolved in <code>{{DEFAULT_TRANSLATION}}</code>. A missing or unresolved reference returns <code>404</code>; an explicitly supplied unknown translation also returns <code>404</code>. No request is replaced with a default verse.</p>
 <table>
 <tr><th>Request</th><th>Redirects to</th></tr>
-{{#UNLESS IS_ROOT}}<tr><td><code>/{{VERSION}}</code></td><td><code>{{PREFIX}}{{DEFAULT_TRANSLATION}}/{{DEFAULT_REFERENCE}}</code></td></tr>
-{{/UNLESS}}<tr><td><code>{{PREFIX}}aov</code></td><td><code>{{PREFIX}}aov/{{DEFAULT_REFERENCE}}</code></td></tr>
 <tr><td><code>{{PREFIX}}John3:16</code></td><td><code>{{PREFIX}}{{DEFAULT_TRANSLATION}}/John3:16</code></td></tr>
 {{#UNLESS IS_ROOT}}<tr><td><code>/aov/John3:16</code></td><td><code>{{PREFIX}}aov/John3:16</code></td></tr>
 <tr><td><code>/John3:16</code></td><td><code>{{PREFIX}}{{DEFAULT_TRANSLATION}}/John3:16</code></td></tr>
 {{/UNLESS}}</table>
-<p>The full route itself is strict: an unknown translation answers <code>404</code>, an unresolvable reference answers <code>400</code>, and a query string answers <code>400</code>, because this endpoint takes no parameters.</p>
+<p>For example, <code>{{PREFIX}}{{DEFAULT_TRANSLATION}}</code> has no reference and answers <code>404</code>. The same applies when a reference cannot be resolved, including a request containing one valid and one invalid reference. A query string answers <code>400</code>, because this endpoint takes no parameters. Public documentation pages remain available at their published addresses.</p>
 
 <h2>Access</h2>
 {{ACCESS_HTML}}
@@ -50,10 +48,12 @@
 <p>Every error is an <a href="https://www.rfc-editor.org/rfc/rfc9457">RFC 9457 problem document</a> (<code>application/problem+json</code>) with <code>type</code>, <code>title</code>, <code>status</code>, <code>code</code>, <code>detail</code> and <code>instance</code>. The <code>detail</code> field carries the message.</p>
 <table>
 <tr><th>Status</th><th>Code</th><th>Meaning</th></tr>
-<tr><td>400</td><td>invalid_reference</td><td>The reference does not resolve.</td></tr>
 <tr><td>400</td><td>request_limit</td><td>Too many references or verses in one request.</td></tr>
 <tr><td>400</td><td>parameters_not_accepted</td><td>A query string was sent.</td></tr>
 <tr><td>401</td><td>unauthorized</td><td>A bearer token is required and was missing or invalid.</td></tr>
+<tr><td>404</td><td>missing_reference</td><td>No scripture reference was supplied.</td></tr>
+<tr><td>404</td><td>invalid_reference</td><td>The reference does not resolve.</td></tr>
+<tr><td>404</td><td>not_found</td><td>The requested scripture or route was not found.</td></tr>
 <tr><td>404</td><td>translation_not_found</td><td>No such translation.</td></tr>
 {{#UNLESS IS_ROOT}}<tr><td>404</td><td>unknown_version</td><td>Only <code>{{VERSION}}</code> is served here.</td></tr>
 {{/UNLESS}}<tr><td>429</td><td>rate_limited</td><td>The public budget for your address is used up.</td></tr>
@@ -61,7 +61,7 @@
 </table>
 
 <h2>Health</h2>
-<p><code>GET /healthz</code> answers when the service is up; <code>GET /readyz</code> answers <code>200</code> only after reading scripture for the configured default reference, or <code>503</code> with a problem document and <code>Retry-After</code> when unavailable. Token-protected responses use <code>Cache-Control: private, no-store</code>.</p>
+<p><code>GET /healthz</code> answers when the service is up; <code>GET /readyz</code> answers <code>200</code> only after reading scripture for the configured readiness reference (<code>{{DEFAULT_REFERENCE}}</code>), or <code>503</code> with a problem document and <code>Retry-After</code> when unavailable. The readiness reference is not a fallback for API requests. Token-protected responses use <code>Cache-Control: private, no-store</code>.</p>
 
 <p><a href="/">All endpoints of {{DOMAIN}}</a></p>
 

@@ -79,17 +79,17 @@ class QueryAppTest(EndpointCase, unittest.TestCase):
 
     def test_bad_reference_is_a_problem_document(self) -> None:
         response = self.client.get("/v2/test/nonsense")
-        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.status_code, 404)
         self.assertEqual(response.content_type, "application/problem+json; charset=utf-8")
         body = response.get_json()
         self.assertEqual(body["code"], "invalid_reference")
-        self.assertEqual(body["status"], 400)
+        self.assertEqual(body["status"], 404)
         self.assertTrue(body["detail"])
         self.assertTrue(body["instance"].startswith("urn:request:"))
         self.assertEqual(body["type"], "https://getbible.net/problems/invalid-reference")
 
     def test_one_bad_reference_in_a_chain_rejects_the_request(self) -> None:
-        self.assertEqual(self.client.get("/v2/test/Ge1:1;bad").status_code, 400)
+        self.assertEqual(self.client.get("/v2/test/Ge1:1;bad").status_code, 404)
 
     def test_unknown_translation_and_version(self) -> None:
         self.assertEqual(self.client.get("/v2/nope/Ge1:1").get_json()["code"], "translation_not_found")
@@ -100,19 +100,11 @@ class QueryAppTest(EndpointCase, unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.get_json()["code"], "parameters_not_accepted")
 
-    def test_short_forms_redirect_permanently(self) -> None:
+    def test_valid_short_forms_keep_default_translation_and_version(self) -> None:
         cases = {
-            "/": "/v2/test/Ge1:1",
-            "/v2": "/v2/test/Ge1:1",
-            "/v2/": "/v2/test/Ge1:1",
-            "/test": "/v2/test/Ge1:1",
             "/Ge1:1": "/v2/test/Ge1:1",
-            "/nonsense": "/v2/test/Ge1:1",
-            "/v2/test": "/v2/test/Ge1:1",
             "/v2/Ge1:2": "/v2/test/Ge1:2",
             "/test/Ge1:2": "/v2/test/Ge1:2",
-            "/nope/Ge1:2": "/v2/test/Ge1:2",
-            "/test/bad": "/v2/test/Ge1:1",
         }
         for path, location in cases.items():
             with self.subTest(path=path):
@@ -120,6 +112,68 @@ class QueryAppTest(EndpointCase, unittest.TestCase):
                 self.assertEqual(response.status_code, 301)
                 self.assertEqual(response.headers["Location"], location)
                 self.assertEqual(response.headers["Cache-Control"], "public, max-age=300")
+
+    def test_missing_references_never_select_default_scripture(self) -> None:
+        bible = self.app.extensions["getbible"]
+        for path in ("/", "/v2", "/v2/", "/test", "/test/", "/v2/test", "/v2/test/"):
+            with self.subTest(path=path), patch.object(bible, "select") as select:
+                response = self.client.get(path)
+                self.assertEqual(response.status_code, 404)
+                self.assertEqual(response.get_json()["code"], "missing_reference")
+                self.assertNotIn("Location", response.headers)
+                self.assertNotIn("ETag", response.headers)
+                self.assertEqual(response.headers["Cache-Control"], "no-store")
+                select.assert_not_called()
+                entry = json.loads(self.log_lines()[-1])
+                self.assertEqual(entry["status"], 404)
+                self.assertEqual(entry["problem"], "missing_reference")
+
+    def test_unresolved_references_log_404_without_redirects(self) -> None:
+        for reference in ("nonsense", "Ge999:1", "Ge1:999", "Ge1:1;bad", "x" * 513):
+            for prefix in ("/", "/v2/", "/test/", "/v2/test/"):
+                with self.subTest(reference=reference, prefix=prefix):
+                    response = self.client.get(prefix + reference)
+                    self.assertEqual(response.status_code, 404)
+                    self.assertIn(response.get_json()["code"], {"invalid_reference", "not_found"})
+                    self.assertNotIn("Location", response.headers)
+                    self.assertNotIn("ETag", response.headers)
+                    self.assertEqual(response.headers["Cache-Control"], "no-store")
+                    entry = json.loads(self.log_lines()[-1])
+                    self.assertEqual(entry["status"], 404)
+                    self.assertEqual(entry["problem"], response.get_json()["code"])
+                    self.assertEqual(entry["reference"], reference)
+
+    def test_empty_results_are_404_in_canonical_and_short_forms(self) -> None:
+        for result in ({}, {"test_1_1": {"verses": []}}):
+            with patch.object(self.app.extensions["getbible"], "select", return_value=result):
+                for path in ("/Ge1:1", "/v2/Ge1:1", "/test/Ge1:1", "/v2/test/Ge1:1"):
+                    with self.subTest(result=result, path=path):
+                        response = self.client.get(path)
+                        self.assertEqual(response.status_code, 404)
+                        self.assertEqual(response.get_json()["code"], "invalid_reference")
+                        self.assertNotIn("Location", response.headers)
+
+    def test_explicit_unknown_translation_is_not_replaced(self) -> None:
+        for path in ("/nope/Ge1:1", "/v2/nope/Ge1:1"):
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                self.assertEqual(response.status_code, 404)
+                self.assertEqual(response.get_json()["code"], "translation_not_found")
+                self.assertNotIn("Location", response.headers)
+
+    def test_king_james_remains_the_default_for_reference_only_requests(self) -> None:
+        settings = self.app.extensions["settings"]
+        app = create_app(replace(settings, service=replace(settings.service, default_translation="kjv")))
+        self.addCleanup(app.extensions["getbible"].close)
+        bible = app.extensions["getbible"]
+        result = {"kjv_1_1": {"verses": [{"verse": 1, "text": "Requested scripture."}]}}
+        with patch.object(bible, "valid_translation", return_value=False), patch.object(bible, "select", return_value=result) as select:
+            for path in ("/Ge1:1", "/v2/Ge1:1"):
+                with self.subTest(path=path):
+                    response = app.test_client().get(path)
+                    self.assertEqual(response.status_code, 301)
+                    self.assertEqual(response.headers["Location"], "/v2/kjv/Ge1:1")
+                    select.assert_called_with("Ge1:1", "kjv")
 
     def test_unknown_version_prefix_is_not_redirected(self) -> None:
         self.assertEqual(self.client.get("/v9").status_code, 404)

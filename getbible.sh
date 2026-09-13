@@ -40,9 +40,11 @@ Domains
   deploy static --domain D --version vN|root --repo URL [--ref master] [--path .]
                 [--extensions json,sha,txt] [--access open|metered|token]
                 [--schedule daily|weekly|monthly] [--staged|--live]
-  deploy runtime --domain D --kind query|search [--version v2] [--root]
+  deploy runtime --domain D --kind query|search [--version vN] [--root]
                 [--repository PATH] [--access MODE] [--warm kjv] [--python auto|VERSION]
-                [--staged|--live]      (--root serves the version at https://D/ instead of /v2/)
+                [--default-translation CODE] [--default-reference REFERENCE]
+                [--staged|--live]      (--root serves the version at https://D/ instead of /vN/)
+                                         --default-reference sets the query readiness probe only
   go-live DOMAIN [--cert auto|http|dns-cloudflare]
                                          take a staged domain live: certificate,
                                          Cloudflare DNS and rules, HTTPS, verification

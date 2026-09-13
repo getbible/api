@@ -44,6 +44,14 @@ class RuntimeVersionTest(unittest.TestCase):
         client = self.app("query")
         self.assertEqual(client.get("/v3/test/Ge1:1").status_code, 200)
         self.assertEqual(client.get("/Ge1:1").headers["Location"], "/v3/test/Ge1:1")
+        self.assertEqual(client.get("/v3/Ge1:1").headers["Location"], "/v3/test/Ge1:1")
+        self.assertEqual(client.get("/test/Ge1:1").headers["Location"], "/v3/test/Ge1:1")
+        for path in ("/", "/v3", "/test", "/v3/test", "/nonsense", "/v3/nonsense", "/v3/test/nonsense"):
+            with self.subTest(path=path):
+                response = client.get(path)
+                self.assertEqual(response.status_code, 404)
+                self.assertEqual(response.mimetype, "application/problem+json")
+                self.assertNotIn("Location", response.headers)
         self.assertEqual(client.get("/v2/test/Ge1:1").get_json()["code"], "unknown_version")
         self.assertEqual(client.get("/readyz").status_code, 200)
 
