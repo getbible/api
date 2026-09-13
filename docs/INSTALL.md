@@ -7,7 +7,24 @@ For externally managed TLS on either execution mode, use
 below apply only to managed TLS. Both modes use the same domain and endpoint
 management commands and preserve existing service isolation.
 
-Start with a fresh Ubuntu 24.04 or 26.04 host and sudo. Each domain can be
+For an existing Docker installation, run these from the Docker host, replacing
+`<container-name>` with the name shown by `docker ps`:
+
+```sh
+# Management menu
+docker exec -it --user root <container-name> getbible
+
+# Command shell
+docker exec -it --user root <container-name> /bin/bash
+```
+
+Inside that root shell, use `getbible` directly without `sudo`, for example
+`getbible dashboard update` or `getbible status`. Close the menu and use the
+`/bin/bash` command above for a shell. Run `exit` to return to the Docker host for
+image updates with `docker compose pull` and `docker compose up -d`.
+
+The remaining steps cover native installation. Start with a fresh Ubuntu
+24.04 or 26.04 host and sudo. Each domain can be
 deployed staged and checked before public DNS points here, then go live later
 (see `NEW_SERVER.md`).
 The manager detects `/etc/os-release`, architecture, glibc, nginx capabilities

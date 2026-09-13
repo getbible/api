@@ -83,8 +83,19 @@ After [one-time registry authentication](docs/REGISTRY_ACCESS.md) and configurat
 ```sh
 docker compose pull
 docker compose up -d
-docker compose exec --user root getbible getbible
+docker exec -it --user root <container-name> getbible
 ```
+
+Replace `<container-name>` with the name shown by `docker ps`. That command
+opens the menu. For a command shell, use:
+
+```sh
+docker exec -it --user root <container-name> /bin/bash
+```
+
+Inside the root shell, run `getbible` commands directly without `sudo`, for
+example `getbible dashboard update` or `getbible dashboard status`. Use `exit`
+to return to the Docker host before running Docker image/Compose commands.
 
 `getbible` is a real executable command linked to the same manager. Add its
 existing arguments to run any action directly, for example

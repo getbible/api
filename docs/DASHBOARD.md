@@ -8,6 +8,12 @@ download a frontend library or install Python packages. The dashboard runs as
 
 ## Enable access
 
+For Docker, launch the menu from the host with
+`docker exec -it --user root <container-name> getbible`. To enter commands, use
+`docker exec -it --user root <container-name> /bin/bash` and run the `getbible`
+commands below directly, without `sudo`. The container name is shown by
+`docker ps`.
+
 Configure Telegram through **Settings > Telegram** or the deployment environment.
 Then use **Management dashboard** in the main menu, or:
 
