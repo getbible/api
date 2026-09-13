@@ -44,6 +44,9 @@ class WorkerControl:
         self.activity = {"inflight": 0, "completed": 0, "errors": 0, "started_at": time.time()}
         self.source_path = Path(settings.repository) / settings.version
         self.source = None
+        # Operational receipts from public warm_query reports, inherited by
+        # pre-fork workers. A chapter count alone cannot prove a full warm-up.
+        self.query_warms = {}
         self.freshness_time = None
         self.next_source_check = 0.0
         self.listener = None
@@ -84,6 +87,9 @@ class WorkerControl:
                 return False  # preserve the serving cache on an unavailable mount
             if force or identity != self.source:
                 self.bible.transition_source(hashlib.sha256(repr(identity).encode()).hexdigest())
+                if identity != self.source:
+                    with self.lock:
+                        self.query_warms.clear()
                 self.source = identity
                 self.freshness_time = checked
                 return True
@@ -98,12 +104,95 @@ class WorkerControl:
             return configured
         return max(0, min(configured, int(checked + configured - time.time())))
 
+    @staticmethod
+    def query_limits(cache):
+        chapters = cache.get("chapters", {})
+        return (chapters.get("limit"), chapters.get("memory_bytes_limit"), cache.get("ttl_seconds"))
+
+    def translation_status(self, cache):
+        """Interpret public cache metadata without loading or inspecting scripture."""
+        query = cache.get("query_translations", {})
+        search = cache.get("search_corpora", {}).get("translations", {})
+        snapshots = cache.get("translation_cache", {}).get("translations", {})
+        with self.lock:
+            receipts = dict(self.query_warms)
+        now = time.time()
+        ttl = cache.get("ttl_seconds", 0)
+
+        def stale(item):
+            return bool(item and (item.get("stale") or (
+                item.get("checked_at") is not None and item["checked_at"] + ttl <= now)))
+
+        statuses = {}
+        for code in sorted(query.keys() | search.keys() | snapshots.keys() | receipts.keys()):
+            chapters = query.get(code, {})
+            corpus = search.get(code, {})
+            snapshot = snapshots.get(code, {})
+            receipt = receipts.get(code, {})
+            if receipt.get("source_generation") != cache.get("source", {}).get("generation"):
+                receipt = {}
+            resident = bool(chapters or corpus or snapshot)
+            expected = receipt.get("loaded")
+            retention_limited = bool(expected and receipt.get("retained", 0) < expected
+                                     and receipt.get("limits") == self.query_limits(cache))
+            if self.kind == "query":
+                expired = chapters.get("expired_chapters", 0) > 0 or receipt.get("stale", False)
+                ready = bool(expected and chapters.get("chapters", 0) >= expected and not expired)
+                if not chapters:
+                    expired = expired or stale(snapshot)
+                reason = ("All warmed chapters are resident and fresh." if ready else
+                          "Cached chapters need rechecking on use." if expired else
+                          "The last warm-up could not retain every chapter within the cache limits." if retention_limited else
+                          "Some data is resident; full chapter coverage has not been established." if resident else
+                          "No translation data is resident.")
+            else:
+                expired = stale(corpus) if corpus else stale(snapshot)
+                indexed = any(index.get("case_sensitive") is False and index.get("fold_diacritics") is True
+                              for index in corpus.get("indexes", []))
+                ready = bool(corpus.get("verses", 0) > 0 and indexed and not expired)
+                retention_limited = False
+                reason = ("The translation corpus and default search index are resident and fresh." if ready else
+                          "The cached translation needs rechecking on use." if expired else
+                          "Some data is resident; the default search index is not resident." if resident else
+                          "No translation data is resident.")
+            statuses[code] = {"ready": ready, "resident": resident, "target": self.kind,
+                              "state": "warm" if ready else "stale" if expired else "partial" if resident else "cold",
+                              "reason": reason, "expected_chapters": expected,
+                              "retention_limited": retention_limited}
+        return statuses
+
+    def record_query_warm(self, translation, report):
+        if not isinstance(report, dict) or not isinstance(report.get("loaded"), int):
+            return
+        cache = self.bible.cache_info()
+        with self.lock:
+            self.query_warms[translation] = {
+                "loaded": report["loaded"], "retained": report.get("chapters", 0),
+                "stale": report.get("stale", False), "source_generation": report.get("source_generation"),
+                "limits": self.query_limits(cache),
+            }
+
+    def warm(self, translation):
+        """Fill absent/expired coverage using the librarian's normal warm path."""
+        status = self.translation_status(self.bible.cache_info()).get(translation, {})
+        if status.get("ready") or (status.get("retention_limited") and status.get("state") == "partial"):
+            return {"abbreviation": translation, "target": self.kind, "skipped": True,
+                    "reason": "already_warm" if status.get("ready") else "retention_limited",
+                    "message": status["reason"]}
+        if self.kind == "query":
+            result = self.bible.warm_query(translation)
+            self.record_query_warm(translation, result)
+        else:
+            result = self.bible.warm_translation(translation, diacritics="fold")
+        return result
+
     def snapshot(self):
+        cache = self.bible.cache_info()
         with self.lock:
             activity = dict(self.activity)
         return {"pid": os.getpid(), **process_memory(), "activity": activity,
                 "source_revision": hashlib.sha256(repr(self.source).encode()).hexdigest(),
-                "cache": self.bible.cache_info(), "scope": "worker",
+                "cache": cache, "translation_status": self.translation_status(cache), "scope": "worker",
                 "memory_note": "RSS includes shared pages; cache bytes are estimates, not process RSS."}
 
     def execute(self, command):
@@ -118,11 +207,20 @@ class WorkerControl:
         if not isinstance(translation, str) or not _CODE.fullmatch(translation):
             raise ValueError("A valid translation code is required.")
         if action == "warm":
-            result = self.bible.warm_query(translation) if self.kind == "query" else self.bible.warm_translation(translation, diacritics="fold")
+            result = self.warm(translation)
         elif action == "drop":
             result = self.bible.drop_translation(translation, disk=False)
+            with self.lock:
+                self.query_warms.pop(translation, None)
         elif action == "reload":
             result = self.bible.reload_translation(translation, target=self.kind)
+            if self.kind == "query" and isinstance(result, dict):
+                self.record_query_warm(translation, result.get("query"))
+            elif self.kind == "search" and isinstance(result, dict):
+                # reload_translation uses the librarian's default analysis
+                # policy. Reuse that corpus and ensure the same folded index
+                # as startup/manual warming is also resident.
+                result["search"] = self.bible.warm_translation(translation, diacritics="fold")
         else:
             raise ValueError("Unknown cache operation.")
         return {**self.snapshot(), "result": result}

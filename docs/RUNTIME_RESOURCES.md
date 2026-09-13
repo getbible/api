@@ -75,13 +75,28 @@ are recorded in `/var/lib/getbible/adaptive.json`.
 ## Cache lifecycle
 
 The API passes these settings through Librarian's public API. Query startup
-warming loads chapter lookup structures through `warm_query`; search startup
-warming builds the translation's search index through `warm_translation`.
+warming calls `warm_query` without a reference list, which loads all chapters'
+lookup payloads subject to the query cache's entry and byte limits. Ordinary
+query requests retain only the chapters they use. Search startup warming loads
+the translation corpus and its case-insensitive, diacritic-folded search index
+through `warm_translation`; chapter data used for a reference search is a
+separate cache and does not measure search-corpus completeness.
 Set either warm-list environment variable to `none` to disable that startup
 warm list; an empty deployment variable means use saved/default settings.
 Both happen before Gunicorn forks to permit copy-on-write sharing. Other
 translations warm lazily when requested. Default request-count recycling is
 disabled so a warm worker is not discarded after 10,000 calls.
+
+A translation listed by several worker PIDs is resident in those workers; the
+rows are not a count of warm-up attempts. Pre-fork objects may share physical
+pages until modified. A manual warm checks each worker and skips an already
+fresh, complete cache. Query completeness requires the public warm report's
+loaded chapter count as well as current resident/fresh chapter counts. Merely
+finding one cached chapter does not establish a complete warm-up. If a full
+query warm cannot retain all chapters within its configured limits, it is
+reported as partial and repeated warm requests do not repeat that same futile
+load until freshness, source or limits change. Explicit reload remains available.
+Search reload also prepares the same folded index as startup warming.
 
 Memory TTL controls lazy freshness revalidation. Unchanged source SHA retains
 its resident structures after revalidation. Changed source publication or
@@ -127,6 +142,10 @@ allowlisted control helper. It fans out to every serving worker, reports each
 PID and its measured RSS/private memory, and includes Librarian's per-translation
 estimated cache usage. RSS includes shared pages and must not be summed as if
 it were unique physical memory. Partial worker failures are reported explicitly.
+The dashboard groups resident data by translation first; selecting one opens
+the per-worker layer. Query chapters, search verses/index and snapshots have
+separate columns. Warm-list configuration describes startup intent, while the
+resident table and readiness state describe current observed memory.
 
 Control listeners are private mode-0600 Unix sockets below the endpoint cache
 directory, started after fork. Only root and the runtime service UID may use
