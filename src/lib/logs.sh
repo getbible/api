@@ -75,22 +75,29 @@ logs_reset_history() {
         printf 'Would reset canonical traffic history; raw logs and configuration stay in place.\n'
         return 0
     fi
-    local telemetry=false dashboard=false status=0
+    local telemetry=false dashboard=false rotation=false timer=false status=0
     local helper="$GB_LIBEXEC/getbible-telemetry"
     [[ -x "$helper" ]] || helper="$GB_TOOLS/getbible-telemetry"
     if sd_is_active getbible-telemetry.service || sd_is_enabled getbible-telemetry.service; then telemetry=true; fi
     if sd_is_active getbible-dashboard.service || sd_is_enabled getbible-dashboard.service; then dashboard=true; fi
+    if sd_is_active getbible-logrotate.service; then rotation=true; fi
+    if sd_is_active getbible-logrotate.timer; then timer=true; fi
     if sd_available; then
-        "$GB_SYSTEMCTL" stop getbible-telemetry.service getbible-dashboard.service || status=$?
+        # The timer's helper opens the database too. Stop scheduling before
+        # waiting for every writer/reader, then let reset take its lifetime lock.
+        "$GB_SYSTEMCTL" stop getbible-logrotate.timer || status=$?
+        "$GB_SYSTEMCTL" stop getbible-logrotate.service getbible-telemetry.service getbible-dashboard.service || status=$?
     fi
     if (( status == 0 )); then
         "$GB_PYTHON" "$helper" reset --discard-history \
             --db "$GB_VAR/telemetry/traffic.sqlite3" --log-root "$GB_LOG" || status=$?
     fi
     local unit
-    for unit in getbible-telemetry.service getbible-dashboard.service; do
+    for unit in getbible-telemetry.service getbible-dashboard.service getbible-logrotate.service getbible-logrotate.timer; do
         [[ "$unit" != getbible-telemetry.service || "$telemetry" == true ]] || continue
         [[ "$unit" != getbible-dashboard.service || "$dashboard" == true ]] || continue
+        [[ "$unit" != getbible-logrotate.service || "$rotation" == true ]] || continue
+        [[ "$unit" != getbible-logrotate.timer || "$timer" == true ]] || continue
         # An earlier-schema collector may already have exhausted its systemd
         # restart allowance. Permit the repaired service to start immediately.
         if sd_available; then "$GB_SYSTEMCTL" reset-failed "$unit" || status=$?; fi
