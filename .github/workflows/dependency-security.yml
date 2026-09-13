@@ -1,0 +1,106 @@
+name: Dependency security
+
+on:
+  pull_request:
+  push:
+    branches: [main, master, staging]
+  schedule:
+    - cron: '43 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-security-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  python:
+    name: Python dependencies / ${{ matrix.runtime }} / ${{ matrix.python }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [query, search]
+        python: ['3.12', '3.13', '3.14']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Resolve the runtime and build dependencies in isolation
+        env:
+          RUNTIME: ${{ matrix.runtime }}
+        run: |
+          dependency_env="$RUNNER_TEMP/dependency-environment"
+          python -m venv "$dependency_env"
+          # Match deployment: install the hashed build tools first, then the
+          # runtime set, which also supplies wheel's packaging dependency.
+          "$dependency_env/bin/python" -m pip --disable-pip-version-check install \
+            --only-binary=:all: --no-deps --require-hashes \
+            --requirement src/python/build-requirements.txt
+          "$dependency_env/bin/python" -m pip --disable-pip-version-check install \
+            --only-binary=:all: --requirement "src/apps/$RUNTIME/requirements.txt"
+          "$dependency_env/bin/python" -m pip check
+          "$dependency_env/bin/python" -m pip freeze --all > "$RUNNER_TEMP/dependencies.txt"
+      - name: Install the auditor separately from the audited environment
+        run: |
+          python -m venv "$RUNNER_TEMP/auditor"
+          "$RUNNER_TEMP/auditor/bin/python" -m pip --disable-pip-version-check install \
+            --only-binary=:all: pip-audit==2.10.1
+      - name: Audit every resolved dependency against current advisories
+        run: |
+          # Resolution above includes transitive and build dependencies. The
+          # auditor must not replace those versions with its own dependencies.
+          # --strict also fails if any package cannot be audited.
+          "$RUNNER_TEMP/auditor/bin/python" -m pip_audit \
+            --strict --no-deps --disable-pip --progress-spinner off \
+            --requirement "$RUNNER_TEMP/dependencies.txt" --format json \
+            | tee "$RUNNER_TEMP/python-audit.json"
+      - name: Preserve the dependency inventory and audit evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dependencies-${{ matrix.runtime }}-python-${{ matrix.python }}
+          path: |
+            ${{ runner.temp }}/dependencies.txt
+            ${{ runner.temp }}/python-audit.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  dashboard:
+    name: Dashboard dependencies
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Verify the complete dashboard lockfile
+        working-directory: src/apps/dashboard/ui
+        run: npm ci --ignore-scripts --no-audit --no-fund --include=dev --include=optional --include=peer
+      - name: Audit runtime and development dependencies at every severity
+        working-directory: src/apps/dashboard/ui
+        run: |
+          npm audit --audit-level=info --include=dev --include=optional --include=peer --json \
+            | tee "$RUNNER_TEMP/dashboard-audit.json"
+      - name: Preserve audit evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dependencies-dashboard
+          path: ${{ runner.temp }}/dashboard-audit.json
+          if-no-files-found: warn
+          retention-days: 14
