@@ -68,31 +68,61 @@ exact filters and substring searches. Their audience counts include errors so
 operators can investigate attempted access. Missing referrers are not replaced
 by user agents. Traffic also supports a free-text search across request fields.
 
-## Start a fresh history
+## Schema preparation and manual reset
 
-The corrected classification uses telemetry schema 2. An earlier schema must
-be explicitly reset; it is never silently converted or discarded by an update.
-Apply the reviewed manager/runtime changes, then run this once if the collector
-reports an earlier schema:
+The collector uses telemetry schema 2. Infrastructure installation and updates
+prepare history before starting telemetry and reporting. A compatible database
+is left unchanged. For the supported earlier schema, the manager first saves
+a complete SQLite snapshot, including committed WAL records, under
+`/var/backups/getbible/telemetry/traffic-schema-1-*.sqlite3`. This directory is
+persistent in the supplied Docker configuration. After that backup is durable,
+the manager converts the existing database in one transaction. Every original
+request, event, metric, retention record, metadata value and ingestion cursor
+stays in the active database. The version marker changes only when conversion
+commits successfully; an interrupted or failed conversion rolls back.
+
+Database versions are stored in SQLite's `PRAGMA user_version`, independently
+of manager release numbers and Bible API versions. Definitions live in
+`src/apps/telemetry/getbible_telemetry/schemas/1.sql` and `schemas/2.sql`; the
+registered conversion is `migrations/1_to_2.sql`. Schema 2 adds `endpoint_kind`,
+`referrer` and `book_names`. The converter fills these from already-captured
+facts where available. Unknown historical values remain empty or `{}`;
+existing request values and raw JSON are preserved without fetching Bible data.
+
+The transition preserves producer offsets and the journal cursor. Unknown or
+future schemas, unreadable databases and failed backups stop preparation while
+preserving the existing history. The manager does not reset these automatically.
+Repeating a completed update keeps the current history and creates no second
+backup. A supported schema upgrade needs no manual reset.
+
+The helper allows 900 seconds each for its backup and migration. Global settings
+`TELEMETRY_BACKUP_SECONDS` and `TELEMETRY_MIGRATION_SECONDS` can be changed
+through Settings or `getbible settings set KEY VALUE`. Docker deployments can
+override these using `GETBIBLE_TELEMETRY_BACKUP_SECONDS` and
+`GETBIBLE_TELEMETRY_MIGRATION_SECONDS` in their environment; those values are
+captured for the background image-update service as well. For a direct helper
+invocation, pass `--backup-seconds` and
+`--migration-seconds` to `getbible-telemetry prepare`; each accepts 1–86400
+seconds. A timeout preserves the prior database and any completed backup.
+Public API serving continues while reporting storage is prepared.
+
+To deliberately discard the active canonical history separately, run:
 
 ```sh
 getbible logs reset --discard-history
 ```
 
-If the first update stopped because the earlier-schema collector could not
-start, reset it and repeat `getbible update` to finish applying every endpoint.
-Reset once more after that update to exclude observations made during the
-transition. The reset clears failed-service restart limits before recovery.
-
 The CLI **Logs > Start a fresh traffic history** menu and dashboard
-**Manage > Logs > History** expose the same action. It stops telemetry and
-dashboard services while resetting canonical requests, events and metrics,
-then restores services which were active or enabled. Authentication, settings,
+**Manage > Logs > History** expose the same manual action. It pauses the
+rotation timer and stops rotation, telemetry and dashboard services while
+resetting canonical requests, events and metrics. It clears failed-service
+restart limits and restores previously running services; enabled telemetry and
+dashboard services also recover from a failed state. Authentication, settings,
 API data and producer log files are retained. Producer offsets and the journal
 cursor are retained, and a collection cutoff prevents earlier buffered records
 from repopulating the new history. The reset itself is recorded as a retention
-event. A reset is irreversible for the canonical history; it does not promise
-that already-pruned producer files can reconstruct it.
+event. A manual reset does not create a backup and is irreversible for the
+canonical history; already-pruned producer files cannot reconstruct it.
 
 ## Retention and durability
 

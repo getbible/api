@@ -116,9 +116,10 @@ effective settings available to the installed systemd jobs. Per-domain access,
 tokens, repository identities and runtime choices remain in the existing
 registry and are managed with the existing menu/CLI.
 
-Changes to defaults affect new configuration; they do not silently rewrite
-every existing domain or redeploy running workers. Use the explicit apply or
-runtime/resource commands when existing generated configuration must change.
+Saved per-domain choices remain authoritative unless a supported environment
+override applies. A new image release refreshes enabled endpoints automatically.
+For changes made while staying on the same image, use `getbible update` or the
+runtime/resource commands to apply the effective configuration.
 The full settings inventory follows.
 
 ### Container settings
@@ -388,9 +389,12 @@ numeric/name collision stops initialization for correction. It does not
 recursively chown the dataset. Preserve these files alongside the data.
 
 Bootstrap seeds missing nginx/systemd distribution files, restores local
-identities and selected services, and validates nginx before launch. It does
-not fetch manager changes, rebuild deployments or change Cloudflare DNS.
-Service timers resume their normal saved schedules after systemd starts.
+identities and selected services, and validates nginx before launch. After
+those services are restored, `getbible-image-update.service` applies a new or
+previously unapplied image release to management services and enabled endpoints.
+An already applied image skips that work on restart. Image application does not
+fetch Bible data, scan its contents, change DNS or request certificates; normal
+sync timers retain their existing schedules.
 
 ## 7. Updates, backup and recovery
 
@@ -406,15 +410,27 @@ docker compose exec --user root getbible getbible doctor
 docker compose exec --user root getbible getbible status
 ```
 
-`latest` follows accepted pull-request merges into `main`, and changes locally
-only when pulled. Numbered tags remain fixed and must not be overwritten. Image replacement restarts the whole system;
-in-container runtime updates preserve the existing readiness and drain
-mechanism. Explicitly apply a release's templates/application changes with
-`getbible update [DOMAIN]` when ready. For runtime domains this also adopts
-the image's newest bundled patch of the selected Python family, while retained
-generations keep their exact interpreter for rollback. Native ordinary updates
-continue retaining their selected exact Python patch. Docker mode does not Git-update the
-image's manager checkout. See [UPDATING.md](UPDATING.md).
+`latest` follows accepted pull-request merges into `main` and changes locally
+when pulled and recreated. Numbered tags remain fixed. Image replacement
+restarts the system, then automatically refreshes the dashboard, telemetry and
+enabled endpoints. Runtime updates use the newest bundled patch of the selected
+Python family, with readiness, graceful nginx reload, drain and retained
+generations for rollback. No additional update command is required after a
+successful image refresh.
+
+`getbible status` shows the image release, last applied release and update state.
+The durable record is `/var/lib/getbible/state/image-update.conf`; `APPLIED_VERSION`
+advances only after successful application. A failed update preserves serving
+runtime generations and reports the cause. Resolve it and run `getbible update`
+inside the root container shell to retry. `getbible doctor` is diagnostic.
+See [UPDATING.md](UPDATING.md).
+
+Traffic history is retained. Before starting the collector, updates inspect the
+stored schema version and automatically migrate supported older schemas, including
+schema 1 to 2, after a protective backup under `/var/backups/getbible/telemetry`.
+Reporting records and ingestion cursors are preserved. The current
+schema needs no migration. Unknown or newer schemas remain untouched and report a
+failure. Updating never resets reporting history or rewrites Bible source files.
 
 For a consistent simple backup, stop the container cleanly and archive the
 whole persistent parent with numeric ownership, ACLs, extended attributes,

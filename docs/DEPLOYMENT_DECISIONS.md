@@ -114,13 +114,21 @@ main updates. Patch, minor and major numbers describe fixes, compatible features
 and breaking changes. These deployment-software versions are independent of
 Bible API endpoint versions. A numbered tag must not be overwritten.
 
-Docker manager and OS-package updates arrive in a new image. Native manager
-updates continue to use Git. Applying new templates or redeploying endpoints
-remains explicit; a container restart restores its saved local installation
-without fetching upstream code, changing public DNS or requesting certificates.
-Replacing a whole container causes a service restart. It is distinct from an
-in-container runtime update with overlapping candidates, readiness, graceful
-nginx reload and retained rollback generations.
+Docker manager and OS-package updates arrive in a new image. After restoring
+saved services, `getbible-image-update.service` automatically applies a new or
+previously unapplied release to management services and enabled endpoints.
+Runtime updates use bundled dependencies, overlapping candidates, readiness,
+graceful nginx reload and retained rollback generations. Bible source data is
+neither fetched nor scanned by image application; DNS and certificates remain
+unchanged. Native manager updates continue to use Git and explicit application.
+
+Record `APPLIED_VERSION` and update status in
+`/var/lib/getbible/state/image-update.conf`, advancing the applied release only
+after success. An already applied image skips refresh on restart; a failed
+candidate preserves its serving generation and reports the cause. `getbible
+update` reapplies or retries the installed image; `status` exposes release and
+application state, while `doctor` remains diagnostic. Replacing a whole container
+still causes an initial service restart before these application transactions.
 
 ## 6. Configuration and persistence
 
@@ -141,6 +149,14 @@ accounts across container replacement. Restore accounts and groups before
 services can read mounted files. Validate name/number conflicts first; do not
 resolve them by indiscriminately changing ownership of the entire dataset.
 Backups preserve numeric ownership, ACLs, symlinks and hard links.
+
+Reporting history must survive updates. Before the collector starts, inspect the
+stored schema version and apply supported versioned migrations, including schema
+1 to 2, preserving records and ingestion cursors. Save a protective pre-migration
+backup under `/var/backups/getbible/telemetry`. Verify migrations using actual
+prior-format records. The current schema requires no migration; unknown or newer
+schemas preserve the database and report failure. Updates must not reset reporting
+history. Bible source repositories remain authoritative and unchanged.
 
 ## 7. Resource budgets and performance
 

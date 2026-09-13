@@ -22,6 +22,10 @@ Inside that root shell, use `getbible` directly without `sudo`, for example
 `getbible dashboard update` or `getbible status`. Close the menu and use the
 `/bin/bash` command above for a shell. Run `exit` to return to the Docker host for
 image updates with `docker compose pull` and `docker compose up -d`.
+The replacement image automatically updates saved management services and enabled
+endpoints. Check `getbible status` for the image/applied release and update state;
+use `getbible update` to retry. Restarting an already applied image skips the
+refresh. `getbible doctor` diagnoses the installation without applying updates.
 
 The remaining steps cover native installation. Start with a fresh Ubuntu
 24.04 or 26.04 host and sudo. Each domain can be

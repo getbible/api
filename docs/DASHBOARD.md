@@ -61,21 +61,30 @@ the manager checkout. Saved settings live under `/etc/getbible`; boot preparatio
 regenerates temporary service settings before the collector and dashboard start.
 `self-update` fetches manager source, and a subsequent `update` applies it to the
 installed management services and API domains. Docker receives manager updates
-from a replacement image.
+from a replacement image, which automatically refreshes the dashboard, telemetry
+and enabled endpoints after restoring the saved services. Restarting an already
+applied image skips the refresh. `getbible status` shows image application state;
+`getbible update` retries or reapplies the release.
 
 To update only the dashboard and its reporting services, run
-`sudo ./getbible.sh dashboard update`, then `sudo ./getbible.sh dashboard status`.
+`getbible dashboard update`, then `getbible dashboard status` from the root shell
+(use `./getbible.sh` in the native manager checkout).
 The status includes `manager_release`, `installed_release`, `serving_release`
 and `running_latest`. The last value is true only when all three match; it
 compares against the local manager, so fetch native source with `self-update`
-or replace the Docker image first. This does not redeploy the public runtimes.
+or replace the Docker image first. The dashboard-only update command does not
+redeploy public runtimes.
 
 If reporting is unavailable, inspect
-`sudo journalctl -u getbible-telemetry.service -n 80 --no-pager`.
+`journalctl -u getbible-telemetry.service -n 80 --no-pager` from the root shell.
 The dashboard retries temporary storage failures while a viewer remains active
 and reports permission, disk, and incompatible-schema errors separately.
-An incompatible history is preserved until the operator explicitly chooses
-whether to reset it; dashboard updates never discard history.
+Reporting history remains in place. Before the collector starts, updates use the
+stored schema version to migrate supported older history, including schema 1 to 2,
+with a protective backup under `/var/backups/getbible/telemetry`. Records and
+ingestion cursors are preserved. The current schema needs no work;
+unknown or newer schemas remain intact and are reported for inspection. Updates
+do not reset history or reread Bible source data.
 
 The initial password is an undisclosed random value; set or reset it through the
 CLI before the first login. Passwords are hashed and never stored in plaintext.
