@@ -138,7 +138,7 @@ infrastructure_install() {
     for unit in getbible-prepare.service getbible-admin.service getbible-dashboard.service getbible-telemetry.service getbible-adapt.service getbible-adapt.timer getbible-storage.service getbible-storage.timer getbible-alert@.service; do
         gb_render "$GB_SRC/systemd/$unit.tmpl" "$stage/$unit" \
             "PYTHON=$python" "PREFIX=$GB_PREFIX" "ETC=$GB_ETC" "VAR=$GB_VAR" "LOG=$GB_LOG" "RUN=$GB_RUN" \
-            "OPT=$GB_OPT" "CACHE=$GB_CACHE" "LIBEXEC=$GB_LIBEXEC" "MANAGER=$GB_SELF" \
+            "OPT=$GB_OPT" "SRV=$GB_SRV" "CACHE=$GB_CACHE" "LIBEXEC=$GB_LIBEXEC" "MANAGER=$GB_SELF" \
             "SYSTEMCTL=$GB_SYSTEMCTL" "NGINX_USER=$GB_NGINX_USER" "NOTIFY_GROUP=$GB_NOTIFY_GROUP" "READERS_GROUP=$GB_READERS_GROUP" || return 1
         sd_install_unit "$stage/$unit" "$unit" || return 1
     done

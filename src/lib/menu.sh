@@ -262,6 +262,7 @@ menu_logs() {
         rotate "Rotate now (files above the size limit)" \
         force "Force rotation of every log now" \
         retention "Change retention" \
+        reset "Start a fresh traffic history" \
         back "Back")" || return 0
     case "$choice" in
         view)
@@ -270,6 +271,9 @@ menu_logs() {
         rotate) ui_run "Rotate" logs_rotate_now ;;
         force) ui_run "Force rotation" logs_rotate_now ;;
         retention) menu_settings_retention ;;
+        reset)
+            ui_yesno "Reset traffic history" "Discard all canonical requests, events and metric history and start collecting from now? Raw logs, authentication and settings are retained." no || return 0
+            ui_run "Reset traffic history" logs_reset_history --discard-history ;;
     esac
 }
 

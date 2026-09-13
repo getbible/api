@@ -63,6 +63,46 @@ logs_rotate_now() {
     "$GB_PYTHON" "$GB_LIBEXEC/getbible-telemetry" rotate --db "$GB_VAR/telemetry/traffic.sqlite3" --log-root "$GB_LOG"
 }
 
+# A schema change starts a new canonical history only on an explicit request.
+# Stop its readers/writer, retain source cursors, and restore enabled services
+# even when a previous collector failed because it needs this reset.
+logs_reset_history() {
+    [[ "${1:-}" == --discard-history && $# -eq 1 ]] || {
+        gb_warn 'Resetting traffic history requires --discard-history.'
+        return 1
+    }
+    if [[ "$GB_DRY_RUN" == true ]]; then
+        printf 'Would reset canonical traffic history; raw logs and configuration stay in place.\n'
+        return 0
+    fi
+    local telemetry=false dashboard=false status=0
+    local helper="$GB_LIBEXEC/getbible-telemetry"
+    [[ -x "$helper" ]] || helper="$GB_TOOLS/getbible-telemetry"
+    if sd_is_active getbible-telemetry.service || sd_is_enabled getbible-telemetry.service; then telemetry=true; fi
+    if sd_is_active getbible-dashboard.service || sd_is_enabled getbible-dashboard.service; then dashboard=true; fi
+    if sd_available; then
+        "$GB_SYSTEMCTL" stop getbible-telemetry.service getbible-dashboard.service || status=$?
+    fi
+    if (( status == 0 )); then
+        "$GB_PYTHON" "$helper" reset --discard-history \
+            --db "$GB_VAR/telemetry/traffic.sqlite3" --log-root "$GB_LOG" || status=$?
+    fi
+    local unit
+    for unit in getbible-telemetry.service getbible-dashboard.service; do
+        [[ "$unit" != getbible-telemetry.service || "$telemetry" == true ]] || continue
+        [[ "$unit" != getbible-dashboard.service || "$dashboard" == true ]] || continue
+        # An earlier-schema collector may already have exhausted its systemd
+        # restart allowance. Permit the repaired service to start immediately.
+        if sd_available; then "$GB_SYSTEMCTL" reset-failed "$unit" || status=$?; fi
+        sd_start "$unit" || status=$?
+    done
+    if (( status != 0 )); then
+        gb_warn 'Traffic history reset or service recovery failed. Check the telemetry and dashboard services.'
+        return "$status"
+    fi
+    tg_notify warn 'Traffic history reset' 'Canonical traffic history starts now. Raw logs, authentication, and configuration were retained.'
+}
+
 # logs_archives DOMAIN: list archived files with sizes.
 logs_archives() {
     "$GB_PYTHON" "$GB_LIBEXEC/getbible-telemetry" storage --db "$GB_VAR/telemetry/traffic.sqlite3"
