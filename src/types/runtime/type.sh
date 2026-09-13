@@ -597,7 +597,7 @@ rt_render_units() {
 # Start a candidate on its own socket. The live process, symlink and nginx
 # configuration remain unchanged until the caller successfully reloads nginx.
 rt_activate() {
-    local domain="$1" label="$2" generation="$3" unit socket
+    local domain="$1" label="$2" generation="$3" unit socket failure
     unit="$(rt_generation_unit "$domain" "$label" "$generation")"
     socket="$(rt_generation_socket "$domain" "$label" "$generation")"
     if ! sd_available; then
@@ -605,13 +605,24 @@ rt_activate() {
         return 0
     fi
     gb_step "Starting candidate $unit.service"
-    if ! sd_start "$unit.socket" || ! sd_start "$unit.service" || ! sd_wait_ready "$socket" /readyz "$RM_TIMEOUT_START" \
-        || { [[ "$EP_KIND" == search ]] && ! sd_wait_ready "$socket" /probez "$RM_TIMEOUT_START"; }; then
-        gb_warn "$unit.service did not become ready; the live service has not been replaced."
-        sd_journal "$unit.service" 40 | tail -40 || true
-        return 1
+    if ! sd_start "$unit.socket"; then
+        failure="the listening socket could not start"
+    elif ! sd_start "$unit.service"; then
+        failure="the service could not start"
+    elif ! sd_wait_ready "$socket" /readyz "$RM_TIMEOUT_START"; then
+        failure="the /readyz check did not succeed within $RM_TIMEOUT_START seconds"
+    # The search probe opens the complete corpus. Give one request the probe
+    # deadline instead of repeatedly abandoning successful searches after the
+    # short health-check timeout; the helper still bounds the whole wait.
+    elif [[ "$EP_KIND" == search ]] && ! sd_wait_ready "$socket" /probez "$RM_TIMEOUT_START" "$RM_TIMEOUT_START"; then
+        failure="the /probez search check did not succeed within $RM_TIMEOUT_START seconds"
+    else
+        gb_log "Candidate $unit.service is ready; awaiting nginx activation."
+        return 0
     fi
-    gb_log "Candidate $unit.service is ready; awaiting nginx activation."
+    gb_warn "$unit.service: $failure; the live service has not been replaced."
+    sd_journal "$unit.service" 40 | tail -40 || true
+    return 1
 }
 
 rt_token_required() { if [[ "$EP_ACCESS_MODE" == token ]]; then printf 'true\n'; else printf 'false\n'; fi; }

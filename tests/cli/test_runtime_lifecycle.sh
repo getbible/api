@@ -16,6 +16,7 @@ trap 'rm -rf -- "$GB_PREFIX"; gb_cleanup' EXIT
 mkdir -p "$GB_LOG"
 events="$GB_PREFIX/events"; : > "$events"
 FAIL_READY=false; FAIL_PROBE=false; FAIL_NGINX=false; FAIL_BUILD=false; RELOAD_DONE=false
+PROBE_DURATION=0
 FAIL_ROUTING=false; FAIL_SNAPSHOT=false; FAIL_SWITCH_CONFIRM=false; FAIL_RETIRE=false
 SOURCE_REVISION=one
 record() { printf '%s\n' "$*" >> "$events"; }
@@ -62,6 +63,9 @@ nginx_transaction_rollback() {
 sd_wait_ready() {
     record "ready $1 $2"
     [[ "$FAIL_PROBE" == false || "$2" != /probez ]] || return 1
+    if [[ "$2" == /probez ]]; then
+        (( PROBE_DURATION <= ${4:-5} && PROBE_DURATION <= $3 )) || return 1
+    fi
     [[ "$FAIL_READY" == false || "$1" == "${RT_OLD_SOCKET:-}" ]]
 }
 sd_retire_after() {
@@ -316,6 +320,30 @@ check test "$(rt_previous_generation "$search_domain" v2)" = "$search_generation
 rt_rollback "$search_domain" v2
 check test "$(ep_version_get "$search_domain" v2 DEFAULT_TRANSLATION)" = test
 check test "$(py_current_release "$(rt_root "$search_domain" v2)")" = "$search_release"
+
+# Adding another version keeps the existing endpoint serving until its new
+# search probe succeeds, including a response slower than a liveness check.
+search_generation="$(rt_active_generation "$search_domain" v2)"
+search_unit="$(rt_live_unit "$search_domain" v2)"
+rt_record_endpoint "$search_domain" v3 v3 "$REPO" test
+ep_version_set "$search_domain" v3 DEFAULT_TRANSLATION test
+FAIL_PROBE=true
+: > "$events"
+if endpoint_apply "$search_domain" 2> "$GB_PREFIX/probe-failure"; then
+    echo 'new search endpoint bypassed a failing probe' >&2; exit 1
+fi
+FAIL_PROBE=false
+check grep -q '/probez search check did not succeed' "$GB_PREFIX/probe-failure"
+check test "$(rt_active_generation "$search_domain" v2)" = "$search_generation"
+check test -z "$(rt_active_generation "$search_domain" v3)"
+check test "$(grep -c '^nginx-reload' "$events" || true)" = 0
+check test "$(grep -c "^disable $search_unit" "$events" || true)" = 0
+PROBE_DURATION=9
+endpoint_apply "$search_domain"
+PROBE_DURATION=0
+check test "$(rt_active_generation "$search_domain" v2)" = "$search_generation"
+check test -n "$(rt_active_generation "$search_domain" v3)"
+check test "$(type_runtime_default_endpoint "$search_domain")" = v2
 
 # A dependency/code rebuild warms an isolated cache; retaining the old cache
 # keeps a schema-changing library upgrade from damaging rollback readiness.
