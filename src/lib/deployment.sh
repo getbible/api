@@ -93,6 +93,8 @@ gb_setting_validate() {
             [[ "$value" =~ ^[0-9]{1,2}$ ]] && (( 10#$value >= 1 && 10#$value <= 95 )) ;;
         TELEMETRY_BATCH_SIZE)
             [[ "$value" =~ ^[1-9][0-9]{0,5}$ ]] && (( 10#$value <= 100000 )) ;;
+        TELEMETRY_BACKUP_SECONDS|TELEMETRY_MIGRATION_SECONDS)
+            [[ "$value" =~ ^[1-9][0-9]{0,4}$ ]] && (( 10#$value <= 86400 )) ;;
         ADAPTIVE_INTERVAL|ADAPTIVE_COOLDOWN|ADAPTIVE_SUSTAINED_SAMPLES|TELEMETRY_FLUSH_SECONDS|TELEMETRY_METRICS_SECONDS)
             [[ "$value" =~ ^[1-9][0-9]{0,7}$ ]] ;;
         TELEMETRY_RETENTION_DAYS) [[ "$value" =~ ^[0-9]{1,6}$ ]] ;;
@@ -162,13 +164,14 @@ gb_environment_capture() {
 }
 
 gb_environment_telegram() {
-    local key staged
+    local key staged value
     gb_is_docker || return 0
     gb_ensure_dir "$GB_RUN" 0755 || return 1
-    staged="$(gb_tmpdir)/telegram-effective.conf"
-    : > "$staged"
+    staged="$(gb_tmpdir)/telegram-effective.conf" || return 1
+    : > "$staged" || return 1
     for key in TELEGRAM_ENABLED TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_HOSTNAME; do
-        printf '%s=%s\n' "$key" "$(cfg_get "$GB_TELEGRAM_CONF" "$key")" >> "$staged"
+        value="$(cfg_get "$GB_TELEGRAM_CONF" "$key")" || return 1
+        printf '%s=%s\n' "$key" "$value" >> "$staged" || return 1
     done
     gb_install_file "$staged" "$GB_RUN/telegram.conf" 0640 "root:$GB_NOTIFY_GROUP"
 }

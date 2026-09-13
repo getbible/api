@@ -186,7 +186,7 @@ class ClassificationTests(unittest.TestCase):
             self.store.db.execute("INSERT INTO sources(identity,path,offset,updated) VALUES('source','log',123,100)")
             self.store.set_metadata("journal_cursor", {"cursor": "saved"})
             self.store.db.execute("PRAGMA user_version=1")
-        with self.assertRaisesRegex(RuntimeError, "logs reset --discard-history"):
+        with self.assertRaisesRegex(RuntimeError, "database migrations"):
             TelemetryStore(self.path)
         self.store.close()
         with contextlib.redirect_stdout(io.StringIO()):

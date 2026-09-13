@@ -229,7 +229,7 @@ menu_deploy() {
 menu_update() {
     local state commit dirty text apply_label='Update all domains from the current checkout'
     if gb_is_docker; then
-        text='Apply the software in the current image to hosted domains. Runtime updates use the newest bundled patch of each selected Python family. To replace the image itself, use the host commands under Update container image.'
+        text="$(update_image_status)\nNew image releases apply automatically after startup. Use this action to retry or reapply the installed release. Image replacement is done from the Docker host."
         apply_label='Update all domains from the current image'
     else
         state="$(update_repo_state)"
@@ -243,7 +243,7 @@ menu_update() {
         apply "$apply_label" \
         back "Back")" || return 0
     case "$choice" in
-        apply) ui_run "Update all" update_all || true ;;
+        apply) ui_run "Update all" update_system || true ;;
     esac
 }
 

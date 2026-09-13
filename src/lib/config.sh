@@ -52,23 +52,23 @@ cfg_set() {
     dir="$(dirname -- "$file")"
     [[ -d "$dir" ]] || gb_ensure_dir "$dir" 0750 || gb_die "Cannot create $dir"
     tmp="$file.tmp.$$"
-    : > "$tmp"
+    : > "$tmp" || return 1
     if [[ -f "$file" ]]; then
         while IFS= read -r line || [[ -n "$line" ]]; do
             if [[ "$line" == "$key="* ]]; then
                 if [[ "$replaced" == false ]]; then
-                    printf '%s=%s\n' "$key" "$value" >> "$tmp"
+                    printf '%s=%s\n' "$key" "$value" >> "$tmp" || return 1
                     replaced=true
                 fi
                 continue
             fi
-            printf '%s\n' "$line" >> "$tmp"
-        done < "$file"
-        chmod --reference="$file" "$tmp" 2>/dev/null || true
+            printf '%s\n' "$line" >> "$tmp" || return 1
+        done < "$file" || return 1
+        chmod --reference="$file" "$tmp" || return 1
     else
-        chmod 0640 "$tmp"
+        chmod 0640 "$tmp" || return 1
     fi
-    [[ "$replaced" == true ]] || printf '%s=%s\n' "$key" "$value" >> "$tmp"
+    [[ "$replaced" == true ]] || printf '%s=%s\n' "$key" "$value" >> "$tmp" || return 1
     mv -f -- "$tmp" "$file" || return 1
     if [[ "${GB_CONFIG_INITIALIZING:-false}" != true && "$file" == "$GB_TELEGRAM_CONF" ]] && declare -F gb_environment_telegram >/dev/null; then
         if [[ -n "${GB_SYSTEMD:-}" && -f "$GB_SYSTEMD/getbible-telemetry.service" ]] \
@@ -191,6 +191,8 @@ GB_GLOBAL_DEFAULTS=(
     "TELEMETRY_BATCH_SIZE=1000"
     "TELEMETRY_FLUSH_SECONDS=1"
     "TELEMETRY_METRICS_SECONDS=5"
+    "TELEMETRY_BACKUP_SECONDS=900"
+    "TELEMETRY_MIGRATION_SECONDS=900"
     "DASHBOARD_DOMAIN="
     "DASHBOARD_ENABLED=false"
     "DASHBOARD_SESSION_DAYS=30"
@@ -211,12 +213,12 @@ GB_GLOBAL_DEFAULTS=(
 
 gb_global_init() {
     local GB_CONFIG_INITIALIZING=true
-    gb_ensure_dir "$GB_ETC" 0750
+    gb_ensure_dir "$GB_ETC" 0750 || return 1
     local entry key
     # Before the repository shipped its own icons, a favicon under /etc was
     # the only system favicon: such a file stays the operator's choice.
     if [[ "$(cfg_get "$GB_GLOBAL_CONF" FAVICON_SOURCE "__unset__")" == "__unset__" && -f "$GB_FAVICON_FILE" ]]; then
-        cfg_set "$GB_GLOBAL_CONF" FAVICON_SOURCE custom
+        cfg_set "$GB_GLOBAL_CONF" FAVICON_SOURCE custom || return 1
     fi
     for entry in "${GB_GLOBAL_DEFAULTS[@]}"; do
         key="${entry%%=*}"
@@ -230,19 +232,19 @@ gb_global_init() {
                     DEFAULT_DEPLOY_MODE) value=staged ;;
                 esac
             fi
-            cfg_set "$GB_GLOBAL_CONF" "$key" "$value"
+            cfg_set "$GB_GLOBAL_CONF" "$key" "$value" || return 1
         fi
     done
-    chmod 0640 "$GB_GLOBAL_CONF" 2>/dev/null || true
+    chmod 0640 "$GB_GLOBAL_CONF" || return 1
     if [[ ! -f "$GB_TELEGRAM_CONF" ]]; then
-        cfg_set "$GB_TELEGRAM_CONF" "TELEGRAM_ENABLED" "false"
-        cfg_set "$GB_TELEGRAM_CONF" "TELEGRAM_BOT_TOKEN" ""
-        cfg_set "$GB_TELEGRAM_CONF" "TELEGRAM_CHAT_ID" ""
-        cfg_set "$GB_TELEGRAM_CONF" "TELEGRAM_HOSTNAME" "$(hostname -f 2>/dev/null || hostname)"
+        cfg_set "$GB_TELEGRAM_CONF" "TELEGRAM_ENABLED" "false" || return 1
+        cfg_set "$GB_TELEGRAM_CONF" "TELEGRAM_BOT_TOKEN" "" || return 1
+        cfg_set "$GB_TELEGRAM_CONF" "TELEGRAM_CHAT_ID" "" || return 1
+        cfg_set "$GB_TELEGRAM_CONF" "TELEGRAM_HOSTNAME" "$(hostname -f 2>/dev/null || hostname)" || return 1
     fi
     if [[ ! -f "$GB_CLOUDFLARE_CONF" ]]; then
-        cfg_set "$GB_CLOUDFLARE_CONF" "CLOUDFLARE_API_TOKEN" ""
-        chmod 0600 "$GB_CLOUDFLARE_CONF" 2>/dev/null || true
+        cfg_set "$GB_CLOUDFLARE_CONF" "CLOUDFLARE_API_TOKEN" "" || return 1
+        chmod 0600 "$GB_CLOUDFLARE_CONF" || return 1
     fi
 }
 

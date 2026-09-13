@@ -129,6 +129,7 @@ Platform
   telegram enable|disable|test
   cloudflare ...                         see: getbible.sh cloudflare help
   doctor                                 check this host
+  image-update                           retry an unapplied Docker image release
   install-deps                           install nginx, certbot, python and tools
   selftest                               run the repository test suite
   render DOMAIN --out DIR                render nginx files without installing
@@ -151,24 +152,27 @@ set -- "${ARGS[@]+"${ARGS[@]}"}"
 export GB_YES GB_DRY_RUN
 
 gb_system_init() {
-    gb_require_root
+    # Image reconciliation calls this conditionally, disabling Bash errexit
+    # inside the entire call chain. Every required step must return its error.
+    gb_require_root || return 1
     gb_environment_validate || return 1
     if gb_is_docker && [[ -z "$GB_PREFIX" && "${GB_CONTAINER_BOOTSTRAP:-false}" != true && ! -d /run/systemd/system ]]; then
         gb_die "The Docker image must run systemd as PID 1. Start it using the supplied Compose configuration."
     fi
     gb_management_lock || return "$?"
-    gb_global_init
-    gb_ensure_base_groups
-    gb_ensure_base_dirs
-    gb_environment_telegram
-    tg_install_helper
-    sync_install_tools
-    logs_render_rotation
+    gb_global_init || return 1
+    gb_ensure_base_groups || return 1
+    gb_ensure_base_dirs || return 1
+    gb_environment_telegram || return 1
+    tg_install_helper || return 1
+    sync_install_tools || return 1
+    logs_render_rotation || return 1
     infrastructure_ensure
 }
 
 # Internal first-boot/restore operation. It never creates endpoints, requests
-# certificates, changes DNS or activates a new runtime code generation.
+# certificates or changes DNS. The enabled image-update service subsequently
+# applies a replacement image while the restored API generations serve traffic.
 cmd_container_init() {
     gb_is_docker || gb_die "container-init is only available in Docker mode."
     gb_require_root
@@ -189,7 +193,7 @@ cmd_container_init() {
         resources_status >/dev/null || return 1
     fi
     nginx_test || return 1
-    tg_notify ok "Container initialized" "Persistent state restored; endpoint deployment and public activation remain explicit."
+    tg_notify ok "Container initialized" "Persistent state restored; a replacement image is applied automatically after services start."
 }
 
 cmd_deploy() {
@@ -512,11 +516,17 @@ main() {
         menu) gb_system_init; ui_init; menu_main ;;
         infrastructure-prepare) gb_require_root; infrastructure_prepare ;;
         container-init) cmd_container_init ;;
+        image-update)
+            gb_require_root
+            local GB_IMAGE_UPDATE_WAIT=true
+            gb_management_lock || return "$?"
+            update_image "$@" ;;
         resources) gb_system_init; resources_cli "$@" ;;
         dashboard) gb_system_init; dashboard_cli "$@" ;;
         list) ep_list ;;
         status)
             if [[ -n "${1:-}" ]]; then endpoint_status_text "$1"; else
+                if gb_is_docker; then update_image_status; fi
                 while read -r d; do [[ -n "$d" ]] && ep_summary_line "$d"; done < <(ep_list); fi ;;
         deploy) cmd_deploy "$@" ;;
         go-live|golive) cmd_golive "$@" ;;
@@ -525,7 +535,7 @@ main() {
         cert) gb_system_init; certs_cli "$@" ;;
         settings) gb_system_init; cmd_settings "$@" ;;
         apply) gb_system_init; endpoint_apply "${1:?domain}" ;;
-        update) gb_system_init; if [[ -n "${1:-}" ]]; then update_domain "$1"; else update_all; fi ;;
+        update) gb_system_init || return "$?"; if [[ -n "${1:-}" ]]; then update_domain "$1"; else update_system; fi ;;
         self-update)
             [[ $# == 0 ]] || gb_die "self-update takes no arguments (use --dry-run to preview)."
             gb_require_root

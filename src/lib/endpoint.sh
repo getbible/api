@@ -45,7 +45,7 @@ endpoint_apply_abort() {
 # and no Cloudflare DNS or rules. It renders TLS with a placeholder
 # certificate so the complete vhost can be tested before go-live.
 endpoint_apply() {
-    local domain="$1" stage live=true
+    local domain="$1" stage live=true local_apply="${GB_LOCAL_APPLY:-false}"
     # Go-live uses this marker to distinguish a committed, healthy origin
     # from an activation failure when the optional edge update fails later.
     EP_APPLY_EDGE_FAILED=false
@@ -57,6 +57,10 @@ endpoint_apply() {
         ep_load "$domain" || return 1
     fi
     ep_is_live "$domain" || live=false
+    if [[ "$local_apply" == true && "$live" == true ]] && ! nginx_external_tls && ! nginx_cert_exists "$domain"; then
+        gb_warn "The saved certificate for $domain is unavailable; keeping its existing deployment. Restore the certificate before retrying the image update."
+        return 1
+    fi
     gb_ensure_base_dirs || return 1
     logs_ensure_endpoint_dir "$domain" || return 1
     if ! nginx_external_tls && nginx_cert_exists "$domain" && ! certs_install_hook; then
@@ -68,7 +72,7 @@ endpoint_apply() {
     EP_ENABLE_BACKUP="$(gb_new_backup_set "site-enable-$EP_SLUG")" || return 1
     gb_backup_file "$(nginx_enabled_file "$domain")" "$EP_ENABLE_BACKUP" || return 1
     nginx_transaction_begin "$domain" || return 1
-    if [[ "$live" == true ]] && declare -F cloudflare_protect_access >/dev/null; then
+    if [[ "$local_apply" != true && "$live" == true ]] && declare -F cloudflare_protect_access >/dev/null; then
         cloudflare_protect_access "$domain" || { endpoint_apply_abort "$domain" "Could not protect shared-cache access"; return 1; }
     fi
     "type_${EP_TYPE}_prepare" "$domain" || { endpoint_apply_abort "$domain" "Preparing the domain's services failed"; return 1; }
@@ -76,7 +80,7 @@ endpoint_apply() {
     if [[ "$live" == false ]] && ! nginx_external_tls && ! nginx_cert_exists "$domain"; then
         certs_placeholder_ensure "$domain" || gb_warn "$domain is staged without a placeholder certificate and renders HTTP-only until one exists."
     fi
-    if [[ "$live" == true ]] && declare -F cloudflare_ensure_origin_files >/dev/null; then
+    if [[ "$local_apply" != true && "$live" == true ]] && declare -F cloudflare_ensure_origin_files >/dev/null; then
         cloudflare_ensure_origin_files "$domain" || { endpoint_apply_abort "$domain" "Cloudflare address ranges or origin CA could not be fetched"; return 1; }
     fi
 
@@ -89,7 +93,7 @@ endpoint_apply() {
     fi
     nginx_apply_stage "$stage" "$EP_SLUG" || { endpoint_apply_abort "$domain" "nginx rejected the endpoint configuration"; return 1; }
 
-    if [[ "$live" == true ]] && ! nginx_external_tls && ! nginx_cert_exists "$domain"; then
+    if [[ "$local_apply" != true && "$live" == true ]] && ! nginx_external_tls && ! nginx_cert_exists "$domain"; then
         if certs_obtain "$domain"; then
             rm -rf -- "$stage" || return 1
             nginx_render_global "$stage" && nginx_render_endpoint "$stage" || { endpoint_apply_abort "$domain" "TLS configuration rendering failed"; return 1; }
@@ -110,7 +114,7 @@ endpoint_apply() {
     if [[ "${GOLIVE_CHECK_ORIGIN:-false}" == true ]]; then
         golive_verify "$domain" local || return 1
     fi
-    if [[ "$live" == true && -n "${GB_CLOUDFLARE_LOADED:-}" && "$(ep_get "$domain" CLOUDFLARE_MODE off)" != off ]]; then
+    if [[ "$local_apply" != true && "$live" == true && -n "${GB_CLOUDFLARE_LOADED:-}" && "$(ep_get "$domain" CLOUDFLARE_MODE off)" != off ]]; then
         if cloudflare_apply "$domain"; then
             ep_state_set "$domain" CLOUDFLARE_ERROR ""
         else

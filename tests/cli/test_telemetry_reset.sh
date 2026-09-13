@@ -55,10 +55,11 @@ GB_SYSTEMCTL="$TEST_ROOT/systemctl"
 GB_LIBEXEC="$TEST_ROOT/helpers"
 mkdir -p "$GB_LIBEXEC"
 export RESET_MARKER="$TEST_ROOT/helper-ran" SERVICE_CALLS="$TEST_ROOT/service-calls"
-export STOP_FAIL=true RESET_EXIT=0
+export STOP_FAIL=true RESET_EXIT=0 ROTATION_STATE=
 cat > "$GB_SYSTEMCTL" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$SERVICE_CALLS"
+if [[ "$1" == show ]]; then printf '%s\n' "$ROTATION_STATE"; fi
 [[ "$1" != stop || "$STOP_FAIL" != true ]]
 SH
 cat > "$GB_LIBEXEC/getbible-telemetry" <<'PY'
@@ -122,4 +123,10 @@ for unit in ('getbible-telemetry.service', 'getbible-dashboard.service'):
 assert 'start getbible-logrotate.timer' not in calls
 assert 'start getbible-logrotate.service' not in calls
 PY
+
+# systemd reports a running oneshot as activating, rather than active.
+: > "$SERVICE_CALLS"
+export ROTATION_STATE=activating
+logs_reset_history --discard-history > "$TEST_ROOT/running-rotation" 2>&1
+grep -qFx 'start getbible-logrotate.service' "$SERVICE_CALLS" || fail 'running oneshot rotation was not restored'
 printf 'ok: explicit telemetry reset, retained data, and service recovery\n'

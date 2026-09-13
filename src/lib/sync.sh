@@ -154,7 +154,13 @@ sync_install_version() {
     sd_install_unit "$stage_timer" "$unit.timer" || return 1
     sd_daemon_reload || return 1
     if [[ "$EV_ENABLED" == true ]]; then
-        sd_enable --now "$unit.timer"
+        if [[ "${GB_LOCAL_APPLY:-false}" == true ]]; then
+            # Preserve the running schedule during image application. Starting
+            # an inactive persistent timer could fetch overdue source data.
+            sd_enable "$unit.timer"
+        else
+            sd_enable --now "$unit.timer"
+        fi
     else
         sd_disable_now "$unit.timer"
     fi

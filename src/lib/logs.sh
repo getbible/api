@@ -16,19 +16,19 @@ logs_ensure_endpoint_dir() {
 # hourly timer that runs it with its own state file.
 logs_render_rotation() {
     local stage
-    stage="$(gb_tmpdir)/logrotate.conf"
-    cat > "$stage" <<CONF
+    stage="$(gb_tmpdir)/logrotate.conf" || return 1
+    cat > "$stage" <<CONF || return 1
 # getBible telemetry owns traffic and diagnostic spool rotation.
 # Independent logrotate rules would delete unread records. Intentionally empty.
 # Retained history is managed by TELEMETRY_MAX_GIB and TELEMETRY_RETENTION_DAYS.
 CONF
-    gb_install_file "$stage" "$GB_LOGROTATE_CONF" 0644
-    gb_install_file "$GB_TOOLS/getbible-logrotate-hook" "$GB_LIBEXEC/getbible-logrotate-hook" 0755
+    gb_install_file "$stage" "$GB_LOGROTATE_CONF" 0644 || return 1
+    gb_install_file "$GB_TOOLS/getbible-logrotate-hook" "$GB_LIBEXEC/getbible-logrotate-hook" 0755 || return 1
 
     local unit timer
-    unit="$(gb_tmpdir)/getbible-logrotate.service"
-    timer="$(gb_tmpdir)/getbible-logrotate.timer"
-    cat > "$unit" <<UNIT
+    unit="$(gb_tmpdir)/getbible-logrotate.service" || return 1
+    timer="$(gb_tmpdir)/getbible-logrotate.timer" || return 1
+    cat > "$unit" <<UNIT || return 1
 [Unit]
 Description=getBible API log rotation (size based)
 Documentation=file:$GB_REPO_DIR/docs/LOGGING.md
@@ -39,7 +39,7 @@ ExecStart=$GB_PYTHON $GB_LIBEXEC/getbible-telemetry rotate --db $GB_VAR/telemetr
 Nice=10
 IOSchedulingClass=idle
 UNIT
-    cat > "$timer" <<TIMER
+    cat > "$timer" <<TIMER || return 1
 [Unit]
 Description=Check getBible API logs for rotation every hour
 
@@ -52,9 +52,9 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 TIMER
-    sd_install_unit "$unit" getbible-logrotate.service
-    sd_install_unit "$timer" getbible-logrotate.timer
-    sd_daemon_reload
+    sd_install_unit "$unit" getbible-logrotate.service || return 1
+    sd_install_unit "$timer" getbible-logrotate.timer || return 1
+    sd_daemon_reload || return 1
     sd_enable --now getbible-logrotate.timer
 }
 
@@ -75,7 +75,7 @@ logs_reset_history() {
         printf 'Would reset canonical traffic history; raw logs and configuration stay in place.\n'
         return 0
     fi
-    local telemetry=false dashboard=false rotation=false timer=false status=0
+    local telemetry=false dashboard=false rotation=false timer=false rotation_state status=0
     local helper="$GB_LIBEXEC/getbible-telemetry"
     [[ -x "$helper" ]] || helper="$GB_TOOLS/getbible-telemetry"
     if sd_is_active getbible-telemetry.service || sd_is_enabled getbible-telemetry.service; then telemetry=true; fi
@@ -83,6 +83,9 @@ logs_reset_history() {
     if sd_is_active getbible-logrotate.service; then rotation=true; fi
     if sd_is_active getbible-logrotate.timer; then timer=true; fi
     if sd_available; then
+        # A Type=oneshot helper remains activating for its entire execution.
+        rotation_state="$("$GB_SYSTEMCTL" show getbible-logrotate.service --property=ActiveState --value 2>/dev/null || true)"
+        if [[ "$rotation_state" == activating ]]; then rotation=true; fi
         # The timer's helper opens the database too. Stop scheduling before
         # waiting for every writer/reader, then let reset take its lifetime lock.
         "$GB_SYSTEMCTL" stop getbible-logrotate.timer || status=$?

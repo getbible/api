@@ -1352,6 +1352,46 @@ rt_update() {
     return "$status"
 }
 
+# Apply an installed image to saved runtime endpoints without forcing unchanged
+# releases to rebuild. Resolve every selected Python family before changing the
+# registry; failed candidates restore those settings and retain live generations.
+rt_image_update() {
+    local domain="$1" label configured resolved backup index status=0
+    local -a labels=() versions=()
+    # shellcheck disable=SC2034 # Read by the shared endpoint_apply transaction.
+    local GB_LOCAL_APPLY=true
+    local RT_FORCE_BUILD=false RT_FORCE_DEPLOY=false RT_ONLY_LABEL=""
+    gb_is_docker || { gb_warn 'Image runtime updates require Docker mode.'; return 1; }
+    [[ "$(ep_get "$domain" TYPE)" == runtime ]] || { gb_warn "$domain is not a runtime domain."; return 1; }
+    [[ "$(ep_get "$domain" ENABLED true)" == true ]] || return 0
+    while IFS= read -r label; do
+        [[ -n "$label" && "$(ep_version_get "$domain" "$label" ENABLED true)" == true ]] || continue
+        configured="$(ep_version_get "$domain" "$label" PYTHON_VERSION)"
+        [[ "$configured" != *.*.* ]] || configured="${configured%.*}"
+        resolved="$(py_resolve_version "$configured")" || return 1
+        labels+=("$label"); versions+=("$resolved")
+    done < <(type_runtime_endpoints "$domain")
+    (( ${#labels[@]} > 0 )) || return 0
+    backup="$(mktemp -d "$(gb_tmpdir)/runtime-image-update.XXXXXX")" || return 1
+    for label in "${labels[@]}"; do
+        if ! cp -p -- "$(ep_version_conf "$domain" "$label")" "$backup/$label.conf"; then
+            rm -rf -- "$backup"
+            return 1
+        fi
+    done
+    for index in "${!labels[@]}"; do
+        if ! ep_version_set "$domain" "${labels[$index]}" PYTHON_VERSION "${versions[$index]}"; then status=1; break; fi
+    done
+    if (( status == 0 )); then endpoint_apply "$domain" || status=$?; fi
+    if (( status != 0 )); then
+        for label in "${labels[@]}"; do
+            gb_install_file "$backup/$label.conf" "$(ep_version_conf "$domain" "$label")" 0640 || return 1
+        done
+    fi
+    rm -rf -- "$backup"
+    return "$status"
+}
+
 rt_setting_allowed() {
     case "$1" in
         WORKERS|THREADS|WARM_TRANSLATIONS|DEFAULT_TRANSLATION|DEFAULT_REFERENCE|ALLOWED_TRANSLATIONS|REPOSITORY|CACHE_TTL|MEMORY_CACHE_TTL|MEMORY_MIN|MEMORY_MAX|CPU_QUOTA|WORKERS_MIN|WORKERS_MAX|THREADS_MIN|THREADS_MAX|CACHE_MEMORY_PERCENT|SHARED_CORPUS_LIMIT|CHAPTER_CACHE_LIMIT|TRANSLATION_CACHE_LIMIT|REFERENCE_CACHE_LIMIT) return 0 ;;

@@ -62,6 +62,25 @@ class ManagementLockTests(unittest.TestCase):
         self.assertEqual(result.returncode, 75)
         self.assertIn("deferring", result.stderr)
 
+    def test_image_application_waits_for_existing_management_work(self):
+        command, environment = self.command(dict(self.environment, GB_IMAGE_UPDATE_WAIT="true",
+                                                  GB_MANAGEMENT_LOCK_WAIT_SECONDS="0"))
+        with self.holder() as holder:
+            process = subprocess.Popen(command, env=environment, stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE, text=True)
+            try:
+                self.assertIn("Image update is waiting", process.stderr.readline())
+                self.assertIsNone(process.poll())
+                holder.communicate("release\n", timeout=5)
+                process.communicate(timeout=5)
+                self.assertEqual(process.returncode, 0)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate()
+                process.stdout.close()
+                process.stderr.close()
+
     def test_actual_cli_propagates_busy_to_background_controller(self):
         environment = dict(self.environment, GB_MANAGEMENT_LOCK_WAIT_SECONDS="0", GETBIBLE_EXECUTION_MODE="native")
         with self.holder():

@@ -318,7 +318,7 @@ printf 'ok: source-only self-update, tracked upstream, SSH, worktrees, menu, ref
 
 # Reporting is auxiliary: a collector failure is visible in the final outcome
 # while otherwise valid API updates still run. Essential install failures abort.
-# shellcheck disable=SC2329 # These hooks are called by the sourced update helpers.
+# shellcheck disable=SC2317,SC2329 # Sourced update hooks; codes differ across ShellCheck versions.
 (
     export GB_REPO_DIR="$ROOT" GB_VAR="$T/update-state" GB_YES=true
     mkdir -p "$GB_VAR"

@@ -416,7 +416,7 @@ class LifecycleTests(unittest.TestCase):
         message = storage_error(TelemetrySchemaError(1))
         self.assertIn("schema 1", message)
         self.assertIn("preserved", message)
-        self.assertIn("logs reset --discard-history", message)
+        self.assertIn("database migrations", message)
 
 
 if __name__ == "__main__":
