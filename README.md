@@ -46,7 +46,7 @@ vhost and TLS at its selected terminator; its **endpoints** are its version fold
 
 ## Choose native or Docker deployment
 
-The Docker deployment pulls the private prebuilt image from GitHub Container
+The Docker deployment pulls the prebuilt image from GitHub Container
 Registry. It runs systemd, nginx, static synchronization, query/search and the
 existing management menu in one container. Multiple domains share one HTTP
 port behind OPNsense HAProxy and Cloudflare; HAProxy owns external TLS. The
@@ -126,7 +126,7 @@ Documentation:
 
 | Document | Contents |
 | --- | --- |
-| [docs/DOCKER.md](docs/DOCKER.md) | private prebuilt image, Compose, configuration, commands, persistence and recovery |
+| [docs/DOCKER.md](docs/DOCKER.md) | prebuilt image, Compose, configuration, commands, persistence and recovery |
 | [docs/REGISTRY_ACCESS.md](docs/REGISTRY_ACCESS.md) | package read token, one-time Docker login, production pulls and token rotation |
 | [docs/OPNSENSE_HAPROXY.md](docs/OPNSENSE_HAPROXY.md) | OPNsense setup order, backend form fields, automatic client-IP recognition, direct access, IPv4 origins and verification |
 | [docs/DEPLOYMENT_DECISIONS.md](docs/DEPLOYMENT_DECISIONS.md) | objectives, constraints and reasons for deployment and caching behavior |
