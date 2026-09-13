@@ -55,19 +55,23 @@ GB_SYSTEMCTL="$TEST_ROOT/systemctl"
 GB_LIBEXEC="$TEST_ROOT/helpers"
 mkdir -p "$GB_LIBEXEC"
 export RESET_MARKER="$TEST_ROOT/helper-ran" SERVICE_CALLS="$TEST_ROOT/service-calls"
+export STOP_FAIL=true RESET_EXIT=0
 cat > "$GB_SYSTEMCTL" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$SERVICE_CALLS"
-[[ "$1" != stop ]]
+[[ "$1" != stop || "$STOP_FAIL" != true ]]
 SH
 cat > "$GB_LIBEXEC/getbible-telemetry" <<'PY'
 import os
 from pathlib import Path
 Path(os.environ['RESET_MARKER']).touch()
+with Path(os.environ['SERVICE_CALLS']).open('a') as calls:
+    calls.write('reset-helper\n')
+raise SystemExit(int(os.environ['RESET_EXIT']))
 PY
 chmod +x "$GB_SYSTEMCTL" "$GB_LIBEXEC/getbible-telemetry"
 sd_available() { return 0; }
-sd_is_active() { return 1; }
+sd_is_active() { [[ "$1" == getbible-logrotate.timer || "$1" == getbible-logrotate.service ]]; }
 sd_is_enabled() { return 0; }
 sd_start() { "$GB_SYSTEMCTL" start "$@"; }
 tg_notify() { :; }
@@ -77,11 +81,45 @@ fi
 [[ ! -e "$RESET_MARKER" ]] || fail 'reset ran after service stop failed'
 grep -qFx 'start getbible-telemetry.service' "$SERVICE_CALLS" || fail 'enabled telemetry was not recovered'
 grep -qFx 'start getbible-dashboard.service' "$SERVICE_CALLS" || fail 'enabled dashboard was not recovered'
+grep -qFx 'start getbible-logrotate.timer' "$SERVICE_CALLS" || fail 'active rotation timer was not recovered'
+grep -qFx 'start getbible-logrotate.service' "$SERVICE_CALLS" || fail 'active rotation service was not recovered'
 python3 - "$SERVICE_CALLS" <<'PY'
 from pathlib import Path
 import sys
 calls = Path(sys.argv[1]).read_text().splitlines()
-for unit in ('getbible-telemetry.service', 'getbible-dashboard.service'):
+for unit in ('getbible-telemetry.service', 'getbible-dashboard.service', 'getbible-logrotate.service', 'getbible-logrotate.timer'):
     assert calls.index('reset-failed ' + unit) < calls.index('start ' + unit), 'clear restart limits before service recovery'
+assert calls.index('stop getbible-logrotate.timer') < calls.index('stop getbible-logrotate.service getbible-telemetry.service getbible-dashboard.service')
+PY
+
+# A helper failure still restores the reader, collector and active timer.
+: > "$SERVICE_CALLS"
+export STOP_FAIL=false RESET_EXIT=7
+sd_is_active() { [[ "$1" == getbible-logrotate.timer ]]; }
+status=0
+logs_reset_history --discard-history > "$TEST_ROOT/failed-reset" 2>&1 || status=$?
+[[ "$status" -eq 7 ]] || fail 'reset helper failure status was lost'
+[[ -e "$RESET_MARKER" ]] || fail 'reset helper was not attempted'
+for unit in getbible-telemetry.service getbible-dashboard.service getbible-logrotate.timer; do
+    grep -qFx "start $unit" "$SERVICE_CALLS" || fail "$unit was not restored after a reset failure"
+done
+if grep -qFx 'start getbible-logrotate.service' "$SERVICE_CALLS"; then fail 'inactive rotation service was started'; fi
+
+# Enabled but inactive scheduling stays stopped; completed reset precedes recovery.
+: > "$SERVICE_CALLS"
+export RESET_EXIT=0
+sd_is_active() { return 1; }
+logs_reset_history --discard-history > "$TEST_ROOT/successful-reset" 2>&1
+python3 - "$SERVICE_CALLS" <<'PY'
+from pathlib import Path
+import sys
+calls = Path(sys.argv[1]).read_text().splitlines()
+reset = calls.index('reset-helper')
+assert calls.index('stop getbible-logrotate.timer') < reset
+assert calls.index('stop getbible-logrotate.service getbible-telemetry.service getbible-dashboard.service') < reset
+for unit in ('getbible-telemetry.service', 'getbible-dashboard.service'):
+    assert reset < calls.index('start ' + unit)
+assert 'start getbible-logrotate.timer' not in calls
+assert 'start getbible-logrotate.service' not in calls
 PY
 printf 'ok: explicit telemetry reset, retained data, and service recovery\n'
