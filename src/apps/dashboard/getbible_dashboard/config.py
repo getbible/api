@@ -39,6 +39,7 @@ class Config:
     broker_socket: str = "/run/getbible-admin/broker.sock"
     static_dir: str = "/usr/local/share/getbible-dashboard"
     telemetry_db: str = "/var/lib/getbible/telemetry/traffic.sqlite3"
+    release_file: str = str(Path(__file__).resolve().parents[1] / "release.json")
     telegram_conf: str = "/run/getbible/telegram.conf"
     session_seconds: int = 30 * 86400
     idle_seconds: int = 60
@@ -86,6 +87,7 @@ class Config:
             "DASHBOARD_BROKER_SOCKET": "broker_socket", "DASHBOARD_STATIC_DIR": "static_dir",
             "BROKER_SOCKET": "broker_socket",
             "TELEMETRY_DATABASE": "telemetry_db", "TELEMETRY_DB": "telemetry_db",
+            "DASHBOARD_RELEASE_FILE": "release_file",
         }
         for key, attribute in path_keys.items():
             if key in values:
