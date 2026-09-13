@@ -25,32 +25,43 @@ holding `compose.yaml`, select the desired numbered `GETBIBLE_IMAGE_TAG` in
 docker compose pull
 docker compose up -d
 docker compose exec --user root getbible getbible doctor
-docker compose exec --user root getbible getbible list
+docker compose exec --user root getbible getbible status
 ```
 
 This replaces the whole system container and causes a service restart; allow
 the configured graceful stop period. Mounted configuration, numeric account
-identities, data, interpreters and saved runtime generations survive. It does
-not automatically apply new domain templates, redeploy applications, issue
-certificates or change public DNS. After the replacement, explicitly apply to
-one domain and then the others when ready:
+identities, data, interpreters and saved runtime generations survive. After
+restoring the saved services, `getbible-image-update.service` automatically applies
+a new or previously unapplied image to the dashboard, telemetry and enabled
+endpoints. It uses bundled dependencies, checks runtime candidates before
+switching traffic, and preserves previous generations on failure. It does not
+fetch or scan Bible source data, issue certificates or change public DNS.
+
+`getbible status` reports the image release, last applied release and update state.
+The persistent `/var/lib/getbible/state/image-update.conf` records `APPLIED_VERSION`
+only after success. Restarting that applied image skips the refresh. If an update
+fails, inspect its reported error and retry from the root container shell:
 
 ```sh
-docker compose exec --user root getbible getbible update query.example.org
-docker compose exec --user root getbible getbible status query.example.org
-docker compose exec --user root getbible getbible update
+getbible update
+getbible status
 ```
 
-The existing commands below work inside the container with this `docker
-compose exec` prefix and `getbible` command. Docker's `self-update` directs the
-operator to the image workflow; it does not mutate image code through Git.
-Explicit runtime updates use the image's bundled interpreters/dependencies
-without fetching packages. To adopt newly released interpreter patches, first
-pull an image that bundles them, then run an explicit domain/runtime update.
-In Docker mode, `update DOMAIN` also adopts the newest bundled patch of each
-runtime endpoint's selected Python family. This differs from native ordinary
-`update`, which retains the selected exact patch. Retained generations keep
-their exact interpreter for rollback in both modes.
+`getbible doctor` remains diagnostic; it does not apply updates. A replacement
+image and manual Docker updates adopt the newest bundled patch of each runtime
+endpoint's selected Python family without fetching packages. Native ordinary
+`update` retains the selected exact patch. Retained generations keep their exact
+interpreter for rollback in both modes. Docker's `self-update` directs the
+operator to the host image workflow instead of changing image code through Git.
+
+Telemetry history remains in place. Before the collector starts, updates inspect
+the stored schema version and apply supported versioned migrations, including
+schema 1 to 2, after a protective backup under `/var/backups/getbible/telemetry`.
+Requests, events, metrics, retention records, metadata and ingestion cursors are
+preserved. Database schema versions are independent of image releases and Bible
+API versions; the stored database version determines the migration. The current
+schema is unchanged; unknown or newer schemas remain intact and report a failure.
+There is no update-time history reset. Bible source files remain unchanged.
 
 `latest` follows accepted merges into `main`; it is not an automatic updater. Pulling and
 recreating is still necessary. Numbered tags provide repeatability. Returning
@@ -128,9 +139,12 @@ API domains, then `dashboard status` to verify the running release.
 
 | Operation | Result |
 | --- | --- |
-| `self-update` | Fetches the current branch's upstream and fast-forwards the clean manager checkout. The next invocation loads the updated code; hosted domains are not applied. |
+| Docker image replacement | Automatically applies the installed release to management services and enabled endpoints after restoring saved services; an already applied image skips refresh on restart. |
+| `status` | Shows service state and, in Docker, image release, applied release and image-update state. |
+| `doctor` | Diagnoses the installation without applying an update. |
+| `self-update` | Native: fetches the current branch's upstream and fast-forwards the clean manager checkout. The next invocation loads the updated code; hosted domains are not applied. Docker: directs the operator to host image replacement. |
 | `dashboard update` | Installs the current manager's dashboard and reporting code, restarts the dashboard backend, and verifies its running release. API runtimes are not redeployed. |
-| `update [DOMAIN]` | Applies current templates, helpers, configuration, documentation and runtime changes. Native retains the selected exact Python patch; Docker adopts the newest bundled patch of the selected family. |
+| `update [DOMAIN]` | Applies current templates, helpers, configuration, documentation and runtime changes. Docker `update` retries/reapplies the installed image; native retains the selected exact Python patch while Docker adopts the newest bundled patch of the selected family. |
 | `runtime DOMAIN update` | Rebuilds application dependencies and adopts the latest reviewed patch of each endpoint's selected Python family. `runtime DOMAIN v3 update` does it for one endpoint. |
 | `runtime DOMAIN [vN] update --python 3.14` | Explicitly selects the catalog's current 3.14 patch and creates a new runtime release. An exact catalog patch is also accepted. |
 | `runtime DOMAIN redeploy` | Starts a fresh deployment of every endpoint's current release and settings, rebuilding code only if its inputs changed. |

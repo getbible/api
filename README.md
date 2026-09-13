@@ -97,6 +97,13 @@ Inside the root shell, run `getbible` commands directly without `sudo`, for
 example `getbible dashboard update` or `getbible dashboard status`. Use `exit`
 to return to the Docker host before running Docker image/Compose commands.
 
+A replacement image automatically refreshes the dashboard, telemetry and enabled
+endpoints after restoring the saved services. Runtime candidates use bundled
+dependencies and replace the serving generation only after readiness succeeds.
+`getbible status` shows the image release, applied release and update state;
+`getbible update` retries or reapplies it. Restarting an already applied image
+skips this refresh. Bible source data, DNS and certificates remain unchanged.
+
 `getbible` is a real executable command linked to the same manager. Add its
 existing arguments to run any action directly, for example
 `docker compose exec --user root getbible getbible list`. Persistent data lives

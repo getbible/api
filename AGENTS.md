@@ -12,8 +12,10 @@ installs is rendered from `src/` and recorded. Native `getbible.sh self-update`
 fetches the tracked upstream into the manager's source checkout only;
 the next invocation loads the new code. Separately, `getbible.sh update`
 applies the current checkout to hosted domains without fetching.
-Docker installations load the manager from the image and use image replacement
-for manager updates; `getbible` is a command linked to the same entry point.
+Docker installations load the manager from the image. A new or previously
+unapplied image automatically refreshes management services and enabled endpoints
+after restoring saved services; an already applied image skips this refresh on
+restart. `getbible update` reapplies/retries it; `getbible` links to this entry point.
 See `docs/DEPLOYMENT_DECISIONS.md` before changing deployment behavior.
 
 ## Vocabulary
@@ -87,8 +89,13 @@ remain public regardless of the data access mode.
 
 - Support fresh installations and ongoing maintenance of this implementation.
   Preserve normal updates, redeployment, certificate renewal and generation
-  rollback. Do not add conversion of old schemas, legacy filesystem layouts
-  or retirement routines for a previous server implementation.
+  rollback. Upgrade known telemetry schemas through explicit versioned migrations
+  before the collector starts, preserving reporting records and ingestion cursors.
+  Save a protective pre-migration backup under `/var/backups/getbible/telemetry`.
+  The schema 1 to 2 migration must retain existing history; verify it using real
+  prior-format records. The current schema is a no-op; unknown or newer schemas
+  remain intact and report failure. Do not reset history as part of an update or
+  add conversions of legacy filesystem layouts.
 
 - Preserve both native and Docker execution modes. Docker is one Linux system
   container with systemd, nginx and managed services; keep service identities,
@@ -97,14 +104,21 @@ remain public regardless of the data access mode.
   of execution mode; external TLS serves complete HTTP vhosts behind trusted
   proxies and retains public HTTPS URLs.
 - Container startup restores saved local state, identities and enabled services
-  before traffic. It must not fetch updates, redeploy applications, issue
-  certificates or take over DNS as a side effect of an ordinary restart.
+  before applying a new or previously unapplied image release through
+  `getbible-image-update.service`. Refresh management services and enabled
+  endpoints using bundled dependencies and normal readiness/rollback transactions.
+  Persist the successful `APPLIED_VERSION` and status in
+  `/var/lib/getbible/state/image-update.conf`; restarting an already applied
+  image must skip refresh. Image application must not fetch or scan Bible source
+  data, fetch packages, issue certificates or alter DNS. `getbible update` retries
+  or reapplies the image; `doctor` remains diagnostic.
   Persist account UIDs/GIDs and membership before services access mounted data;
   do not blanket-chown a corpus to hide an identity collision.
 - Release images contain the dependencies offered by Docker's runtime menu;
   endpoint deployment must not download Python or compile runtime packages.
   Container manager updates come from the image, native manager updates from
-  Git. Keep explicit endpoint apply/update and retained-generation rollback.
+  Git. Keep manual endpoint apply/update and retained-generation rollback alongside
+  automatic Docker image application.
 - Environment overrides must be validated and identified as authoritative in
   the manager. Aggregate memory budgeting must account for all runtime endpoints
   and update overlap; never promise fixed cache-entry counts are byte limits.
