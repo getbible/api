@@ -13,8 +13,6 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 umask 027
 
-GB_VERSION="1.0.0"
-
 # Execution environment is independent of certificate ownership. A test root
 # remains native unless its test explicitly selects Docker.
 gb_execution_mode() {
@@ -32,6 +30,7 @@ gb_is_docker() { [[ "$(gb_execution_mode)" == docker ]]; }
 # --- locations ---------------------------------------------------------------
 GB_PREFIX="${GB_PREFIX:-}"
 GB_REPO_DIR="${GB_REPO_DIR:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)}"
+GB_VERSION="$(cat "$GB_REPO_DIR/VERSION" 2>/dev/null || printf unknown)"
 GB_SRC="$GB_REPO_DIR/src"
 GB_LIB="$GB_SRC/lib"
 GB_TYPES="$GB_SRC/types"
@@ -250,7 +249,10 @@ gb_management_lock() {
     gb_ensure_dir "$GB_VAR" 0755 || return 1
     exec 7>"$GB_VAR/manage.lock" || return 1
     if ! flock -n 7; then
-        if [[ "$admin_job" =~ ^[A-Za-z0-9_-]{1,128}$ ]]; then
+        if [[ "${GB_IMAGE_UPDATE_WAIT:-false}" == true ]]; then
+            gb_log 'Image update is waiting for the current management operation to finish.'
+            flock 7 || return 1
+        elif [[ "$admin_job" =~ ^[A-Za-z0-9_-]{1,128}$ ]]; then
             # A durable dashboard job may wait without keeping a web request
             # open. Acquire once in this process; never replay a CLI command
             # after a failure that might have followed a partial mutation.

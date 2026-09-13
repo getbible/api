@@ -57,6 +57,8 @@ fi
 /usr/local/lib/getbible/getbible-identities restore
 /usr/local/lib/getbible/getbible-identities record --group adm --group systemd-journal
 install -d -m 0755 -o root -g adm /var/log/nginx
+# Restore saved services now and enable the image-update job. Systemd runs that
+# job after nginx starts; its durable release marker skips unchanged images.
 /usr/local/bin/getbible container-init
 nginx -t
 # This marker is ephemeral. Failed initialization never reports healthy.

@@ -227,8 +227,18 @@ infrastructure_install() {
             "SYSTEMCTL=$GB_SYSTEMCTL" "NGINX_USER=$GB_NGINX_USER" "NOTIFY_GROUP=$GB_NOTIFY_GROUP" "READERS_GROUP=$GB_READERS_GROUP" || return 1
         sd_install_unit "$stage/$unit" "$unit" || return 1
     done
+    if gb_is_docker; then
+        unit=getbible-image-update.service
+        gb_render "$GB_SRC/systemd/$unit.tmpl" "$stage/$unit" "MANAGER=$GB_SELF" || return 1
+        sd_install_unit "$stage/$unit" "$unit" || return 1
+        # The entrypoint restores all saved services before systemd starts.
+        # Only the post-boot job applies a changed image; ordinary restarts
+        # return immediately when its persistent release marker matches.
+        sd_enable "$unit" || return 1
+    fi
     sd_daemon_reload || return 1
     infrastructure_storage_initial_sample || return 1
+    infrastructure_reporting_prepare || return 1
     # A repaired collector must be allowed to start even after exhausting its
     # previous restart allowance. Its failure must not prevent dashboard repair.
     if sd_available && [[ "$GB_DRY_RUN" != true ]]; then
@@ -242,6 +252,48 @@ infrastructure_install() {
     if [[ "$(gb_global DASHBOARD_ENABLED false)" == true && -n "$(dashboard_domain)" ]]; then
         sd_enable --now getbible-admin.service getbible-dashboard.service || return 1
     fi
+}
+
+infrastructure_reporting_prepare() {
+    local unit status=0 output restore
+    local -a active=() stopped=()
+    export GB_REPORTING_PREPARED=false
+    # Start the restored API generations first. Retaining a large old history
+    # belongs to the background image apply job after nginx is available.
+    [[ "${GB_CONTAINER_BOOTSTRAP:-false}" != true ]] || return 0
+    output="$(gb_tmpdir)/telemetry-prepare.json"
+    if sd_available && [[ "$GB_DRY_RUN" != true ]]; then
+        for unit in getbible-logrotate.timer getbible-logrotate.service getbible-telemetry.service getbible-dashboard.service; do
+            [[ -f "$GB_SYSTEMD/$unit" ]] || continue
+            stopped+=("$unit")
+            if [[ "$unit" == getbible-logrotate.timer ]]; then
+                if sd_is_active "$unit"; then active+=("$unit"); fi
+            elif [[ "$unit" != getbible-logrotate.service ]] && { sd_is_active "$unit" || sd_is_enabled "$unit"; }; then
+                active+=("$unit")
+            fi
+        done
+        # The timer can launch a second SQLite writer. Stop it and any in-flight
+        # rotation along with the collector/readers before retaining old state.
+        if (( ${#stopped[@]} > 0 )); then "$GB_SYSTEMCTL" stop "${stopped[@]}" || status=1; fi
+    fi
+    if (( status == 0 )) && [[ "$GB_DRY_RUN" != true ]]; then
+        "$GB_PYTHON" "$GB_LIBEXEC/getbible-telemetry" prepare \
+            --db "$GB_VAR/telemetry/traffic.sqlite3" --backup-dir "$GB_BACKUPS/telemetry" \
+            --backup-seconds "$(gb_global TELEMETRY_BACKUP_SECONDS 900)" \
+            --migration-seconds "$(gb_global TELEMETRY_MIGRATION_SECONDS 900)" > "$output" || status=1
+        infrastructure_reporting_permissions || status=1
+        if (( status == 0 )); then GB_REPORTING_PREPARED=true; fi
+    fi
+    # Restore previously active services even when preparation fails. Failed
+    # preparation leaves the source history intact and must not strand readers.
+    for restore in "${active[@]}"; do
+        "$GB_SYSTEMCTL" reset-failed "$restore" || status=1
+        sd_start "$restore" || status=1
+    done
+    if (( status != 0 )); then
+        gb_warn 'Reporting preparation failed. Existing API generations and retained traffic history remain in place. Check the telemetry journal.'
+    fi
+    return "$status"
 }
 
 infrastructure_reporting_permissions() {
@@ -305,6 +357,8 @@ infrastructure_update() {
     fi
     if [[ "$dashboard_active" == true ]]; then
         sd_restart getbible-dashboard.service || status=1
+    fi
+    if [[ "$dashboard_active" == true || "$(gb_global DASHBOARD_ENABLED false)" == true ]]; then
         dashboard_wait_current || status=1
     fi
     # An update can itself be a broker job. Let the broker drain and persist its

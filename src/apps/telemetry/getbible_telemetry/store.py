@@ -13,8 +13,10 @@ import math
 import os
 import re
 import sqlite3
+import tempfile
 import time
 from datetime import datetime
+from contextlib import closing
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
@@ -46,18 +48,20 @@ _DIMENSIONS = {
 }
 _USAGE = frozenset({"translation", "book", "search", "reference"})
 SCHEMA_VERSION = 2
+_SCHEMA_ROOT = Path(__file__).with_name("schemas")
+_MIGRATIONS = {1: (2, Path(__file__).with_name("migrations") / "1_to_2.sql")}
 
 
 class TelemetrySchemaError(RuntimeError):
-    """The stored history needs an explicit operator decision, never a reset."""
+    """The stored history requires a compatible, versioned preparation step."""
 
     def __init__(self, found: int) -> None:
         self.found = found
         self.expected = SCHEMA_VERSION
         super().__init__(
             f"Traffic history schema {found} is incompatible with schema {SCHEMA_VERSION}. "
-            "History has been preserved. Review the installed manager version and back up "
-            "history before choosing getbible logs reset --discard-history; no history conversion is performed."
+            "History has been preserved. Apply a compatible manager to run its supported "
+            "database migrations; an unsupported newer schema requires its matching manager."
         )
 
 
@@ -84,6 +88,93 @@ def reset_history(path: str | os.PathLike[str]) -> dict[str, Any]:
     finally:
         db.close()
     return {"schema_version": SCHEMA_VERSION, "collection_started": cutoff, "history_reset": True}
+
+
+def prepare_history(path: str | os.PathLike[str], backup_dir: str | os.PathLike[str], *,
+                    backup_seconds: float = 900.0, migration_seconds: float = 900.0) -> dict[str, Any]:
+    """Prepare current history with a durable backup and versioned migration.
+
+    The caller holds the collector lifetime lock and has stopped reporting and
+    rotation services. Original records remain intact. SQLite's backup API
+    includes committed WAL data and bounds lock retries through its progress hook.
+    """
+    for budget in (backup_seconds, migration_seconds):
+        if not math.isfinite(budget) or not 1 <= budget <= 86400:
+            raise ValueError("History preparation time budgets must be between 1 and 86400 seconds")
+    path = Path(path)
+    path.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+    if not path.exists():
+        with TelemetryStore(path):
+            pass
+        return {"schema_version": SCHEMA_VERSION, "prepared": "created", "history_reset": False}
+    with closing(sqlite3.connect(path.absolute().as_uri() + "?mode=rw", uri=True, timeout=5)) as source:
+        schema = source.execute("PRAGMA user_version").fetchone()[0]
+        tables = {row[0] for row in source.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if schema == 0 and not tables:
+            source.close()
+            with TelemetryStore(path):
+                pass
+            return {"schema_version": SCHEMA_VERSION, "prepared": "created", "history_reset": False}
+        if schema != SCHEMA_VERSION and schema not in _MIGRATIONS:
+            raise TelemetrySchemaError(schema)
+        # Check the declared tables/columns against that version's definition.
+        # LIMIT 0 validates the structure without reading historical records.
+        with closing(sqlite3.connect(":memory:")) as expected:
+            expected.executescript((_SCHEMA_ROOT / f"{schema}.sql").read_text(encoding="utf-8"))
+            for table, in expected.execute("SELECT name FROM sqlite_master WHERE type='table'"):
+                columns = ",".join('actual."' + row[1] + '"' for row in expected.execute(f'PRAGMA table_info("{table}")'))
+                source.execute(f'SELECT {columns} FROM "{table}" AS actual LIMIT 0')
+        if schema == SCHEMA_VERSION:
+            return {"schema_version": SCHEMA_VERSION, "prepared": "unchanged", "history_reset": False}
+        backup_dir = Path(backup_dir)
+        backup_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(prefix=".traffic-schema-" + str(schema) + "-", suffix=".partial", dir=backup_dir)
+        os.close(fd)
+        backup = Path(temporary).with_name(Path(temporary).name.removeprefix(".").removesuffix(".partial") + ".sqlite3")
+        deadline = time.monotonic() + backup_seconds
+
+        def progress(_status: int, _remaining: int, _total: int) -> None:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Traffic history backup exceeded its time budget; the database has been preserved")
+
+        try:
+            destination = sqlite3.connect(temporary, timeout=5)
+            try:
+                source.backup(destination, pages=256, progress=progress, sleep=0.05)
+            finally:
+                destination.close()
+            # Publish only a completed, durable snapshot before modifying history.
+            with open(temporary, "rb") as snapshot:
+                os.fsync(snapshot.fileno())
+            os.replace(temporary, backup)
+            directory_fd = os.open(backup_dir, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except BaseException:
+            Path(temporary).unlink(missing_ok=True)
+            raise
+        original_schema = schema
+        deadline = time.monotonic() + migration_seconds
+        source.set_progress_handler(lambda: int(time.monotonic() >= deadline), 10_000)
+        scripts = []
+        while schema != SCHEMA_VERSION:
+            if schema not in _MIGRATIONS:
+                raise TelemetrySchemaError(schema)
+            schema, script = _MIGRATIONS[schema]
+            scripts.append(script.read_text(encoding="utf-8"))
+        try:
+            # DDL, derived fields and the final version marker commit together.
+            source.executescript("BEGIN IMMEDIATE;\n" + "\n".join(scripts)
+                                 + f"\nPRAGMA user_version={SCHEMA_VERSION};\nCOMMIT;")
+        except BaseException:
+            source.rollback()
+            raise
+        finally:
+            source.set_progress_handler(None, 0)
+    return {"schema_version": SCHEMA_VERSION, "history_reset": False, "prepared": "migrated",
+            "previous_schema_version": original_schema, "backup": str(backup)}
 
 
 def _key(value: str) -> str:
@@ -288,42 +379,7 @@ def _normalise(entry: dict[str, Any], endpoint: str, source: str, record_key: st
     }
 
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS sources (
-    identity TEXT PRIMARY KEY, path TEXT NOT NULL, offset INTEGER NOT NULL DEFAULT 0,
-    fingerprint TEXT NOT NULL DEFAULT '', fingerprint_bytes INTEGER NOT NULL DEFAULT 0,
-    generation INTEGER NOT NULL DEFAULT 0, updated REAL NOT NULL, closed INTEGER NOT NULL DEFAULT 0
-);
-CREATE TABLE IF NOT EXISTS requests (
-    id INTEGER PRIMARY KEY, endpoint TEXT NOT NULL, request_id TEXT NOT NULL, stamp REAL NOT NULL,
-    method TEXT NOT NULL, path TEXT NOT NULL, query TEXT NOT NULL, version TEXT NOT NULL,
-    status INTEGER NOT NULL, duration_ms REAL NOT NULL, bytes INTEGER NOT NULL,
-    remote_addr TEXT NOT NULL, token_id TEXT NOT NULL, auth TEXT NOT NULL,
-    cache TEXT NOT NULL, translation TEXT NOT NULL, book TEXT NOT NULL,
-    reference TEXT NOT NULL, search TEXT NOT NULL, operation TEXT NOT NULL, user_agent TEXT NOT NULL,
-    endpoint_kind TEXT NOT NULL, referrer TEXT NOT NULL, book_names TEXT NOT NULL,
-    edge_json TEXT, runtime_json TEXT, UNIQUE(endpoint, request_id)
-);
-CREATE INDEX IF NOT EXISTS requests_time ON requests(stamp, id);
-CREATE INDEX IF NOT EXISTS requests_endpoint_time ON requests(endpoint, stamp);
-CREATE INDEX IF NOT EXISTS requests_translation_time ON requests(translation, stamp);
-CREATE TABLE IF NOT EXISTS events (
-    id INTEGER PRIMARY KEY, stamp REAL NOT NULL, endpoint TEXT NOT NULL,
-    source TEXT NOT NULL, level TEXT NOT NULL, event TEXT NOT NULL, payload TEXT NOT NULL,
-    record_key TEXT NOT NULL UNIQUE
-);
-CREATE INDEX IF NOT EXISTS events_time ON events(stamp, id);
-CREATE TABLE IF NOT EXISTS metrics (
-    id INTEGER PRIMARY KEY, stamp REAL NOT NULL, payload TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS metrics_time ON metrics(stamp, id);
-CREATE TABLE IF NOT EXISTS retention (
-    id INTEGER PRIMARY KEY, stamp REAL NOT NULL, reason TEXT NOT NULL,
-    first_stamp REAL, last_stamp REAL, request_rows INTEGER NOT NULL,
-    event_rows INTEGER NOT NULL, metric_rows INTEGER NOT NULL, detail TEXT NOT NULL
-);
-"""
+_SCHEMA = (_SCHEMA_ROOT / f"{SCHEMA_VERSION}.sql").read_text(encoding="utf-8")
 
 
 class TelemetryStore:

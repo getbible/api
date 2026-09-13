@@ -109,7 +109,7 @@ done
 # Deployment metadata distinguishes copied source from the running process.
 dashboard_release_manifest > "$TEST_ROOT/source-release.json"
 cmp "$TEST_ROOT/source-release.json" "$GB_LIBEXEC/apps/dashboard/release.json" || fail 'installed release marker does not match reviewed manager source'
-# shellcheck disable=SC2329 # Called indirectly by dashboard_status.
+# shellcheck disable=SC2317,SC2329 # Indirect dashboard_status hook; codes differ across ShellCheck versions.
 dashboard_health() {
     printf '{"release":%s}\n' "$(cat "$GB_LIBEXEC/apps/dashboard/release.json")"
 }
@@ -153,7 +153,7 @@ assert calls.index(reset) < calls.index('enable --now getbible-telemetry.service
 PY
 infrastructure_update --dashboard > "$TEST_ROOT/dashboard-recovery" 2>&1 || fail 'dashboard update was blocked by unrelated collector failure'
 (
-    # shellcheck disable=SC2329 # Called indirectly by infrastructure_update.
+    # shellcheck disable=SC2317,SC2329 # Indirect infrastructure_update hook; codes differ across ShellCheck versions.
     infrastructure_install() { GB_TELEMETRY_START_FAILED=true; return 1; }
     if infrastructure_update; then fail 'essential installation failure must fail the update'; fi
     [[ "$GB_INFRASTRUCTURE_TELEMETRY_FAILED" == false ]] || fail 'essential installation failure was incorrectly treated as collector-only failure'
@@ -168,4 +168,15 @@ gb_global_set DASHBOARD_DOMAIN dashboard.example.test
 : > "$SERVICE_ACTIONS"
 dashboard_cli update
 grep -qFx 'restart getbible-dashboard.service' "$SERVICE_ACTIONS" || fail 'dashboard update did not replace the running backend'
+
+# Image application runs after the restored nginx service, never inside the
+# pre-systemd bootstrap path. The release marker decides whether it has work.
+: > "$SERVICE_ACTIONS"
+GB_CONTAINER_BOOTSTRAP=true GETBIBLE_EXECUTION_MODE=docker infrastructure_install > "$TEST_ROOT/image-bootstrap" 2>&1
+image_unit="$GB_SYSTEMD/getbible-image-update.service"
+grep -qFx "ExecStart=$GB_SELF image-update --yes" "$image_unit" || fail 'container bootstrap did not install the image apply job'
+grep -qFx 'After=local-fs.target nginx.service getbible-prepare.service' "$image_unit" || fail 'image apply must run after the restored API frontend'
+grep -qFx 'WantedBy=multi-user.target' "$image_unit" || fail 'image apply must be part of normal container startup'
+grep -qFx 'enable getbible-image-update.service' "$SERVICE_ACTIONS" || fail 'container bootstrap did not schedule image application'
+if grep -q '^stop ' "$SERVICE_ACTIONS"; then fail 'container bootstrap performed blocking reporting preparation before restoring APIs'; fi
 printf 'ok: native boot preparation, effective overrides, live reload, and explicit source refresh\n'

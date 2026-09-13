@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 from .collector import Collector
-from .store import TelemetryStore, reset_history, timestamp
+from .store import TelemetryStore, prepare_history, reset_history, timestamp
 from .catalog import LocalCatalog
 from .settings import numeric_setting
 
@@ -25,15 +25,27 @@ def _number(name: str):
     return lambda value: numeric_setting("TELEMETRY_" + name, value)
 
 
+def _seconds(value: str) -> int:
+    if not value.isascii() or not value.isdecimal() or not 1 <= int(value) <= 86400:
+        raise argparse.ArgumentTypeError("use an integer between 1 and 86400 seconds")
+    return int(value)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("collect", "summary", "series", "requests", "events",
-                                          "metrics", "storage", "endpoints", "export", "rotate", "reset"))
+                                          "metrics", "storage", "endpoints", "export", "rotate", "reset", "prepare"))
     parser.add_argument("--db", default=_env("DB", "/var/lib/getbible/telemetry/traffic.sqlite3"))
     parser.add_argument("--log-root", default=_env("LOG_ROOT", "/var/log/getbible"))
     parser.add_argument("--registry", default=_env("REGISTRY", "/etc/getbible/endpoints"))
     parser.add_argument("--data-root", default=_env("DATA_ROOT", "/srv/getbible"))
     parser.add_argument("--discard-history", action="store_true", help="Explicitly discard old history when using reset")
+    parser.add_argument("--backup-dir", default=_env("BACKUP_DIR", "/var/backups/getbible/telemetry"),
+                        help="Persistent snapshots preserved before a supported history schema transition")
+    parser.add_argument("--backup-seconds", type=_seconds, default=_env("BACKUP_SECONDS", "900"),
+                        help="Time budget for the protective history snapshot (1..86400 seconds)")
+    parser.add_argument("--migration-seconds", type=_seconds, default=_env("MIGRATION_SECONDS", "900"),
+                        help="Time budget for the atomic schema migration (1..86400 seconds)")
     parser.add_argument("--from", dest="start", default="")
     parser.add_argument("--to", dest="end", default="")
     parser.add_argument("--endpoint")
@@ -57,18 +69,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-journal", action="store_true", help="Disable collection of getBible systemd service events")
     parser.add_argument("--systemctl", default="/usr/bin/systemctl")
     args = parser.parse_args(argv)
-    if args.action == "reset":
-        if not args.discard_history:
+    if args.action in {"reset", "prepare"}:
+        if args.action == "reset" and not args.discard_history:
             parser.error("reset requires --discard-history; stop the telemetry collector before resetting")
+        if args.action == "prepare" and args.discard_history:
+            parser.error("--discard-history is only valid with reset")
         path = Path(args.db)
         path.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
         with path.with_suffix(".collector.lock").open("a", encoding="ascii") as lock:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError:
-                parser.error("stop the telemetry collector before resetting history")
+                parser.error("stop the telemetry collector before preparing or resetting history")
             os.umask(0o027)
-            result = reset_history(args.db)
+            result = (prepare_history(args.db, args.backup_dir, backup_seconds=args.backup_seconds,
+                                      migration_seconds=args.migration_seconds)
+                      if args.action == "prepare" else reset_history(args.db))
             os.chmod(args.db, 0o640)
             print(json.dumps(result))
         return 0

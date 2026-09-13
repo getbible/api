@@ -18,7 +18,9 @@ type_static_prepare() {
     while read -r label; do
         [[ -n "$label" ]] || continue
         sync_setup_version "$domain" "$label" || return 1
-        sync_pin_host "$domain" "$(ep_version_get "$domain" "$label" REPO_URL)" || return 1
+        if [[ "${GB_LOCAL_APPLY:-false}" != true ]]; then
+            sync_pin_host "$domain" "$(ep_version_get "$domain" "$label" REPO_URL)" || return 1
+        fi
         sync_install_version "$domain" "$label" || return 1
     done < <(ep_versions "$domain")
 }

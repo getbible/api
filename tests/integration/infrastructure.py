@@ -209,6 +209,14 @@ def dashboard_checks():
         run("systemctl", "start", "getbible-admin.service", "getbible-dashboard.service")
         wait_for(lambda: dashboard_request("/api/auth/status") == (200, {"authenticated": False, "telegram_configured": False}),
                  "real dashboard starts with Telegram disabled")
+        installed = json.loads(Path("/usr/local/lib/getbible/apps/dashboard/release.json").read_text())
+        code, health = dashboard_request("/health")
+        check(code == 200 and health.get("release") == installed,
+              "running dashboard confirms its installed release")
+        image_version = Path("/usr/share/getbible/api/VERSION")
+        if image_version.is_file():
+            check(installed["version"] == image_version.read_text().strip(),
+                  "dashboard serves the current container image release")
         check(pid("getbible-dashboard.service") > 0, "dashboard has a live systemd process")
         status = Path(f"/proc/{pid('getbible-dashboard.service')}/status").read_text()
         uid = next(line.split()[1] for line in status.splitlines() if line.startswith("Uid:"))
@@ -285,12 +293,61 @@ def native_recovery(manager):
     with helper.open("a") as handle:
         handle.write("\n# Disposable installed-source refresh acceptance marker.\n")
     old_pid = pid("getbible-telemetry.service")
+    run("systemctl", "stop", "getbible-logrotate.timer", "getbible-logrotate.service",
+        "getbible-telemetry.service", "getbible-dashboard.service")
+    backups = Path("/var/backups/getbible/telemetry")
+    previous_backups = set(backups.glob("traffic-schema-1-*.sqlite3"))
+    with sqlite3.connect(DB) as db:
+        # Schema 1 used these same history and cursor tables, with three fewer
+        # request columns. Exercise the real versioned upgrade in the manager.
+        for column in ("endpoint_kind", "referrer", "book_names"):
+            db.execute(f"ALTER TABLE requests DROP COLUMN {column}")
+        db.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES('acceptance_upgrade','preserved')")
+        db.execute("INSERT INTO events(stamp,endpoint,source,level,event,payload,record_key) "
+                   "VALUES(?, 'history.ci.example.test', 'diagnostic', 'INFO', 'acceptance', '{}', ?)",
+                   (time.time(), "acceptance-" + secrets.token_hex(12)))
+        event = db.execute("SELECT * FROM events ORDER BY id DESC LIMIT 1").fetchone()
+        request = db.execute("SELECT * FROM requests WHERE edge_json IS NOT NULL "
+                             "AND runtime_json IS NOT NULL ORDER BY id LIMIT 1").fetchone()
+        check(request is not None, "native migration fixture includes joined traffic history")
+        request_columns = [row[1] for row in db.execute("PRAGMA table_info(requests)")]
+        counts = {table: db.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+                  for table in ("requests", "events", "metrics", "retention")}
+        positions = dict(db.execute("SELECT identity,offset FROM sources WHERE closed=0"))
+        cursor = db.execute("SELECT value FROM metadata WHERE key='journal_cursor'").fetchone()
+        cutoff = db.execute("SELECT value FROM metadata WHERE key='collection_started'").fetchone()
+        db.execute("PRAGMA user_version=1")
     run(manager, "update", "query.ci.example.test", "--yes", timeout=900)
     check(helper.read_bytes() == source.read_bytes(), "explicit update replaces existing installed infrastructure sources")
     check(pid("getbible-telemetry.service") not in (0, old_pid), "explicit update restarts the collector with new sources")
     check(persistent_state() == saved, "explicit update preserves saved configuration, authentication and identities")
+    new_backups = set(backups.glob("traffic-schema-1-*.sqlite3")) - previous_backups
+    check(len(new_backups) == 1, "native update preserves one completed history backup")
+    for path, schema in ((new_backups.pop(), 1), (DB, 2)):
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5) as db:
+            check(db.execute("PRAGMA user_version").fetchone()[0] == schema,
+                  f"history uses its expected schema {schema}")
+            for table, count in counts.items():
+                actual = db.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+                check(actual == count if schema == 1 else actual >= count,
+                      f"schema {schema} retains {table} history")
+            check(db.execute(f"SELECT {','.join(request_columns)} FROM requests WHERE id=?", (request[0],)).fetchone()
+                  == request, f"schema {schema} preserves the original request record")
+            check(db.execute("SELECT * FROM events WHERE id=?", (event[0],)).fetchone() == event,
+                  f"schema {schema} preserves the original event record")
+            check(db.execute("SELECT value FROM metadata WHERE key='acceptance_upgrade'").fetchone() == ("preserved",),
+                  f"schema {schema} preserves historical metadata")
+            check(db.execute("SELECT value FROM metadata WHERE key='collection_started'").fetchone() == cutoff,
+                  f"schema {schema} retains the original history cutoff")
+            restored = dict(db.execute("SELECT identity,offset FROM sources WHERE closed=0"))
+            check(all(restored.get(identity, -1) >= offset for identity, offset in positions.items()),
+                  f"schema {schema} retains collector positions")
+            if cursor:
+                current = db.execute("SELECT value FROM metadata WHERE key='journal_cursor'").fetchone()
+                check(current is not None and json.loads(current[0]).get("stamp", 0) >= json.loads(cursor[0]).get("stamp", 0),
+                      f"schema {schema} retains the journal position")
     collector_checks("native")
-    run("systemctl", "start", "getbible-adapt.timer", "getbible-storage.timer")
+    run("systemctl", "start", "getbible-logrotate.timer", "getbible-adapt.timer", "getbible-storage.timer")
 
 
 def main():

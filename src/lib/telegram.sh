@@ -49,10 +49,10 @@ tg_test() {
 # The helper is installed system-wide so timers and hooks running as other
 # users can notify. The configuration file is readable by the notify group.
 tg_install_helper() {
-    gb_ensure_dir "$GB_LIBEXEC" 0755
-    gb_install_file "$GB_TOOLS/getbible-notify" "$GB_LIBEXEC/getbible-notify" 0755
+    gb_ensure_dir "$GB_LIBEXEC" 0755 || return 1
+    gb_install_file "$GB_TOOLS/getbible-notify" "$GB_LIBEXEC/getbible-notify" 0755 || return 1
     if gb_is_root && [[ -z "$GB_PREFIX" && "$GB_DRY_RUN" != true ]]; then
-        chown "root:$GB_NOTIFY_GROUP" "$GB_TELEGRAM_CONF"
-        chmod 0640 "$GB_TELEGRAM_CONF"
+        chown "root:$GB_NOTIFY_GROUP" "$GB_TELEGRAM_CONF" || return 1
+        chmod 0640 "$GB_TELEGRAM_CONF" || return 1
     fi
 }

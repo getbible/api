@@ -4,6 +4,103 @@
 [[ -n "${GB_UPDATE_LOADED:-}" ]] && return 0
 GB_UPDATE_LOADED=1
 
+update_image_state() { printf '%s/image-update.conf\n' "$GB_STATE"; }
+
+update_image_status() {
+    local state
+    state="$(update_image_state)"
+    printf 'Image release: %s; applied: %s; update: %s\n' \
+        "$(cat "$GB_REPO_DIR/VERSION")" "$(cfg_get "$state" APPLIED_VERSION pending)" "$(cfg_get "$state" STATUS pending)"
+    local error
+    error="$(cfg_get "$state" LAST_ERROR)"
+    [[ -z "$error" ]] || printf 'Update attention: %s\n' "$error"
+}
+
+update_image_failed() {
+    local state="$1" version="$2" error="$3"
+    cfg_set "$state" LAST_ERROR "$error" || return 1
+    cfg_set "$state" UPDATED_AT "$(gb_timestamp)" || return 1
+    cfg_set "$state" STATUS failed || return 1
+    tg_notify fail 'Image update incomplete' "Release $version: $error Retry with getbible update after resolving the reported cause."
+    gb_warn "$error Run getbible update to retry."
+    return 1
+}
+
+# A replacement image reconciles the saved installation after its existing
+# services start. Numbered image releases are immutable; a successful unchanged
+# release needs no deployment work. Interrupted/failed updates remain retryable.
+update_image() {
+    gb_is_docker || { gb_warn 'Automatic image updates are only available in Docker.'; return 1; }
+    [[ $# == 0 || $# == 1 && "$1" == --force ]] || { gb_warn 'image-update [--force]'; return 1; }
+    local version state domain failures=0 error="" count=0
+    local GB_LOCAL_APPLY=true GB_INFRASTRUCTURE_UPDATED=true
+    version="$(cat "$GB_REPO_DIR/VERSION")" || return 1
+    [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { gb_warn 'The image release number is invalid.'; return 1; }
+    state="$(update_image_state)"
+    if [[ "${1:-}" != --force && "$(cfg_get "$state" APPLIED_VERSION)" == "$version" && "$(cfg_get "$state" STATUS)" == current ]]; then
+        gb_log "Image release $version is already applied."
+        return 0
+    fi
+    [[ "$GB_DRY_RUN" != true ]] || { gb_log "(dry-run) would apply image release $version to the saved installation."; return 0; }
+    gb_ensure_dir "$GB_STATE" 0755 || return 1
+    cfg_set "$state" DESIRED_VERSION "$version" || return 1
+    cfg_set "$state" STATUS updating || return 1
+    cfg_set "$state" LAST_ERROR '' || return 1
+    tg_notify start 'Image update started' "Applying installed image release $version. Existing API generations remain available during preparation."
+    if ! gb_system_init; then
+        update_image_failed "$state" "$version" 'Management initialization failed; inspect the image-update journal.'
+        return 1
+    fi
+    if ! infrastructure_update; then
+        if [[ "${GB_INFRASTRUCTURE_TELEMETRY_FAILED:-false}" != true ]]; then
+            update_image_failed "$state" "$version" 'Management service update failed; inspect the image-update and telemetry journals.'
+            return 1
+        fi
+        failures=$((failures + 1))
+        error='Telemetry update failed; inspect the telemetry journal.'
+    fi
+    # Individual domains have independent transactions. One failed candidate
+    # must not prevent the remaining saved domains from receiving the release.
+    while IFS= read -r domain; do
+        [[ -n "$domain" && "$(ep_get "$domain" ENABLED true)" == true ]] || continue
+        count=$((count + 1))
+        if [[ "$(ep_get "$domain" TYPE)" == runtime ]]; then
+            if ! endpoint_source_type runtime; then
+                update_image_failed "$state" "$version" 'The image runtime implementation could not be loaded.'
+                return 1
+            fi
+            if rt_image_update "$domain"; then continue; fi
+        elif endpoint_apply "$domain"; then
+            continue
+        fi
+        failures=$((failures + 1))
+        error="${error:+$error }Update failed for $domain; its previous deployment was retained."
+    done < <(ep_list)
+    if sd_available; then
+        if ! sd_is_active getbible-telemetry.service; then
+            failures=$((failures + 1))
+            error="${error:+$error }Telemetry is not running."
+        fi
+        if [[ "$(gb_global DASHBOARD_ENABLED false)" == true ]] && ! dashboard_wait_current; then
+            failures=$((failures + 1))
+            error="${error:+$error }The dashboard did not confirm its running release."
+        fi
+    fi
+    cfg_set "$state" UPDATED_AT "$(gb_timestamp)" || return 1
+    if (( failures != 0 )); then
+        update_image_failed "$state" "$version" "$error"
+        return 1
+    fi
+    cfg_set "$state" APPLIED_VERSION "$version" || return 1
+    cfg_set "$state" STATUS current || return 1
+    tg_notify ok 'Image update complete' "Image release $version applied to management services and $count domain(s)."
+    gb_log "Image release $version is applied to management services and $count domain(s)."
+}
+
+update_system() {
+    if gb_is_docker; then update_image --force; else update_all; fi
+}
+
 update_repo_state() {
     local dirty="" commit="unknown"
     if gb_have git && [[ -e "$GB_REPO_DIR/.git" ]]; then

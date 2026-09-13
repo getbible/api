@@ -28,6 +28,8 @@ check test "$(gb_execution_mode)" = native
 export GETBIBLE_EXECUTION_MODE=native
 gb_global_init
 check test "$(gb_global TLS_MODE)" = managed
+check test "$(gb_global TELEMETRY_BACKUP_SECONDS)" = 900
+check test "$(gb_global TELEMETRY_MIGRATION_SECONDS)" = 900
 export GETBIBLE_TLS_MODE=external
 check test "$(gb_execution_mode)" = native
 check test "$(gb_global TLS_MODE)" = external
@@ -79,11 +81,13 @@ unset GETBIBLE_TLS_MODE_FILE
 # settings, even if those processes have none of Docker's direct environment.
 export GETBIBLE_EXECUTION_MODE=docker GETBIBLE_TLS_MODE=external
 export GETBIBLE_TELEGRAM_BOT_TOKEN=fixture-telegram-token
+export GETBIBLE_TELEMETRY_BACKUP_SECONDS=1800 GETBIBLE_TELEMETRY_MIGRATION_SECONDS=2700
 gb_environment_capture
 check test "$(stat -c %a "$GB_ENVIRONMENT_CONF")" = 600
 check test "$(cfg_get_raw "$GB_ENVIRONMENT_CONF" TLS_MODE)" = external
 check test "$(cfg_get_raw "$GB_CLOUDFLARE_CONF" CLOUDFLARE_API_TOKEN)" = ""
 unset GETBIBLE_TLS_MODE GETBIBLE_CLOUDFLARE_API_TOKEN_FILE GETBIBLE_TELEGRAM_BOT_TOKEN
+unset GETBIBLE_TELEMETRY_BACKUP_SECONDS GETBIBLE_TELEMETRY_MIGRATION_SECONDS
 check test "$(gb_global TLS_MODE)" = external
 check test "$(cfg_get "$GB_CLOUDFLARE_CONF" CLOUDFLARE_API_TOKEN)" = "$secret"
 reject cfg_set "$GB_GLOBAL_CONF" TLS_MODE managed
@@ -91,9 +95,10 @@ check test "$(cfg_get_raw "$GB_GLOBAL_CONF" TLS_MODE)" = managed
 # shellcheck disable=SC2016 # Expansion happens in the independent child shell.
 child_result="$(env -i PATH="$PATH" GB_PREFIX="$GB_PREFIX" GB_REPO_DIR="$ROOT" GETBIBLE_EXECUTION_MODE=docker bash -c '
     for lib in core config deployment; do source "$GB_REPO_DIR/src/lib/$lib.sh"; done
-    printf "%s/%s\n" "$(gb_global TLS_MODE)" "$(gb_global CLOUDFLARE_ENABLED)"
+    printf "%s/%s/%s/%s\n" "$(gb_global TLS_MODE)" "$(gb_global CLOUDFLARE_ENABLED)" \
+        "$(gb_global TELEMETRY_BACKUP_SECONDS)" "$(gb_global TELEMETRY_MIGRATION_SECONDS)"
 ')"
-check test "$child_result" = external/false
+check test "$child_result" = external/false/1800/2700
 gb_environment_status > "$TEST_ROOT/status.out"
 if grep -Eq 'fixture-private-package-token|fixture-telegram-token' "$TEST_ROOT/status.out"; then
     echo 'Environment report leaked a credential' >&2; exit 1
@@ -127,6 +132,11 @@ check gb_setting_validate TELEMETRY_BATCH_SIZE 100000
 reject gb_setting_validate TELEMETRY_BATCH_SIZE 0
 reject gb_setting_validate TELEMETRY_BATCH_SIZE 100001
 reject gb_setting_validate TELEMETRY_BATCH_SIZE 1.5
+for key in TELEMETRY_BACKUP_SECONDS TELEMETRY_MIGRATION_SECONDS; do
+    check gb_setting_validate "$key" 1
+    check gb_setting_validate "$key" 86400
+    for value in 0 86401 1.5 nan; do reject gb_setting_validate "$key" "$value"; done
+done
 
 # Recreation replaces the snapshot; removing an explicit environment setting
 # restores the saved value instead of carrying a stale override indefinitely.
