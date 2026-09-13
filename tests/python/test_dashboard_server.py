@@ -1,6 +1,7 @@
 """Exercise the real private Unix HTTP boundary without external services."""
 
 from http.client import HTTPConnection, HTTPResponse
+from dataclasses import replace
 import io
 import json
 from pathlib import Path
@@ -14,12 +15,14 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src/apps/dashboard"))
+sys.path.insert(0, str(ROOT / "src/apps/telemetry"))
 
 from getbible_dashboard.auth import AuthStore
 from getbible_dashboard.config import Config
 from getbible_dashboard.lifecycle import ReportingUnavailable, ViewerLifecycle
 from getbible_dashboard.server import Dashboard, DashboardHTTPServer, DashboardHandler
 from tests.python.test_dashboard_auth import Clock, FakeTelegram
+from getbible_telemetry.store import TelemetrySchemaError
 
 
 class UnixConnection(HTTPConnection):
@@ -152,6 +155,25 @@ class HTTPTests(unittest.TestCase):
         self.assertTrue(data["authenticated"])
         self.assertEqual(data["csrf_token"], self.csrf)
         self.assertEqual(headers["Cache-Control"], "no-store")
+
+    def test_health_reports_the_running_release_without_opening_telemetry(self):
+        release_file = self.root / "release.json"
+        original = {"version": "1.2.3", "revision": "a" * 40, "fingerprint": "b" * 64}
+        release_file.write_text(json.dumps(original))
+        config = replace(self.config, release_file=str(release_file))
+        self.app.close()
+        self.app = Dashboard(config, auth=self.auth, telegram=self.telegram,
+                             analytics=self.analytics, broker=self.broker)
+        self.server.app = self.app
+        status, headers, data = self.request("GET", "/health")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["release"], original)
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertEqual(self.analytics.calls, [])
+        release_file.write_text(json.dumps({**original, "version": "1.2.4"}))
+        self.app.reconfigure(config)
+        self.assertEqual(self.request("GET", "/health")[2]["release"], original)
+        self.assertEqual(self.request("POST", "/health")[0], 405)
 
     def test_private_reports_and_actions_require_authentication(self):
         for path in ("/api/overview", "/api/history", "/api/requests", "/api/events", "/api/endpoints",
@@ -364,6 +386,37 @@ class LifecycleTests(unittest.TestCase):
         self.lifecycle.tick(set())
         with self.assertRaises(ReportingUnavailable):
             self.lifecycle.report("session", lambda: None)
+
+    def test_failed_initialization_retries_for_existing_viewers_and_recovers(self):
+        attempts = []
+
+        def initialize():
+            attempts.append(True)
+            if len(attempts) == 1:
+                raise PermissionError("private details must not enter the dashboard or journal")
+
+        self.lifecycle.initialize = initialize
+        with self.assertLogs("getbible_dashboard.lifecycle", level="ERROR") as logs:
+            self.lifecycle.heartbeat("session", "page1")
+            self.lifecycle._initialization.result(timeout=1)
+        self.assertEqual(self.lifecycle.state()["state"], "unavailable")
+        self.assertIn("permissions", self.lifecycle.state()["error"])
+        self.assertNotIn("private details", " ".join(logs.output))
+        self.lifecycle.heartbeat("session", "page1")
+        self.assertEqual(len(attempts), 1)
+        self.clock.value += 16
+        self.lifecycle.heartbeat("session", "page1")
+        self.lifecycle._initialization.result(timeout=1)
+        self.assertEqual(self.lifecycle.state()["state"], "awake")
+        self.assertIsNone(self.lifecycle.state()["error"])
+        self.assertEqual(self.lifecycle.report("session", lambda: 42), 42)
+
+    def test_schema_failure_explains_preserved_history(self):
+        from getbible_dashboard.lifecycle import storage_error
+        message = storage_error(TelemetrySchemaError(1))
+        self.assertIn("schema 1", message)
+        self.assertIn("preserved", message)
+        self.assertIn("logs reset --discard-history", message)
 
 
 if __name__ == "__main__":

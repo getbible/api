@@ -34,6 +34,13 @@ class Dashboard:
         self.telegram = telegram or Telegram(config.telegram_conf)
         self.broker = broker or BrokerClient(config.broker_socket)
         self.analytics = analytics or Analytics(config.telemetry_db)
+        # Capture what this process loaded; HUP must never claim new code is live.
+        try:
+            release = json.loads(Path(config.release_file).read_text(encoding="utf-8"))
+            self.release = {key: release[key] for key in ("version", "revision", "fingerprint")
+                            if isinstance(release.get(key), str)} if isinstance(release, dict) else {}
+        except (OSError, ValueError):
+            self.release = {}
         self.lifecycle = lifecycle or ViewerLifecycle(
             idle_seconds=config.idle_seconds, initialize=self.analytics.initialize,
             on_sleep=self._sleep_notice,
@@ -220,6 +227,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if parsed.scheme or parsed.netloc or len(self.path) > 8192:
                 raise AuthError("invalid_path", "The request path is invalid", 400)
             path = parsed.path
+            if path == "/health":
+                if self.command not in {"GET", "HEAD"}:
+                    raise AuthError("method_not_allowed", "Use GET to check dashboard health", 405)
+                return self._json(200, {"status": "ok", "service": "dashboard", "release": self.app.release})
             if not path.startswith("/api/"):
                 if self.command not in {"GET", "HEAD"}:
                     raise AuthError("method_not_allowed", "Use GET to open the dashboard", 405)

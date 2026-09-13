@@ -48,6 +48,19 @@ _USAGE = frozenset({"translation", "book", "search", "reference"})
 SCHEMA_VERSION = 2
 
 
+class TelemetrySchemaError(RuntimeError):
+    """The stored history needs an explicit operator decision, never a reset."""
+
+    def __init__(self, found: int) -> None:
+        self.found = found
+        self.expected = SCHEMA_VERSION
+        super().__init__(
+            f"Traffic history schema {found} is incompatible with schema {SCHEMA_VERSION}. "
+            "History has been preserved. Review the installed manager version and back up "
+            "history before choosing getbible logs reset --discard-history; no history conversion is performed."
+        )
+
+
 def reset_history(path: str | os.PathLike[str]) -> dict[str, Any]:
     """Explicit clean start; retain ingestion cursors, never remodel old rows.
 
@@ -336,7 +349,7 @@ class TelemetryStore:
         schema = self.db.execute("PRAGMA user_version").fetchone()[0]
         if schema not in ({SCHEMA_VERSION} if readonly else {0, SCHEMA_VERSION}):
             self.db.close()
-            raise RuntimeError("Traffic history uses an earlier schema. Run getbible logs reset --discard-history to start fresh; no history conversion is performed.")
+            raise TelemetrySchemaError(schema)
         if readonly:
             self.db.execute("PRAGMA query_only=ON")
         else:
@@ -668,7 +681,10 @@ class TelemetryStore:
         page_size = self.db.execute("PRAGMA page_size").fetchone()[0]
         pages = self.db.execute("PRAGMA page_count").fetchone()[0]
         free = self.db.execute("PRAGMA freelist_count").fetchone()[0]
-        bounds = self.db.execute("SELECT min(stamp),max(stamp) FROM requests").fetchone()
+        # Separate extrema let SQLite seek into requests_time for each bound.
+        # Combining MIN and MAX in one aggregate scans the entire traffic index.
+        bounds = self.db.execute("SELECT (SELECT min(stamp) FROM requests), "
+                                 "(SELECT max(stamp) FROM requests)").fetchone()
         gaps = [dict(row) for row in self.db.execute("SELECT * FROM retention ORDER BY id DESC LIMIT 100")]
         return {"bytes": sum(sizes.values()), "files": sizes, "active_bytes": (pages-free)*page_size,
                 "reusable_bytes": free*page_size, "first_request": bounds[0], "last_request": bounds[1],

@@ -24,6 +24,7 @@ from getbible_telemetry.metrics import MetricsSampler
 from getbible_telemetry.producer import emit_event
 from getbible_telemetry.cli import main
 from getbible_telemetry.settings import numeric_setting
+from getbible_telemetry.store import SCHEMA_VERSION, TelemetrySchemaError
 
 
 def edge(request_id="r1", **changes):
@@ -134,6 +135,32 @@ class TelemetryTest(unittest.TestCase):
             with self.assertRaises(sqlite3.OperationalError):
                 reader.db.execute("DELETE FROM requests")
             self.assertEqual(reader.summary(0, 200)["calls"], 1)
+
+    def test_storage_bounds_remain_inexpensive_as_history_grows(self):
+        with self.store.db:
+            for index in range(4000):
+                self.store.append(edge(str(index), time=index + 1), endpoint="bible.test",
+                                  source="edge", record_key=str(index))
+        with TelemetryStore(self.store.path, readonly=True) as reader:
+            # Expire the reader's budget: compact indexed metadata reads can
+            # finish, but a scan through accumulated request history must stop.
+            reader._read_deadline = -1
+            result = reader.storage()
+        self.assertEqual((result["first_request"], result["last_request"]), (1, 4000))
+
+    def test_incompatible_schema_reports_versions_and_preserves_history(self):
+        self.append(edge())
+        for schema in (1, SCHEMA_VERSION + 1):
+            with self.subTest(schema=schema):
+                with self.store.db:
+                    self.store.db.execute(f"PRAGMA user_version={schema}")
+                for readonly in (False, True):
+                    with self.assertRaises(TelemetrySchemaError) as error:
+                        TelemetryStore(self.store.path, readonly=readonly)
+                    self.assertEqual((error.exception.found, error.exception.expected), (schema, SCHEMA_VERSION))
+                    self.assertIn("preserved", str(error.exception))
+                self.assertEqual(self.store.db.execute("SELECT count(*) FROM requests").fetchone()[0], 1)
+                self.assertEqual(self.store.db.execute("PRAGMA user_version").fetchone()[0], schema)
 
     def test_oldest_retention_preserves_newest_and_records_gap(self):
         self.append(edge("old", time=1))
