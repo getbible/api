@@ -50,8 +50,8 @@ umask = 0o007
 
 
 def on_starting(server):
-    """Warm the configured translations before workers fork so their indexes
-    are shared copy-on-write. Query warms only its chapter lookup structures."""
+    """Warm before workers fork so resident data is shared copy-on-write.
+    Query loads chapter payloads; search loads a corpus and search index."""
     translations = tuple(
         code.strip().casefold()
         for code in os.environ.get(f"{PREFIX}_WARM_TRANSLATIONS", "").split(",")
@@ -61,12 +61,11 @@ def on_starting(server):
         return
     from {{PACKAGE}}.wsgi import app
 
-    app.extensions["getbible_control"].refresh_source(force=True)
-    bible = app.extensions["getbible"]
+    control = app.extensions["getbible_control"]
+    control.refresh_source(force=True)
     for translation in dict.fromkeys(translations):
         try:
-            report = (bible.warm_query(translation) if "{{KIND}}" == "query"
-                      else bible.warm_translation(translation, diacritics="fold"))
+            report = control.warm(translation)
         except Exception:
             server.log.exception("Failed to warm translation %s", translation)
             raise

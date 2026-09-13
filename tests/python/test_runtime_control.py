@@ -93,6 +93,26 @@ class RuntimeControlTest(unittest.TestCase):
         self.assertIn("RSS includes shared pages", info["memory_note"])
         self.assertGreater(info["rss_bytes"], 0)
 
+    def test_client_reports_configured_warms_and_missing_workers(self):
+        deployment = self.root / "runtime" / "query" / "v2" / "deployments" / "generation"
+        deployment.mkdir(parents=True)
+        (deployment.parent.parent / "active").symlink_to(deployment)
+        (deployment / "runtime.env").write_text('QUERY_WORKERS="3"\nQUERY_WARM_TRANSLATIONS="test, none,TEST,other"\n')
+        directory = self.root / "cache" / "query" / "v2" / "control" / deployment.name
+        directory.mkdir(parents=True)
+        for pid in (111, 222):
+            (directory / f"{pid}.sock").touch()
+        args = SimpleNamespace(runtime_root=self.root / "runtime", cache_root=self.root / "cache",
+                               kind="query", label="v2", domain="query.example.test", action="info",
+                               translation="", timeout=2)
+        with patch.object(client.os, "kill"), patch.object(client, "worker_request", side_effect=lambda path, *_: {"pid": int(path.stem)}):
+            result = client.run(args)
+        self.assertEqual(result["configured_warm_translations"], ["test", "other"])
+        self.assertEqual(result["expected_workers"], 3)
+        self.assertEqual(len(result["workers"]), 2)
+        self.assertFalse(result["complete"])
+        self.assertIn("Expected 3 workers", result["errors"][0]["error"])
+
     def test_http_ttl_renews_after_unchanged_successful_source_check(self):
         revision = self.root / ".freshness-v2"
         revision.write_text("test")
@@ -245,6 +265,86 @@ class RuntimeControlTest(unittest.TestCase):
                 else:
                     self.assertEqual(result["status"], "applied")
                     self.assertEqual(saved["targets"]["query.example.test/v2"]["workers"], expected)
+
+
+class LibrarianWarmCoverageTest(unittest.TestCase):
+    """Use the pinned dependency and a tiny corpus to verify resident coverage."""
+
+    def setUp(self):
+        from getbible import GetBible
+        self.temporary = tempfile.TemporaryDirectory(prefix="gb-warm-")
+        self.addCleanup(self.temporary.cleanup)
+        repository = ROOT / "tests/python/fixtures/repository"
+        self.bible = GetBible(repo_path=repository, cache_dir=self.temporary.name)
+        self.addCleanup(self.bible.close)
+        self.worker = control.WorkerControl(self.bible, SimpleNamespace(repository=repository, version="v2"), "query")
+        self.worker.refresh_source()
+
+    def test_one_requested_chapter_is_partial_then_full_warm_is_idempotent(self):
+        self.bible.select("Ge1:1", "test")
+        partial = self.worker.snapshot()
+        self.assertEqual(partial["cache"]["query_translations"]["test"]["chapters"], 1)
+        self.assertEqual(partial["translation_status"]["test"]["state"], "partial")
+        self.assertFalse(partial["translation_status"]["test"]["ready"])
+        warmed = self.worker.execute({"action": "warm", "translation": "test"})
+        self.assertEqual(warmed["result"]["loaded"], 3)
+        self.assertEqual(warmed["translation_status"]["test"]["expected_chapters"], 3)
+        self.assertTrue(warmed["translation_status"]["test"]["ready"])
+        with patch.object(self.bible, "warm_query", wraps=self.bible.warm_query) as warm:
+            skipped = self.worker.execute({"action": "warm", "translation": "test"})
+        warm.assert_not_called()
+        self.assertEqual(skipped["result"]["reason"], "already_warm")
+        reloaded = self.worker.execute({"action": "reload", "translation": "test"})
+        self.assertTrue(reloaded["translation_status"]["test"]["ready"])
+        dropped = self.worker.execute({"action": "drop", "translation": "test"})
+        self.assertNotIn("test", dropped["translation_status"])
+
+    def test_small_cache_reports_partial_without_repeating_futile_warms(self):
+        self.bible.configure_cache(chapter_cache_limit=1)
+        warmed = self.worker.execute({"action": "warm", "translation": "test"})
+        status = warmed["translation_status"]["test"]
+        self.assertEqual(status["state"], "partial")
+        self.assertTrue(status["retention_limited"])
+        self.assertEqual(status["expected_chapters"], 3)
+        self.assertEqual(warmed["cache"]["query_translations"]["test"]["chapters"], 1)
+        with patch.object(self.bible, "warm_query", wraps=self.bible.warm_query) as warm:
+            skipped = self.worker.execute({"action": "warm", "translation": "test"})
+        warm.assert_not_called()
+        self.assertEqual(skipped["result"]["reason"], "retention_limited")
+        self.bible.configure_cache(chapter_cache_limit=10)
+        warmed = self.worker.execute({"action": "warm", "translation": "test"})
+        self.assertTrue(warmed["translation_status"]["test"]["ready"])
+
+    def test_expiry_and_source_changes_cannot_report_fully_warm(self):
+        from datetime import timedelta
+        self.worker.execute({"action": "warm", "translation": "test"})
+        self.bible.configure_cache(cache_ttl=timedelta(seconds=0))
+        status = self.worker.snapshot()["translation_status"]["test"]
+        self.assertEqual(status["state"], "stale")
+        self.assertFalse(status["ready"])
+        self.bible.configure_cache(cache_ttl=timedelta(days=30))
+        self.bible.transition_source("different-publication")
+        self.bible.select("Ge1:1", "test")
+        status = self.worker.snapshot()["translation_status"]["test"]
+        self.assertEqual(status["state"], "partial")
+        self.assertIsNone(status["expected_chapters"])
+
+    def test_search_corpus_is_separate_from_query_chapter_and_requires_warm_index(self):
+        self.worker.kind = "search"
+        self.bible.select("Ge1:1", "test")
+        self.bible.warm_translation("test", diacritics="sensitive")
+        self.assertFalse(self.worker.snapshot()["translation_status"]["test"]["ready"])
+        warmed = self.worker.execute({"action": "warm", "translation": "test"})
+        self.assertEqual(warmed["cache"]["query_translations"]["test"]["chapters"], 1)
+        self.assertEqual(warmed["cache"]["search_corpora"]["translations"]["test"]["verses"], 9)
+        self.assertTrue(warmed["translation_status"]["test"]["ready"])
+        with patch.object(self.bible, "warm_translation", wraps=self.bible.warm_translation) as warm:
+            skipped = self.worker.execute({"action": "warm", "translation": "test"})
+        warm.assert_not_called()
+        self.assertEqual(skipped["result"]["reason"], "already_warm")
+        reloaded = self.worker.execute({"action": "reload", "translation": "test"})
+        self.assertTrue(reloaded["translation_status"]["test"]["ready"])
+        self.assertIn({"case_sensitive": False, "fold_diacritics": True}, reloaded["result"]["search"]["indexes"])
 
 
 if __name__ == "__main__":

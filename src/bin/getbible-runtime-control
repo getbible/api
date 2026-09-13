@@ -56,15 +56,22 @@ def run(args):
             pass  # worker_request still enforces the socket peer identity
         paths.append(path)
     expected = None
+    configured_warm = []
     try:
+        environment = (generation / "runtime.env").read_text()
         pattern = re.compile(rf"^{args.kind.upper()}_WORKERS=\"?([0-9]+)\"?$", re.MULTILINE)
-        match = pattern.search((generation / "runtime.env").read_text())
+        match = pattern.search(environment)
         expected = int(match[1]) if match else None
+        warm = re.search(rf"^{args.kind.upper()}_WARM_TRANSLATIONS=(.*)$", environment, re.MULTILINE)
+        if warm:
+            configured_warm = list(dict.fromkeys(code.strip().casefold() for code in warm[1].strip('"\'').split(",")
+                                                if code.strip() and code.strip().casefold() != "none"))
     except OSError:
         pass
     command = {"action": args.action, "translation": args.translation}
     result = {"domain": args.domain, "kind": args.kind, "label": args.label,
               "generation": generation.name, "expected_workers": expected, "workers": [], "errors": [],
+              "configured_warm_translations": configured_warm,
               "complete": bool(paths) and (expected is None or len(paths) == expected)}
     def request(path):
         try:
