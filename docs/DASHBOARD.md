@@ -125,6 +125,28 @@ The collector reloads its effective settings file without a process restart.
 The older log-rotation size/count settings do not control canonical traffic
 history. Diagnostic views and exports use the same stored telemetry.
 
+Translation, search, scripture-reference and book rankings show successful
+usage. Search rankings are scoped to search endpoints; reference rankings are
+scoped to query endpoints. Selecting a ranking keeps its exact scope when
+opening Traffic. Failed and unrelated requests remain available in Traffic,
+endpoint totals and status filters. See [stored classification](LOGGING.md#stored-request-classification).
+
+**Audience** lists referrers and user agents separately, with counts and search
+fields. Select an entry to inspect its requests; its exact filter appears in
+Traffic alongside endpoint, version, status, translation and request filters.
+Traffic's free-text search finds paths, query text, referrers, user agents,
+addresses and other stored request fields without opening each detail row.
+
+**Translations** first shows one row per resident translation within each
+runtime endpoint. Query chapter counts, search corpus/index counts and
+translation snapshots are shown separately, along with worker coverage and
+warm readiness. Select a translation to inspect individual workers, including
+workers without resident data. The warm selector and disk inventory indicate
+what is already warm, partially resident, stale or not in memory. Configured
+startup warming is shown separately from current residency. Counts and cache
+estimates are per-worker values or ranges, never a sum presented as unique
+physical memory. Missing worker reports remain explicitly unknown.
+
 ## Administration and storage
 
 The operation catalogue covers domains, endpoints and repository synchronization,
@@ -134,12 +156,23 @@ Telegram, diagnostics, system maintenance, and dashboard sessions. Operations
 requiring the Docker host, such as replacing its container image, retain their
 host-side boundary and instructions.
 
+**Manage** follows the CLI's menu hierarchy: choose a section, a domain when
+needed, then its endpoint or settings group and an action. Breadcrumbs return
+to previous levels. Current saved settings are shown with the selected target;
+the same typed operation catalogue and validated CLI commands perform changes.
+
 The browser submits named operations and typed fields to a local root broker. It
 does not submit arbitrary shell commands or receive a Docker socket. Each job has
 progress, a durable result and an operator/session audit reference. Destructive
 operations require explicit confirmation. Jobs continue if every dashboard tab
 closes. A broker restart marks interrupted work for inspection and never silently
 replays a potentially destructive command.
+
+Jobs distinguish queued, waiting for the management lock, running and finished
+states. An open interactive CLI menu holds that lock for its session; close an
+idle menu to let a waiting dashboard job proceed. The original CLI process
+waits and acquires the lock once, so a failed operation is never blindly retried
+after it may have changed the server. Ordinary CLI timeout behaviour is retained.
 
 New API bearer tokens are displayed only to the issuing session through an
 explicit reveal action for up to five minutes. Their plaintext is never written
