@@ -91,6 +91,9 @@ jobs:
       - name: Verify the complete dashboard lockfile
         working-directory: src/apps/dashboard/ui
         run: npm ci --ignore-scripts --no-audit --no-fund --include=dev --include=optional --include=peer
+      - name: Verify vendored assets match the audited packages
+        working-directory: src/apps/dashboard/ui
+        run: npm run vendor:check
       - name: Audit runtime and development dependencies at every severity
         working-directory: src/apps/dashboard/ui
         run: |
