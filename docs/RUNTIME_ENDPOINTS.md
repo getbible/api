@@ -7,8 +7,13 @@ each per server:
 
 | Kind | Domain (typical) | Route | Librarian call |
 | --- | --- | --- | --- |
-| `query` | `query.getbible.net` | `GET /v2/{translation}/{reference}` | `select()` |
-| `search` | `search.getbible.net` | `GET|POST /v2/{translation}/{search string}` | `search()` (and `select()` when the string is a reference) |
+| `query` | `query.getbible.net` | `GET /{version}/{translation}/{reference}` | `select()` |
+| `search` | `search.getbible.net` | GET or POST `/{version}/{translation}/{search string}` | `search()` (and `select()` when the string is a reference) |
+
+Both kinds support `v2` and `v3`. Select the version when deploying a domain or
+adding an endpoint through the CLI, terminal menu or dashboard. The selected
+version controls both the public route and the local scripture folder; it is
+independent of the manager's release number.
 
 Both read the Bible files from an existing local folder, normally the data
 root of the static domain that serves `api.getbible.net`. Remote repository
@@ -17,14 +22,19 @@ The static endpoint that publishes each version uses its own repository and
 deploy key. Runtime services read the resulting local files and do not use
 those SSH credentials; see [STATIC_ENDPOINTS.md](STATIC_ENDPOINTS.md).
 
-Sync the matching static endpoint before creating a runtime endpoint. For
-v2, choose `/srv/getbible/api.getbible.net` when its scripture is published
-at `/srv/getbible/api.getbible.net/v2/`. The menu lists available, enabled
-static endpoints and shows the actual version folder each choice reads.
-You can also enter an existing absolute local root containing `v2/`.
+Sync the matching static endpoint before creating a runtime endpoint. Choose
+`/srv/getbible/api.getbible.net` as the parent root for either version:
+
+| Runtime version | Local scripture folder |
+| --- | --- |
+| `v2` | `/srv/getbible/api.getbible.net/v2/` |
+| `v3` | `/srv/getbible/api.getbible.net/v3/` |
+
+The terminal menu and dashboard list available, enabled static endpoints for
+the selected version and show the actual folder each choice reads. You can also
+enter an existing absolute local root containing the selected version folder.
 Creating a domain, adding a version or changing its repository is refused
-while that version directory is missing. Future versions use the version
-declared by their implementation, with the same local-folder requirement.
+while that version directory is missing. A v2 folder cannot supply a v3 runtime.
 The selected path stays on the static endpoint's published symlink so new
 syncs remain visible; it never pins the runtime to one retained release.
 
@@ -70,15 +80,41 @@ way to the service and strips it from the service's redirects again; the
 access rules apply as on any other domain. Such a domain cannot add other
 versions later; a domain with version folders can.
 
+## Response data and v3 metadata
+
+The runtime passes the librarian's result through without rebuilding its verse
+objects. Query results remain keyed by `{translation}_{book}_{chapter}`, and
+search keeps its `query`, `results` and `matches` envelope. Chapter entries carry
+the compact API translation metadata, book/chapter identifiers and `ref` values.
+Full translation catalog metadata is available from the static API.
+
+V3 retains the same core verse fields and can add metadata when the source
+provides it:
+
+| Verse member | Meaning |
+| --- | --- |
+| `paragraph` | `true` when the verse begins a paragraph |
+| `tokens` | Words in reading order, with word positions and source lexical attributes such as `lemma`, `morph`, `xlit` and `src` |
+| `spans` | Source annotations with inclusive token ranges (zero-based) and word ranges (one-based; zero when unlocated) |
+
+These members are optional; the runtime does not manufacture them for a v2
+source or a v3 verse that lacks them. Other source verse members, including
+nested values, are retained. Chapter-level `editorial` from static v3 documents
+is excluded from the librarian's assembled query/search chapter results.
+The [v3 source OpenAPI](https://api.getbible.net/v3/openapi.json) documents the
+static documents; the runtime's own `/v3/openapi.json` describes its routes,
+envelopes and preserved verse metadata. The source definitions are maintained
+in the [v3 builder schemas](https://github.com/getbible/v3_builder/tree/master/schema).
+
 ## The query endpoint
 
-- `/v2/{translation}/{reference}` is the only data route. It takes no
+- `/{version}/{translation}/{reference}` is the only data route. It takes no
   parameters; a query string answers `400 parameters_not_accepted`.
 - References follow the librarian's grammar; several are joined with `;`.
   One unresolvable reference rejects the whole request with `400
   invalid_reference` (the librarian's behaviour, kept on purpose).
-- Every shorter form is a `301` to the canonical route: `/v2` and
-  `/v2/{translation}` go to the default reference (`Mat7:7`), `/{reference}`
+- Every shorter form is a `301` to the canonical route: `/{version}` and
+  `/{version}/{translation}` go to the default reference (`Mat7:7`), `/{reference}`
   and `/{translation}/{reference}` fill in `kjv` for a missing or unknown
   translation and the default reference for an unresolvable one.
 - Responses are the librarian's chapter-keyed object, with an ETag and public
@@ -87,7 +123,7 @@ versions later; a domain with version folders can.
 
 ## The search endpoint
 
-- The search string is the last path segment; `/v2/{search string}` without
+- The search string is the last path segment; `/{version}/{search string}` without
   a translation redirects to the default translation.
 - GET accepts filters in the URL query string. POST accepts the same query
   parameters and/or a JSON body (`Content-Type: application/json`). Both
@@ -110,7 +146,7 @@ versions later; a domain with version folders can.
 
 ### Retaining every translation
 
-The local V2 `<translation>.json` is one complete translation; book and
+The local `<version>/<translation>.json` is one complete translation; book and
 chapter files are overlapping views, not additional search corpora. The
 matching `<translation>.sha` is its content-version token. An unchanged SHA
 reuses the index when freshness is checked; changed text needs a replacement
@@ -189,11 +225,25 @@ with status 503 and `Retry-After: 5`.
 ## Commands
 
 ```sh
-sudo ./getbible.sh deploy runtime --domain query.getbible.net --kind query --version v2 --repository /srv/getbible/api.getbible.net --access metered --warm kjv --python auto
-sudo ./getbible.sh deploy runtime --domain search.getbible.net --kind search --version v2 --root
-sudo ./getbible.sh version add query.getbible.net v3 [--repository PATH] [--warm kjv] [--python 3.14]
+sudo ./getbible.sh deploy runtime --domain query.getbible.net --kind query --version v3 --repository /srv/getbible/api.getbible.net --access metered --warm kjv --python auto
+sudo ./getbible.sh deploy runtime --domain search.getbible.net --kind search --version v3 --repository /srv/getbible/api.getbible.net --access metered --warm kjv --python auto
+```
+
+For existing v2 domains, add v3 alongside v2 and choose the default separately:
+
+```sh
+sudo ./getbible.sh version add query.getbible.net v3 --repository /srv/getbible/api.getbible.net --warm kjv --python 3.14
+sudo ./getbible.sh version add search.getbible.net v3 --repository /srv/getbible/api.getbible.net --warm kjv --python 3.14
 sudo ./getbible.sh version default query.getbible.net v3
-sudo ./getbible.sh version remove query.getbible.net v2
+sudo ./getbible.sh version default search.getbible.net v3
+```
+
+Adding v3 preserves the v2 endpoint and its settings. The explicit `version
+default` command changes where unversioned routes lead. A fresh deployment can
+serve a single selected version at the domain root by adding `--root`.
+Maintenance commands continue to select endpoints by their version:
+
+```sh
 sudo ./getbible.sh runtime versions
 sudo ./getbible.sh runtime query.getbible.net update --python 3.14        # every endpoint
 sudo ./getbible.sh runtime query.getbible.net v3 update --python 3.14     # one endpoint

@@ -51,6 +51,7 @@ curl -X POST -H "Content-Type: application/json" \
 
 <h2>Response</h2>
 <p>A JSON envelope with three members: <code>query</code> (normalised criteria, <code>kind</code>, translation, <code>sha</code>, exact <code>total</code>, pagination, cache state and cost), <code>results</code> (the same chapter-keyed scripture object the query endpoint returns) and <code>matches</code> (the ordered verses with score, occurrences and matched terms). Reference results omit full-text criteria, pagination, cache/cost details, scores, occurrences and matched terms. Public GET responses carry <code>Cache-Control: public, max-age={{CACHE_SECONDS}}</code> and an <code>ETag</code>. Token-protected endpoints use <code>private, no-store</code>; POST responses are never cached.</p>
+<p>Scripture comes from the selected <code>{{VERSION}}</code> data source. The verses inside <code>results</code> retain their source fields, including nested metadata: v3 can include <code>paragraph</code>, word-level <code>tokens</code> and annotation <code>spans</code>. These fields are optional and are not added when absent from the source. Chapter entries carry compact translation metadata; chapter-level <code>editorial</code> from static v3 documents is excluded from assembled results. The same rules apply when a search resolves to a reference. See the <a href="https://api.getbible.net/{{VERSION}}/openapi.json">source data contract</a> for the static documents.</p>
 
 <h2>Access</h2>
 {{ACCESS_HTML}}

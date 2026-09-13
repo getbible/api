@@ -52,7 +52,7 @@ WSGI=getbible_<kind>_api.wsgi:app
 CHECK=getbible_<kind>_api.check
 ENV_PREFIX=<KIND>               environment prefix for the service's own settings
 DEFAULT_VERSION=v2              offered first when a domain is deployed
-SUPPORTED_VERSIONS=v2           comma separated; the versions this directory serves
+SUPPORTED_VERSIONS=v2,v3        comma separated; the versions this directory serves
 ROUTE=GET /{version}/{translation}/{reference}
                                 the route shown on the domain page; {version} is the endpoint
 METHODS=GET|HEAD|OPTIONS        nginx method regex; add POST when bodies are accepted

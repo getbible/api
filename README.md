@@ -1,5 +1,11 @@
 # getBible API
 
+[![CI and CLI tests](https://github.com/getbible/api/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/getbible/api/actions/workflows/ci.yml)
+[![Dashboard tests](https://github.com/getbible/api/actions/workflows/dashboard.yml/badge.svg?branch=main)](https://github.com/getbible/api/actions/workflows/dashboard.yml)
+[![Docker image](https://github.com/getbible/api/actions/workflows/docker.yml/badge.svg?branch=main)](https://github.com/getbible/api/actions/workflows/docker.yml)
+[![Query API v2 and v3](https://img.shields.io/badge/query_API-v2_%7C_v3-298550)](docs/RUNTIME_ENDPOINTS.md)
+[![Search API v2 and v3](https://img.shields.io/badge/search_API-v2_%7C_v3-298550)](docs/RUNTIME_ENDPOINTS.md)
+
 One script that deploys and maintains every public getBible API domain on a
 server, securely and at high volume. A **domain** is a host name with one
 vhost and TLS at its selected terminator; its **endpoints** are its version folders
@@ -43,6 +49,25 @@ vhost and TLS at its selected terminator; its **endpoints** are its version fold
   HTTP-01 or, with the stored Cloudflare token, DNS-01 before any DNS
   change. With external TLS, HAProxy owns certificate issuance and renewal.
   New domains can be checked before public launch.
+
+## Query and search API versions
+
+Manager release **3.0.0** supports **v2 and v3** for both runtime kinds.
+Select the version in the CLI, terminal menu or dashboard, and point it at the
+local data root containing that version's folder. A v3 endpoint reads `v3/`;
+an existing v2 endpoint continues reading `v2/`. Both can run on the same domain.
+
+After the static v3 endpoint has been synced, add v3 to existing runtime domains:
+
+```sh
+sudo ./getbible.sh version add query.getbible.net v3 --repository /srv/getbible/api.getbible.net --yes
+sudo ./getbible.sh version add search.getbible.net v3 --repository /srv/getbible/api.getbible.net --yes
+```
+
+The librarian retains v3 verse metadata, including word tokens, spans and
+paragraph markers, inside the existing query and search response envelopes.
+See [runtime setup and response contracts](docs/RUNTIME_ENDPOINTS.md) and the
+[v3 source OpenAPI](https://api.getbible.net/v3/openapi.json).
 
 ## Choose native or Docker deployment
 

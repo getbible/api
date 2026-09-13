@@ -139,8 +139,9 @@ endpoint's deploy key to add to that repository as read-only. Adding another
 endpoint creates its own key, even when it shares this domain; show it later
 with `deploy-key DOMAIN ENDPOINT`. The runtime walk-through asks for the
 kind (query or search), the version (from those the kind's implementations
-declare) and whether it lives under `/v2/` or at the domain root, and the
-folder that holds the Bible files, and warns when that folder does not hold
+declare: currently `v2` and `v3`), whether it lives under its version folder
+or at the domain root, and the local folder that holds the Bible files. It
+warns when that folder does not hold
 the version yet. When a Cloudflare API token is stored, both ask whether the
 domain is a Cloudflare zone this tool should manage (off, dns or proxied).
 The menu checks on start that nginx, certbot, rsync, git, ssh-keygen and

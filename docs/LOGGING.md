@@ -46,7 +46,7 @@ text comes from their request paths/parameters and runtime records.
 
 Static translation files, `books.json`, chapter/book files and their `.sha`
 requests identify their translation. Numeric book IDs are resolved using the
-local translation's `v2/<translation>/books.json`, including additional books.
+local translation's `<version>/<translation>/books.json`, including additional books.
 The collector caches this small metadata; reports use stored names and do not
 read or download Bible data. Unknown names retain their book ID. Runtime
 defaults are recorded as the translation actually selected (normally KJV).

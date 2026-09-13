@@ -207,12 +207,59 @@
           "required": ["book_nr","chapter","verses"],
           "type": "object"
         },
-        "description": "One entry per chapter, keyed {translation}_{book}_{chapter}; source metadata is retained.",
+        "description": "One entry per chapter, keyed {translation}_{book}_{chapter}, with compact API translation metadata and selected verses. Verse source fields are retained; static chapter editorial is excluded.",
         "type": "object"
       },
       "Verse": {
-        "properties": {"chapter":{"type":"integer"},"name":{"type":"string"},"text":{"type":"string"},"verse":{"type":"integer"}},
+        "additionalProperties": true,
+        "description": "A source verse from the selected {{VERSION}} data. Core fields are shared by v2 and v3. Optional v3 paragraph, tokens and spans are retained when present, as are other source fields and nested values.",
+        "properties": {
+          "chapter": {"type":"integer"},
+          "name": {"type":"string"},
+          "paragraph": {"description":"V3: true when this verse begins a paragraph; omitted when absent from the source.","type":"boolean"},
+          "spans": {"description":"V3 annotations over token and word ranges, when supplied by the source.","items":{"$ref":"#/components/schemas/VerseSpan"},"type":"array"},
+          "text": {"type":"string"},
+          "tokens": {"description":"V3 word tokens in reading order, when supplied by the source.","items":{"$ref":"#/components/schemas/VerseToken"},"type":"array"},
+          "verse": {"type":"integer"}
+        },
         "required": ["verse","name","text"],
+        "type": "object"
+      },
+      "VerseSpan": {
+        "additionalProperties": true,
+        "description": "V3 source annotation. Token positions index the verse tokens array from zero, inclusive. Word positions count display words from one, inclusive; zero means unlocated.",
+        "properties": {
+          "attrs": {"additionalProperties":{"type":"string"},"type":"object"},
+          "span": {"type":"string"},
+          "tag": {"type":"string"},
+          "token_end": {"minimum":0,"type":"integer"},
+          "token_start": {"minimum":0,"type":"integer"},
+          "word_end": {"minimum":0,"type":"integer"},
+          "word_start": {"minimum":0,"type":"integer"}
+        },
+        "required": ["tag","span","token_start","token_end","word_start","word_end"],
+        "type": "object"
+      },
+      "VerseToken": {
+        "additionalProperties": true,
+        "description": "V3 word token. Word positions count whitespace-separated display words from one, inclusive; zero means unlocated. Additional source attributes are retained.",
+        "properties": {
+          "gloss": {"type":"string"},
+          "lemma": {"additionalProperties":{"items":{"type":"string"},"type":"array"},"description":"Lexical identifiers grouped by scheme, such as strong.","type":"object"},
+          "morph": {"additionalProperties":{"items":{"type":"string"},"type":"array"},"description":"Morphology codes grouped by scheme.","type":"object"},
+          "morphSegmented": {"type":"boolean"},
+          "n": {"type":"string"},
+          "src": {"items":{"type":["integer","string"]},"type":"array"},
+          "subType": {"type":"string"},
+          "token": {"type":"string"},
+          "type": {"type":"string"},
+          "variant": {"type":"boolean"},
+          "variantType": {"type":"string"},
+          "word_end": {"minimum":0,"type":"integer"},
+          "word_start": {"minimum":0,"type":"integer"},
+          "xlit": {"additionalProperties":{"items":{"type":"string"},"type":"array"},"description":"Transliterations grouped by scheme.","type":"object"}
+        },
+        "required": ["token","word_start","word_end"],
         "type": "object"
       }
     },

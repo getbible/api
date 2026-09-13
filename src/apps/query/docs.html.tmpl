@@ -28,6 +28,7 @@
 </table>
 <pre><code>curl https://{{DOMAIN}}{{PREFIX}}{{DEFAULT_TRANSLATION}}/John%203:16</code></pre>
 <p>The response is a JSON object with one entry per chapter, keyed <code>{translation}_{book}_{chapter}</code>, each holding the translation metadata, the references that selected it, and its verses. Responses carry <code>Cache-Control: public, max-age={{CACHE_SECONDS}}</code> and an <code>ETag</code>{{#IF OPENAPI_URL}}; the full description is in <a href="{{OPENAPI_URL}}">openapi.json</a>{{/IF}}.</p>
+<p>Scripture comes from the selected <code>{{VERSION}}</code> data source. Chapter entries carry compact translation metadata. Verse objects retain their source fields, including nested metadata: v3 can include <code>paragraph</code>, word-level <code>tokens</code> and annotation <code>spans</code>. These fields are optional and are not added when absent from the source. Chapter-level <code>editorial</code> from static v3 documents is excluded from assembled results. See the <a href="https://api.getbible.net/{{VERSION}}/openapi.json">source data contract</a> for the static documents.</p>
 
 <h2>Short forms</h2>
 <p>Anything shorter than the full route is a permanent redirect (<code>301</code>) to it. A missing translation becomes <code>{{DEFAULT_TRANSLATION}}</code>; a reference that cannot be resolved becomes <code>{{DEFAULT_REFERENCE}}</code>.</p>

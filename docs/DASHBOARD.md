@@ -161,6 +161,15 @@ needed, then its endpoint or settings group and an action. Breadcrumbs return
 to previous levels. Current saved settings are shown with the selected target;
 the same typed operation catalogue and validated CLI commands perform changes.
 
+For query or search deployment, choose the runtime kind, then **API version**
+(`v2` or `v3`) and **Local Bible source**. The source list follows the selected
+version and shows available static scripture folders; selecting v3 lists v3
+sources. A custom local parent root may also be entered and must contain the
+selected version's folder. Sync that static endpoint before deployment.
+To extend an existing domain, open its endpoint actions and add runtime version
+`v3`; v2 keeps its own service and settings. Choose the default endpoint
+separately to direct unversioned requests to v3.
+
 The browser submits named operations and typed fields to a local root broker. It
 does not submit arbitrary shell commands or receive a Docker socket. Each job has
 progress, a durable result and an operator/session audit reference. Destructive
