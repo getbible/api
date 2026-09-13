@@ -10,6 +10,7 @@ import json
 import subprocess
 import sys
 import unittest
+from itertools import product
 from pathlib import Path
 
 from getbible import SearchBible
@@ -24,11 +25,11 @@ from tests.python.support import EndpointCase, FIXTURE_REPOSITORY
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def contract(kind: str, root: bool = False, token: bool = False) -> dict:
+def contract(kind: str, root: bool = False, token: bool = False, version: str = "v2") -> dict:
     variables = {
-        "DOMAIN": "api.example.test", "VERSION": "v2",
-        "PREFIX": "/" if root else "/v2/",
-        "VERSION_PATH": "/" if root else "/v2",
+        "DOMAIN": "api.example.test", "VERSION": version,
+        "PREFIX": "/" if root else f"/{version}/",
+        "VERSION_PATH": "/" if root else f"/{version}",
         "DEFAULT_TRANSLATION": "test", "DEFAULT_REFERENCE": "Ge1:1",
         "IS_ROOT": str(root).lower(), "TOKEN_REQUIRED": str(token).lower(),
     }
@@ -44,13 +45,14 @@ def contract(kind: str, root: bool = False, token: bool = False) -> dict:
 class ContractTest(unittest.TestCase):
     def test_all_rendered_contracts_resolve_local_references_and_public_health(self) -> None:
         for kind in ("query", "search"):
-            for root in (False, True):
+            for root, version in product((False, True), ("v2", "v3")):
                 for token in (False, True):
-                    with self.subTest(kind=kind, root=root, token=token):
-                        doc = contract(kind, root, token)
+                    with self.subTest(kind=kind, root=root, token=token, version=version):
+                        doc = contract(kind, root, token, version)
                         self.assertEqual(doc["openapi"], "3.1.0")
+                        self.assertEqual(doc["info"]["version"], version)
                         self.assertEqual(doc.get("security", []), [{"bearer": []}] if token else [])
-                        for path in ("/healthz", "/readyz", ("/" if root else "/v2/") + "openapi.json"):
+                        for path in ("/healthz", "/readyz", ("/" if root else f"/{version}/") + "openapi.json"):
                             self.assertEqual(doc["paths"][path]["get"]["security"], [])
                         self.assertNotIn("/probez", doc["paths"])
 
@@ -81,10 +83,10 @@ class ContractTest(unittest.TestCase):
                         self.assertEqual(len(operation_ids), len(set(operation_ids)))
 
     def test_every_search_form_documents_every_supported_filter_for_both_methods(self) -> None:
-        for root in (False, True):
-            doc = contract("search", root)
-            prefix = "/" if root else "/v2/"
-            for path in (prefix + "{translation}/{search}", prefix + "{translation}", "/" if root else "/v2"):
+        for root, version in product((False, True), ("v2", "v3")):
+            doc = contract("search", root, version=version)
+            prefix = "/" if root else f"/{version}/"
+            for path in (prefix + "{translation}/{search}", prefix + "{translation}", "/" if root else f"/{version}"):
                 for method in ("get", "post"):
                     entry = doc["paths"][path]
                     op = entry[method]
@@ -111,6 +113,48 @@ class ContractTest(unittest.TestCase):
         self.assertEqual(params["limit"]["schema"]["maximum"], settings.max_page_size)
         self.assertEqual(params["offset"]["schema"]["maximum"], settings.max_offset)
         self.assertEqual(params["q"]["schema"]["maxLength"], settings.max_query_length)
+
+    def test_verse_metadata_is_optional_and_allows_source_extensions(self) -> None:
+        for kind, version in product(("query", "search"), ("v2", "v3")):
+            with self.subTest(kind=kind, version=version):
+                schemas = contract(kind, version=version)["components"]["schemas"]
+                verse = schemas["Verse"]
+                self.assertTrue(verse["additionalProperties"])
+                self.assertTrue({"paragraph", "tokens", "spans"} <= verse["properties"].keys())
+                self.assertFalse({"paragraph", "tokens", "spans"} & set(verse["required"]))
+                self.assertEqual(verse["properties"]["tokens"]["items"]["$ref"],
+                                 "#/components/schemas/VerseToken")
+                self.assertEqual(verse["properties"]["spans"]["items"]["$ref"],
+                                 "#/components/schemas/VerseSpan")
+                self.assertTrue(schemas["VerseToken"]["additionalProperties"])
+                self.assertTrue(schemas["VerseSpan"]["additionalProperties"])
+                self.assertNotIn("editorial", schemas["Scripture"]["additionalProperties"]["properties"])
+
+    def test_documentation_renders_selected_version_and_source_metadata(self) -> None:
+        for kind, root, version in product(("query", "search"), (False, True), ("v2", "v3")):
+            with self.subTest(kind=kind, root=root, version=version):
+                prefix = "/" if root else f"/{version}/"
+                variables = {
+                    "DOMAIN": "api.example.test", "VERSION": version,
+                    "PREFIX": prefix, "VERSION_PATH": "/" if root else f"/{version}",
+                    "IS_ROOT": str(root).lower(), "DEFAULT_TRANSLATION": "test",
+                    "DEFAULT_REFERENCE": "Ge1:1", "CACHE_SECONDS": "60",
+                    "OPENAPI_URL": prefix + "openapi.json", "ACCESS_MODE_LABEL": "Open",
+                    "ACCESS_HTML": "<p>Open access</p>", "HEAD_ICONS": "", "CSS": "",
+                    "LOGO_URL": "", "ICON_URL": "",
+                }
+                rendered = subprocess.run(
+                    [sys.executable, str(ROOT / "src/bin/getbible-render"),
+                     str(ROOT / "src/apps" / kind / "docs.html.tmpl"),
+                     *[f"{key}={value}" for key, value in variables.items()]],
+                    text=True, capture_output=True, check=True,
+                ).stdout
+                self.assertNotIn("{{", rendered)
+                self.assertIn(f"https://api.getbible.net/{version}/openapi.json", rendered)
+                self.assertIn("https://api.example.test" + prefix, rendered)
+                self.assertIn("<code>tokens</code>", rendered)
+                self.assertIn("<code>spans</code>", rendered)
+                self.assertIn("<code>editorial</code>", rendered)
 
 
 class ResponseContractTest(EndpointCase, unittest.TestCase):

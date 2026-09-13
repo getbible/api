@@ -82,8 +82,10 @@ changes, schedules and key retention.
 
 A runtime endpoint reads files published by a static endpoint, so sync the
 required scripture version first. Choose Deploy a new domain > Runtime,
-select query or search, and select the existing local data root containing
-that version. Each runtime endpoint gets its own service, release generations,
+select query or search, choose `v2` or `v3`, and select the existing local data
+root containing that version. For v3, sync the static v3 endpoint first and
+select the root containing `v3/`; both versions remain available independently.
+Each runtime endpoint gets its own service, release generations,
 socket and cache; it must pass readiness before nginx routes requests to it.
 
 ```sh
