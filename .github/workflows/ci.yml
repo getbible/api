@@ -25,8 +25,8 @@ jobs:
     runs-on: ubuntu-${{ matrix.os }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
           cache: pip
@@ -65,7 +65,7 @@ jobs:
     runs-on: ubuntu-${{ matrix.os }}
     timeout-minutes: 35
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Keep apt on the Ubuntu archives
         # The runner image adds Google Chrome and Microsoft package feeds whose
         # indexes can be inconsistent for a while after a release ("Hash Sum
@@ -86,7 +86,7 @@ jobs:
       - name: Capture the service journal on failure
         if: failure()
         run: sudo journalctl -u 'getbible-*' --no-pager -n 500 > /tmp/getbible-systemd-journal.log
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: failure()
         with:
           name: systemd-ubuntu-${{ matrix.os }}
