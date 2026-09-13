@@ -2,6 +2,21 @@
 
 ## Docker image updates
 
+From the Docker host, open the menu or a root command shell using the container
+name shown by `docker ps`:
+
+```sh
+# Management menu
+docker exec -it --user root <container-name> getbible
+# Command shell
+docker exec -it --user root <container-name> /bin/bash
+```
+
+Inside the root shell, run `getbible` commands without `sudo`. For example,
+`getbible dashboard update` followed by `getbible dashboard status` updates and
+verifies the installed dashboard. Use `exit` to return to the host for the
+Docker image commands below.
+
 Docker installations use the image's manager source. From the host directory
 holding `compose.yaml`, select the desired numbered `GETBIBLE_IMAGE_TAG` in
 `.env`, then:

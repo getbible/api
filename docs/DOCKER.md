@@ -226,8 +226,28 @@ docker compose up -d
 docker compose ps
 docker compose exec --user root getbible getbible doctor
 docker compose exec --user root getbible getbible settings environment
-docker compose exec --user root getbible getbible
+docker exec -it --user root <container-name> getbible
 ```
+
+From the Docker host, use the container's name to open the management menu:
+
+```sh
+docker exec -it --user root <container-name> getbible
+```
+
+To open a command shell instead:
+
+```sh
+docker exec -it --user root <container-name> /bin/bash
+```
+
+Replace `<container-name>` with the name shown by `docker ps`. Inside this root
+shell, run commands directly, such as `getbible dashboard update`,
+`getbible dashboard status`, or `getbible update`; do not add `sudo`.
+The menu is not a command shell: close it and use the `/bin/bash` command above
+to enter shell commands.
+Run `exit` to return to the Docker host before using `docker compose pull`,
+`docker compose up -d`, or other Docker image commands.
 
 `getbible` is a symlink to the manager entry point on the image's executable
 path, not a shell alias. It passes all arguments unchanged. No endpoint data
@@ -247,7 +267,7 @@ Common commands:
 
 ```sh
 # Interactive management menu and full command reference
-docker compose exec --user root getbible getbible
+docker exec -it --user root <container-name> getbible
 docker compose exec --user root getbible getbible --help
 
 # Domains, endpoint data access and explicit synchronization
@@ -265,7 +285,7 @@ docker compose exec --user root getbible getbible verify api.example.org
 docker compose exec --user root getbible getbible logs api.example.org access --lines 50
 docker compose exec --user root getbible getbible resources show
 docker compose logs --tail 100 getbible
-docker compose exec --user root getbible bash
+docker exec -it --user root <container-name> /bin/bash
 
 # Noninteractive use, suitable for a host-side automation job
 docker compose exec -T --user root getbible getbible list
@@ -375,6 +395,9 @@ Service timers resume their normal saved schedules after systemd starts.
 ## 7. Updates, backup and recovery
 
 Select a numbered image release in `.env`, or deliberately use `latest`, then:
+
+Run these commands on the Docker host. If you are in the container's shell,
+run `exit` first:
 
 ```sh
 docker compose pull
