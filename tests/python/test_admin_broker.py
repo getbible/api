@@ -324,6 +324,85 @@ class JobTests(unittest.TestCase):
         self.assertEqual(settings, {key: "current-" + key for key in keys})
         self.assertNotIn("do-not-show", json.dumps(result))
 
+    def runtime_manifests(self):
+        for kind in ("query", "search"):
+            directory = self.root / "src/apps" / kind
+            directory.mkdir(parents=True)
+            (directory / "manifest.conf").write_text((ROOT / "src/apps" / kind / "manifest.conf").read_text())
+
+    def test_runtime_catalogue_uses_manifests_and_only_matching_published_sources(self):
+        self.runtime_manifests()
+        registry = self.root / "etc/getbible/endpoints/api.example.test"
+        (registry / "versions").mkdir(parents=True)
+        (registry / "endpoint.conf").write_text("TYPE=static\nENABLED=true\n")
+        (registry / "versions/v2.conf").write_text("ENABLED=true\n")
+        (registry / "versions/v3.conf").write_text("ENABLED=true\n")
+        published = self.root / "srv/getbible/api.example.test"
+        (published / "releases/third").mkdir(parents=True)
+        (published / "v3").symlink_to("releases/third", target_is_directory=True)
+        catalogue = {item["id"]: item for item in self.app.catalogue()}
+        for action in ("domain.deploy_runtime", "endpoint.add_runtime"):
+            spec = catalogue[action]
+            self.assertEqual(spec["runtime_kinds"], {
+                kind: {"versions": ["v2", "v3"], "default_version": "v2"} for kind in ("query", "search")})
+            self.assertEqual([(item["value"], item["version"]) for item in spec["repositories"]], [(str(published), "v3")])
+            self.assertIn(str(published / "v3"), spec["repositories"][0]["label"])
+        (registry / "versions/v3.conf").write_text("ENABLED=false\n")
+        self.assertEqual(self.app.runtime_repositories(self.app.runtime_kinds()), [])
+
+    def test_runtime_root_source_keeps_publication_symlink_and_version_layout(self):
+        self.runtime_manifests()
+        registry = self.root / "etc/getbible/endpoints/root.example.test"
+        (registry / "versions").mkdir(parents=True)
+        (registry / "endpoint.conf").write_text("TYPE=static\n")
+        (registry / "versions/root.conf").write_text("ENABLED=true\n")
+        published = self.root / "srv/getbible/root.example.test"
+        (published / "releases/current/v3").mkdir(parents=True)
+        (published / "root").symlink_to("releases/current", target_is_directory=True)
+        choices = self.app.runtime_repositories(self.app.runtime_kinds())
+        self.assertEqual([(item["value"], item["version"]) for item in choices], [(str(published / "root"), "v3")])
+        values = {"domain": "query.example.test", "kind": "query", "version": "v3", "root": True, "repository": str(published / "root")}
+        self.app.validate_file_access("domain.deploy_runtime", values)
+        self.app.validate_runtime_selection("domain.deploy_runtime", values)
+        self.assertEqual(values["repository"], str(published / "root"))
+
+    def test_runtime_submission_selects_v3_for_both_kinds_and_rejects_mismatched_source(self):
+        self.runtime_manifests()
+        repository = self.root / "srv/getbible/scripture"
+        (repository / "v3").mkdir(parents=True)
+        for kind in ("query", "search"):
+            with self.subTest(kind=kind):
+                arguments = {"domain": f"{kind}.example.test", "kind": kind, "version": "v3", "repository": str(repository)}
+                result = self.app.submit({"operation": "domain.deploy_runtime", "arguments": arguments}, "operator")
+                self.app.work.join()
+                job = self.app.job(result["id"], "operator")
+                self.assertEqual(job["status"], "succeeded")
+                self.assertEqual(job["arguments"]["version"], "v3")
+                arguments["version"] = "v2"
+                with self.assertRaisesRegex(ValueError, "v2/"):
+                    self.app.submit({"operation": "domain.deploy_runtime", "arguments": arguments}, "operator")
+                arguments["version"] = "v9"
+                with self.assertRaisesRegex(ValueError, "supported API version"):
+                    self.app.submit({"operation": "domain.deploy_runtime", "arguments": arguments}, "operator")
+        values = {"kind": "query"}
+        self.app.validate_runtime_selection("domain.deploy_runtime", values)
+        self.assertEqual(values["version"], "v2")
+
+    def test_add_runtime_endpoint_uses_registered_kind_and_selected_version(self):
+        self.runtime_manifests()
+        registry = self.root / "etc/getbible/endpoints/search.example.test"
+        registry.mkdir(parents=True)
+        (registry / "endpoint.conf").write_text("TYPE=runtime\nKIND=search\n")
+        source = self.root / "srv/getbible/scripture"
+        (source / "v3").mkdir(parents=True)
+        arguments = {"domain": "search.example.test", "endpoint": "v3", "repository": str(source)}
+        result = self.app.submit({"operation": "endpoint.add_runtime", "arguments": arguments}, "operator")
+        self.app.work.join()
+        self.assertEqual(self.app.job(result["id"], "operator")["arguments"]["endpoint"], "v3")
+        arguments["endpoint"] = "root"
+        with self.assertRaisesRegex(ValueError, "supported API version"):
+            self.app.submit({"operation": "endpoint.add_runtime", "arguments": arguments}, "operator")
+
     def test_browser_cannot_publish_private_files_or_symlinked_imports(self):
         imports = self.root / "var/lib/getbible/imports"
         imports.mkdir(parents=True)

@@ -86,7 +86,7 @@ operation("domain.go_live", "Activate a staged domain", ["go-live", "{domain}", 
 operation("domain.stage", "Stage a domain", ["stage", "{domain}"], [D], destructive=True)
 operation("domain.remove", "Remove a domain", ["remove", "{domain}", ("--purge", "purge")], [D, field("purge", "boolean", default=False)], destructive=True)
 operation("domain.deploy_static", "Deploy a static domain", ["deploy", "static", "--domain", "{domain}", "--version", "{endpoint}", "--repo", "{repository}", ("--ref", "ref"), ("--path", "source_path"), ("--extensions", "extensions"), ("--access", "access"), ("--schedule", "schedule"), "--staged"], [D, E, field("repository"), field("ref", default="master"), field("source_path", default="."), field("extensions", default="json,sha,txt"), field("access", choices="open|metered|token", default="metered"), field("schedule", choices="daily|weekly|monthly", default="monthly")])
-operation("domain.deploy_runtime", "Deploy a runtime domain", ["deploy", "runtime", "--domain", "{domain}", "--kind", "{kind}", ("--version", "version"), ("--root", "root"), ("--repository", "repository"), ("--access", "access"), ("--warm", "warm"), ("--python", "python"), "--staged"], [D, field("kind", choices="query|search"), field("version", "endpoint", default="v2"), field("root", "boolean", default=False), field("repository", "path", required=False), field("access", choices="open|metered|token", default="metered"), field("warm", "translations", default="kjv"), field("python", default="auto")])
+operation("domain.deploy_runtime", "Deploy a runtime domain", ["deploy", "runtime", "--domain", "{domain}", "--kind", "{kind}", ("--version", "version"), ("--root", "root"), ("--repository", "repository"), ("--access", "access"), ("--warm", "warm"), ("--python", "python"), "--staged"], [D, field("kind"), field("version", "endpoint", required=False), field("root", "boolean", default=False), field("repository", "path", required=False), field("access", choices="open|metered|token", default="metered"), field("warm", "translations", default="kjv"), field("python", default="auto")])
 operation("endpoint.add_static", "Add a static endpoint", ["version", "add", "{domain}", "{endpoint}", "--repo", "{repository}", ("--ref", "ref"), ("--path", "source_path")], [D, E, field("repository"), field("ref", default="master"), field("source_path", default=".")])
 operation("endpoint.add_runtime", "Add a runtime endpoint", ["version", "add", "{domain}", "{endpoint}", ("--repository", "repository"), ("--warm", "warm"), ("--python", "python")], [D, E, field("repository", "path", required=False), field("warm", "translations", default="kjv"), field("python", default="auto")])
 operation("endpoint.change_source", "Change a static repository", ["version", "change", "{domain}", "{endpoint}", ("--repo", "repository"), ("--ref", "ref"), ("--path", "source_path")], [D, E, field("repository", required=False), field("ref", required=False), field("source_path", required=False)])
@@ -354,13 +354,86 @@ class Broker:
 
     def catalogue(self):
         catalogue = json.loads(json.dumps([{key: value for key, value in spec.items() if not key.startswith("_")} for spec in OPS.values()]))
+        runtime_kinds = self.runtime_kinds()
         for operation in catalogue:
+            if operation["id"] in {"domain.deploy_runtime", "endpoint.add_runtime"}:
+                operation["runtime_kinds"] = runtime_kinds
+                operation["repositories"] = self.runtime_repositories(runtime_kinds)
+                for definition in operation["fields"]:
+                    if definition["name"] == "kind":
+                        definition["choices"] = sorted(runtime_kinds)
             if operation["id"] == "settings.set":
                 try:
                     operation["fields"][0]["choices"] = sorted(self.setting_keys())
                 except ValueError:
                     operation["fields"][0]["choices"] = []
         return catalogue
+
+    def runtime_kinds(self):
+        """Use the same implementation manifests as the CLI version picker."""
+        kinds = {}
+        apps = Path(self.manager).resolve().parent / "src/apps"
+        for path in sorted(apps.glob("*/manifest.conf")):
+            config = read_config(path)
+            kind = config.get("KIND", "")
+            if not re.fullmatch(r"[a-z][a-z0-9_-]*", kind):
+                continue
+            if path.parent.name != kind and not re.fullmatch(re.escape(kind) + r"-v[0-9]+", path.parent.name):
+                continue
+            entry = kinds.setdefault(kind, {"versions": [], "default_version": ""})
+            entry["versions"].extend(version.strip() for version in config.get("SUPPORTED_VERSIONS", "").split(",")
+                                     if re.fullmatch(r"v[0-9]+", version.strip()))
+            if path.parent.name == kind:
+                entry["default_version"] = config.get("DEFAULT_VERSION", "")
+        for entry in kinds.values():
+            entry["versions"] = sorted(set(entry["versions"]), key=lambda value: int(value[1:]))
+        return kinds
+
+    def runtime_repositories(self, kinds):
+        """List available publication roots without reading scripture content."""
+        versions = sorted({version for kind in kinds.values() for version in kind["versions"]}, key=lambda value: int(value[1:]))
+        choices = []
+        registry = Path(self.prefix + "/etc/getbible/endpoints")
+        for path in sorted(registry.glob("*/endpoint.conf")):
+            config = read_config(path)
+            domain = path.parent.name
+            if config.get("TYPE") != "static" or config.get("ENABLED", "true") != "true" or not re.fullmatch(DOMAIN, domain):
+                continue
+            for version in versions:
+                for label in (version, "root"):
+                    endpoint = path.parent / "versions" / f"{label}.conf"
+                    if not endpoint.is_file() or read_config(endpoint).get("ENABLED", "true") != "true":
+                        continue
+                    root = Path(self.prefix + "/srv/getbible") / domain
+                    if label == "root":
+                        root /= label
+                    source = root / version
+                    if source.is_dir() and os.access(source, os.R_OK | os.X_OK):
+                        choices.append({"value": str(root), "label": f"{domain} ({label}) · reads {source}", "version": version})
+        return choices
+
+    def validate_runtime_selection(self, operation_id, values):
+        if operation_id not in {"domain.deploy_runtime", "endpoint.add_runtime"}:
+            return
+        kinds = self.runtime_kinds()
+        if operation_id == "domain.deploy_runtime":
+            kind = values["kind"]
+            key = "version"
+        else:
+            domain = read_config(Path(self.prefix + "/etc/getbible/endpoints") / values["domain"] / "endpoint.conf")
+            if domain.get("TYPE") != "runtime":
+                raise ValueError("Choose an existing runtime domain")
+            kind, key = domain.get("KIND"), "endpoint"
+        if kind not in kinds:
+            raise ValueError("Choose an installed runtime kind")
+        version = values.get(key) or kinds[kind]["default_version"]
+        if version not in kinds[kind]["versions"]:
+            raise ValueError("Choose a supported API version")
+        values[key] = version
+        if values.get("repository"):
+            source = Path(values["repository"]) / version
+            if not source.is_dir() or not os.access(source, os.R_OK | os.X_OK):
+                raise ValueError(f"The local scripture root must contain an available {version}/ folder")
 
     def setting_keys(self):
         config_path = Path(self.manager).resolve().parent / "src/lib/config.sh"
@@ -380,6 +453,7 @@ class Broker:
         spec = OPS[name]
         values = validate_arguments(spec, parameters.get("arguments", {}))
         self.validate_file_access(name, values)
+        self.validate_runtime_selection(name, values)
         if spec["destructive"] and parameters.get("confirm") is not True:
             raise ValueError("This operation requires explicit confirmation")
         job = secrets.token_urlsafe(18)

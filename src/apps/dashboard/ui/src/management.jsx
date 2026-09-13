@@ -1,8 +1,9 @@
 import React, {useEffect, useMemo, useState} from 'react';
 import {api, date} from './api.js';
 import {Panel, Busy, Empty, Badge, DataTable, ErrorNotice} from './components.jsx';
-import {sections, operationId, operationFields, inventoryDomains, supportsDomain, sectionGroups,
-    needsExistingDomain, needsExistingEndpoint, endpointScopeLabel, operationDefaults, submittedArguments} from './management.js';
+import {sections, operationId, inventoryDomains, supportsDomain, sectionGroups,
+    needsExistingDomain, needsExistingEndpoint, endpointScopeLabel, operationDefaults, submittedArguments,
+    runtimeDeploymentOptions, runtimeDeploymentFields, changedOperationValues} from './management.js';
 
 const rows = (value, key) => Array.isArray(value) ? value : value?.[key] || [];
 const activeStatuses = new Set(['queued', 'waiting', 'running']);
@@ -13,12 +14,27 @@ function MenuCards({items, onSelect}) {
     </button>)}</div>;
 }
 
-function OperationField({field, values, setValues, onError, domains, currentSettings}) {
-    const change = value => setValues(previous => ({...previous, [field.name]: value,
+function OperationField({field, values, setValues, onError, domains, currentSettings, spec, selectedDomain}) {
+    const change = value => setValues(previous => ({...changedOperationValues(spec, previous, field.name, value, selectedDomain),
         ...(field.name === 'key' && currentSettings ? {value: currentSettings[value] ?? ''} : {})}));
-    const props = {className: 'form-control', 'aria-label': field.label || field.name, required: field.required && !field.allow_empty};
+    const props = {className: 'form-control', 'aria-label': field.label || field.name, required: field.required && !field.allow_empty, disabled: field.disabled};
     let input;
-    if (field.type === 'file') {
+    if (field.type === 'runtime_repository') {
+        const manual = values._repositoryMode === 'manual';
+        return <div>
+            <label>{field.label}<select {...props} className="form-select" value={manual ? '__manual__' : values.repository || ''} onChange={event => {
+                const value = event.target.value;
+                setValues(previous => ({...previous, repository: value === '__manual__' ? '' : value,
+                    _repositoryMode: value === '__manual__' ? 'manual' : 'published'}));
+            }}>
+                <option value="">Automatic local source</option>
+                {field.repositories.map(repository => <option key={repository.value} value={repository.value}>{repository.label}</option>)}
+                <option value="__manual__">Enter a local path…</option>
+            </select></label>
+            {manual && <label>Custom local path<input className="form-control" aria-label="Custom local path" type="text" required autoComplete="off" value={values.repository || ''} onChange={event => change(event.target.value)}/></label>}
+            {field.description && <small>{field.description}</small>}
+        </div>;
+    } else if (field.type === 'file') {
         input = <input {...props} type="file" accept=".png,.jpg,.jpeg,.webp,.ico,.svg" onChange={event => {
             const file = event.target.files?.[0];
             if (!file) return;
@@ -35,7 +51,7 @@ function OperationField({field, values, setValues, onError, domains, currentSett
     } else if (field.name === 'domain' && !field.required) {
         input = <select aria-label={field.label || field.name} className="form-select" value={values.domain || ''} onChange={e => change(e.target.value)}><option value="">{field.scopeLabel || 'All domains'}</option>{domains.map(domain => <option key={domain.domain} value={domain.domain}>{domain.domain}</option>)}</select>;
     } else if (field.choices || field.enum) {
-        input = <select aria-label={field.label || field.name} className="form-select" required={props.required} value={values[field.name] ?? ''} onChange={e => change(e.target.value)}><option value="">Select…</option>{(field.choices || field.enum).map(choice => <option key={choice} value={choice}>{choice}</option>)}</select>;
+        input = <select {...props} className="form-select" value={values[field.name] ?? ''} onChange={e => change(e.target.value)}><option value="">Select…</option>{(field.choices || field.enum).map(choice => <option key={choice} value={choice}>{choice}</option>)}</select>;
     } else {
         input = <input {...props} type={field.secret ? 'password' : field.type === 'integer' ? 'number' : 'text'} autoComplete={field.secret ? 'new-password' : 'off'} value={values[field.name] ?? ''} onChange={e => change(field.type === 'integer' && e.target.value !== '' ? Number(e.target.value) : e.target.value)}/>;
     }
@@ -80,7 +96,9 @@ export default function Management({execute, onError, onDetail, refresh, initial
     const selectedDomain = domains.find(domain => domain.domain === navigation.domain);
     const selectedEndpoint = selectedDomain?.endpoints.find(endpoint => endpoint.label === navigation.endpoint);
     const spec = operations.find(item => operationId(item) === navigation.operation);
-    const fields = operationFields(spec);
+    const fields = runtimeDeploymentFields(spec, values, selectedDomain);
+    const runtime = runtimeDeploymentOptions(spec, values, selectedDomain);
+    const runtimeUnavailable = Boolean(runtime && (!runtime.kind || !runtime.versions.length));
     const section = sections.find(item => item.id === navigation.section);
     const groups = sectionGroups(operations, navigation.section, selectedDomain);
     const selectedGroup = groups.find(group => group.title === navigation.group);
@@ -110,7 +128,7 @@ export default function Management({execute, onError, onDetail, refresh, initial
     function chooseOperation(item) {navigate({...navigation, operation: item.id, endpoint: undefined});}
     function submit(event) {
         event.preventDefault();
-        if (!spec || paused || domainMissing || endpointMissing) return;
+        if (!spec || paused || domainMissing || endpointMissing || runtimeUnavailable) return;
         execute(operationId(spec), submittedArguments(spec, values), {title: spec.title, description: spec.description});
     }
     const crumbs = [{label: 'Manage', action: () => navigate({section: '', domain: '', group: '', operation: '', endpoint: undefined})}];
@@ -146,9 +164,9 @@ export default function Management({execute, onError, onDetail, refresh, initial
         content = <form className="management-form" onSubmit={submit}>
             {spec.description && <p className="text-secondary">{spec.description}</p>}
             {(navigation.domain || navigation.endpoint !== undefined) && <div className="management-context"><strong>{navigation.domain}</strong>{navigation.endpoint !== undefined && <span> · {navigation.endpoint ? navigation.endpoint === 'root' ? 'Domain root' : `/${navigation.endpoint}/` : endpointScopeLabel(spec)}</span>}</div>}
-            <div className="filter-grid">{visibleFields.map(field => <OperationField key={`${navigation.operation}-${navigation.domain}-${navigation.endpoint}-${field.name}`} field={field.name === 'domain' && operationId(spec) === 'pages.upload_icon' ? {...field, scopeLabel: 'System icons'} : field} values={values} setValues={setValues} domains={domains} currentSettings={operationId(spec) === 'runtime.set' ? selectedEndpoint?.endpoint_settings : undefined} onError={onError}/>)}</div>
+            <div className="filter-grid">{visibleFields.map(field => <OperationField key={`${navigation.operation}-${navigation.domain}-${navigation.endpoint}-${field.name}`} field={field.name === 'domain' && operationId(spec) === 'pages.upload_icon' ? {...field, scopeLabel: 'System icons'} : field} values={values} setValues={setValues} domains={domains} spec={spec} selectedDomain={selectedDomain} currentSettings={operationId(spec) === 'runtime.set' ? selectedEndpoint?.endpoint_settings : undefined} onError={onError}/>)}</div>
             {!!selectedEndpoint && operationId(spec) === 'runtime.set' && <details className="current-settings"><summary>Current endpoint settings</summary><DataTable rows={Object.entries(selectedEndpoint.endpoint_settings || {}).map(([key, value]) => ({key, value}))} columns={[{key: 'key', label: 'Setting'}, {key: 'value', label: 'Current value'}]}/></details>}
-            <button className="btn btn-primary" disabled={paused}>Review operation</button>
+            <button className="btn btn-primary" disabled={paused || runtimeUnavailable}>Review operation</button>
         </form>;
     }
     const allJobs = rows(jobs, 'jobs');

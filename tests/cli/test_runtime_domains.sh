@@ -25,8 +25,8 @@ check() {
 COPY="$SB/repo"
 mkdir -p "$COPY"
 tar --exclude=.git --exclude=.venv-test --exclude=__pycache__ --exclude=build --exclude='*.egg-info' -C "$ROOT" -cf - . | tar -C "$COPY" -xf -
-cp -a "$COPY/src/apps/query" "$COPY/src/apps/query-v3"
-sed -i 's/^DEFAULT_VERSION=v2$/DEFAULT_VERSION=v3/; s/^SUPPORTED_VERSIONS=v2$/SUPPORTED_VERSIONS=v3/' "$COPY/src/apps/query-v3/manifest.conf"
+cp -a "$COPY/src/apps/query" "$COPY/src/apps/query-v4"
+sed -i 's/^DEFAULT_VERSION=.*/DEFAULT_VERSION=v4/; s/^SUPPORTED_VERSIONS=.*/SUPPORTED_VERSIONS=v4/' "$COPY/src/apps/query-v4/manifest.conf"
 export GB_REPO_DIR="$COPY"
 # This shell sources the libraries (and so owns a GB_TMP that its exit
 # removes); the tool runs as a child with a temporary directory of its own.
@@ -55,10 +55,13 @@ render() {
 
 echo "-- implementations --"
 check "kinds discovered once"        "query search"            "$(rt_kinds | tr '\n' ' ' | sed 's/ $//')"
-check "versions from every dir"      "v2 v3"                   "$(rt_kind_versions query | tr '\n' ' ' | sed 's/ $//')"
-check "v3 has its own directory"     "query-v3"                "$(rt_implementation query v3)"
+check "versions from every dir"      "v2 v3 v4"                "$(rt_kind_versions query | tr '\n' ' ' | sed 's/ $//')"
+check "v4 has its own directory"     "query-v4"                "$(rt_implementation query v4)"
+check "v3 uses the shared query"     "query"                   "$(rt_implementation query v3)"
 check "v2 from the base directory"   "query"                   "$(rt_implementation query v2)"
-check "search knows v2 only"         "v2"                      "$(rt_kind_versions search | tr '\n' ' ' | sed 's/ $//')"
+check "search supports both versions" "v2 v3"                  "$(rt_kind_versions search | tr '\n' ' ' | sed 's/ $//')"
+check "v3 uses the shared search"    "search"                  "$(rt_implementation search v3)"
+check "version picker preserves default" "v2"                  "$(rt_select_version search)"
 check "unknown version refused"      ""                        "$(rt_implementation query v9 || true)"
 
 echo "-- local scripture setup --"
@@ -80,6 +83,15 @@ mkdir -p "$(ep_data_dir "$STATIC")/releases/v2/current"
 ln -s releases/v2/current "$(ep_version_path "$STATIC" v2)"
 check "published root is discoverable" "$(ep_data_dir "$STATIC")" "$(rt_default_repository v2)"
 check "candidate uses stable root" "$(ep_data_dir "$STATIC")" "$(rt_repository_candidates v2)"
+check "v2 source not offered for v3" "" "$(rt_default_repository v3)"
+if type_runtime_create "$MISSING" query v3 "$(ep_data_dir "$STATIC")" open '' >/dev/null 2>&1; then
+    echo "v2-only scripture was accepted for v3" >&2; exit 1
+fi
+check "mismatched version leaves no domain" "" "$(ep_exists "$MISSING" && printf exists || true)"
+ep_version_create "$STATIC" v3 https://example.test/bible-v3.git main .
+mkdir -p "$(ep_data_dir "$STATIC")/releases/v3/current"
+ln -s releases/v3/current "$(ep_version_path "$STATIC" v3)"
+check "published v3 root is discoverable" "$(ep_data_dir "$STATIC")" "$(rt_default_repository v3)"
 ep_version_set "$STATIC" v2 ENABLED false
 check "disabled endpoint is not offered" "" "$(rt_default_repository v2)"
 ep_version_set "$STATIC" v2 ENABLED true
@@ -87,15 +99,39 @@ ep_version_set "$STATIC" v2 ENABLED true
 # Picker labels show the actual version path; it returns the librarian root.
 # shellcheck disable=SC2317,SC2329
 ui_menu() {
-    [[ "$*" == *"$(ep_data_dir "$STATIC")/v2"* ]] || return 1
+    [[ "$*" == *"$(ep_data_dir "$STATIC")/$PICK_VERSION"* ]] || return 1
     printf '%s\n' "$(ep_data_dir "$STATIC")"
 }
+PICK_VERSION=v2
 check "menu selects published local root" "$(ep_data_dir "$STATIC")" "$(rt_select_repository v2)"
+PICK_VERSION=v3
+check "menu selects published v3 root" "$(ep_data_dir "$STATIC")" "$(rt_select_repository v3)"
 unset -f ui_menu
 unset GB_UI_LOADED
 # shellcheck source=../../src/lib/ui.sh
 source "$COPY/src/lib/ui.sh"
 ep_remove_config "$STATIC"
+
+STATIC_ROOT=root.example.test
+ep_create "$STATIC_ROOT" static static
+ep_version_create "$STATIC_ROOT" root https://example.test/bible-root.git main .
+mkdir -p "$(ep_data_dir "$STATIC_ROOT")/releases/current/v3"
+ln -s releases/current "$(ep_version_path "$STATIC_ROOT" root)"
+check "root publication containing v3 is offered" "$(ep_version_path "$STATIC_ROOT" root)" "$(rt_default_repository v3)"
+ep_remove_config "$STATIC_ROOT"
+
+# Exercise CLI selection with release installation stubbed at its boundary.
+(
+    type_runtime_deploy_finish() { :; }
+    for kind in query search; do
+        domain="$kind-cli.example.test"
+        type_runtime_deploy_cli --domain "$domain" --kind "$kind" --version v3 --repository "$REPO" --staged
+        [[ "$(rt_app_version "$domain" v3)" == v3 ]]
+        [[ "$(ep_version_get "$domain" v3 REPOSITORY)" == "$REPO" ]]
+        [[ "$(ep_is_live "$domain" && printf live || printf staged)" == staged ]]
+        ep_remove_config "$domain"
+    done
+) || { echo "CLI v3 selection failed" >&2; exit 1; }
 
 echo "-- a domain with version folders --"
 type_runtime_create "$Q" query v2 "$REPO" metered ''
@@ -104,6 +140,7 @@ check "endpoint recorded"            "LABEL=v2"                "$(cat "$SB/etc/g
 check "app version recorded"         "APP_VERSION=v2"          "$(cat "$SB/etc/getbible/endpoints/$Q/versions/v2.conf")"
 check "settings live with endpoint"  "WORKERS=auto"               "$(cat "$SB/etc/getbible/endpoints/$Q/versions/v2.conf")"
 check "default endpoint"             "DEFAULT_ENDPOINT=v2"     "$(cat "$SB/etc/getbible/endpoints/$Q/endpoint.conf")"
+check "version picker skips served default" "v3"                "$(rt_select_version query "$Q")"
 check "root under the version"       "$SB/opt/getbible/query/v2" "$(rt_root "$Q" v2)"
 check "unit prefix carries version"  "getbible-query-v2"       "$(rt_unit_prefix "$Q" v2)"
 check "socket dir carries version"   "$SB/run/getbible/query/v2" "$(rt_socket_dir "$Q" v2)"
@@ -126,7 +163,7 @@ check "openapi alias"                "try_files /v2/openapi.json =404;" "$SITE"
 check "own socket"                   "proxy_pass http://unix:$SB/run/getbible/query/v2/gunicorn.sock:;" "$SITE"
 check "no root rewrite"              ""                        "$(grep -c 'rewrite ^/(.\*)\$' <<< "$SITE" | sed 's/^0$//')"
 
-echo "-- a second version from its own implementation --"
+echo "-- a second version from the shared implementation --"
 check "v9 refused"                   "no implementation of v9" "$(rt_check_new_endpoint "$Q" v9 v9 2>&1 || true)"
 check "root refused next to v2"      "cannot become an endpoint" "$(rt_check_new_endpoint "$Q" root v3 2>&1 || true)"
 check "v3 accepted"                  ""                        "$(rt_check_new_endpoint "$Q" v3 v3 2>&1 || true)"

@@ -39,6 +39,27 @@ rt_kind_versions() {
     return 0
 }
 
+# Pick only versions declared by the installed implementations. When adding
+# an endpoint, omit the versions already served by the domain.
+rt_select_version() {
+    local kind="$1" domain="${2:-}" version default state
+    local -a items=()
+    default="$(cfg_get "$GB_APPS/$kind/manifest.conf" DEFAULT_VERSION)"
+    while IFS= read -r version; do
+        [[ -n "$version" ]] || continue
+        if [[ -n "$domain" ]] && ep_version_exists "$domain" "$version"; then continue; fi
+        state=off
+        [[ "$version" != "$default" ]] || state=on
+        items+=("$version" "Serve $kind using local $version/ scripture files" "$state")
+    done < <(rt_kind_versions "$kind")
+    if (( ${#items[@]} == 0 )); then
+        ui_msg "No versions available" "Every supported version of $kind already has an endpoint on $domain."
+        return 1
+    fi
+    if [[ -n "$domain" ]] && ep_version_exists "$domain" "$default"; then items[2]=on; fi
+    ui_radiolist "API version" "Choose the scripture API version for this $kind endpoint." "${items[@]}"
+}
+
 # rt_implementation KIND VERSION: the src/apps directory implementing VERSION.
 rt_implementation() {
     local kind="$1" version="$2" dir
@@ -1232,7 +1253,7 @@ type_runtime_deploy_interactive() {
     ep_exists "$domain" && { ui_msg "Exists" "$domain is already set up on this server."; return 1; }
     [[ -z "$(rt_kind_deployed_on "$kind")" ]] || { ui_msg "Deployed" "The $kind service already runs on $(rt_kind_deployed_on "$kind"). Add further versions to that domain (Domain > Endpoints) rather than deploying a second domain."; return 1; }
     GB_DEPLOY_MODE="$(endpoint_prompt_deploy_mode "$domain")" || return 1
-    version="$(ui_input "Version" "API version to serve (available for $kind: $(rt_kind_versions "$kind" | tr '\n' ' '))" "$RM_DEFAULT_VERSION")" || return 1
+    version="$(rt_select_version "$kind")" || return 1
     rt_implementation "$kind" "$version" >/dev/null || { ui_msg "Invalid" "The $kind service has no implementation of $version. Available: $(rt_kind_versions "$kind" | tr '\n' ' ')"; return 1; }
     label="$version"
     if ui_yesno "Domain root" "Serve $version at the domain root, https://$domain/{translation}/..., instead of under https://$domain/$version/?\n\nA domain serving its root cannot add other versions later; version folders can." no; then
@@ -1464,7 +1485,7 @@ rt_versions_menu() {
                     ui_msg "Domain root" "$domain serves its only endpoint at the domain root (https://$domain/). Other versions cannot be added next to it."
                     continue
                 fi
-                version="$(ui_input "Version" "Version to add (available: $(rt_kind_versions "$kind" | tr '\n' ' '); already served: $(ep_versions "$domain" | tr '\n' ' '))" "")" || continue
+                version="$(rt_select_version "$kind" "$domain")" || continue
                 if ! rt_check_new_endpoint "$domain" "$version" "$version" 2>/dev/null; then
                     ui_msg "Invalid" "$version cannot be added: it is not a version the $kind service implements, or $domain already serves it."
                     continue
