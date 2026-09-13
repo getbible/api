@@ -81,12 +81,19 @@ sd_remove_unit() {
 }
 
 # Wait until a unix socket answers a health URL, up to TIMEOUT seconds.
+# Expensive deployment probes may supply a larger per-request allowance; every
+# request remains capped by the overall deadline. Ordinary health checks retain
+# short retries so an unresponsive worker cannot consume the whole wait.
 sd_wait_ready() {
-    local socket="$1" path="$2" timeout="${3:-90}" deadline remaining request_timeout
+    local socket="$1" path="$2" timeout="${3:-90}" attempt_timeout="${4:-5}" deadline remaining request_timeout
     [[ -z "$GB_PREFIX" ]] || return 0
+    [[ "$timeout" =~ ^[1-9][0-9]*$ && "$attempt_timeout" =~ ^[1-9][0-9]*$ ]] || {
+        gb_warn 'Readiness timeouts must be positive whole seconds.'
+        return 1
+    }
     deadline=$((SECONDS + timeout))
     while (( SECONDS < deadline )); do
-        remaining=$((deadline - SECONDS)); request_timeout=5
+        remaining=$((deadline - SECONDS)); request_timeout="$attempt_timeout"
         (( remaining >= request_timeout )) || request_timeout="$remaining"
         if curl --silent --fail --max-time "$request_timeout" --unix-socket "$socket" "http://localhost$path" >/dev/null 2>&1; then
             return 0
