@@ -7,7 +7,7 @@
   {
     "path": "echarts/NOTICE",
     "bytes": 168,
-    "sha256": "dc0d9176413c3d96d0ac40b39b1dbb11e3043b7b010be560f5dfe66bd3774ae1"
+    "sha256": "d491d358344f842685c1b1585970999db65fe30ecf7ef3867af8814f4016c016"
   },
   {
     "path": "bootstrap/LICENSE",
@@ -16,8 +16,8 @@
   },
   {
     "path": "echarts/dist/echarts.common.min.js",
-    "bytes": 705143,
-    "sha256": "fd958f318b139893918674790290fcd73d19d953b91175d5277250ffaa177d8e"
+    "bytes": 715020,
+    "sha256": "61f13280aba3161f77fc801bf5f9c786f55f10432153a0683fc5cc0700b013d5"
   },
   {
     "path": "bootstrap/dist/css/bootstrap.min.css",
