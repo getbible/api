@@ -21,6 +21,7 @@ menu_main() {
             update "$update_label" \
             analytics "Traffic analytics: calls and unique callers" \
             dashboard "Private dashboard: domain, password, sessions, blocked addresses" \
+            mcp "MCP: enable, configure, update or roll back one /mcp endpoint" \
             logs "Logs: view, archives, rotate" \
             settings "Settings: Telegram, Cloudflare, icons, defaults, retention" \
             system "System: host check, dependencies, self-test" \
@@ -42,6 +43,7 @@ menu_main() {
             update) menu_update ;;
             analytics) menu_analytics ;;
             dashboard) menu_dashboard ;;
+            mcp) mcp_menu ;;
             logs) menu_logs ;;
             settings) menu_settings ;;
             system) menu_system ;;

@@ -18,6 +18,13 @@ after restoring saved services; an already applied image skips this refresh on
 restart. `getbible update` reapplies/retries it; `getbible` links to this entry point.
 See `docs/DEPLOYMENT_DECISIONS.md` before changing deployment behavior.
 
+An optional MCP sidecar attaches one `/mcp` route to an existing domain.
+The PyPI `getbible-mcp` dependency owns its protocol, tools and API contracts;
+this engine owns its ASGI host, local origin routing and deployment lifecycle.
+See `docs/MCP.md` for setup and the package-release prerequisite. Keep MCP
+outside the versioned query/search runtime kinds: `src/apps/mcp/bundle.conf`
+declares its offline package bundle without adding a runtime kind manifest.
+
 ## Vocabulary
 
 - A **domain** is a host name: one nginx vhost, one go-live, and a certificate

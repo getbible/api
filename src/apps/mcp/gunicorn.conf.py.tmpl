@@ -1,0 +1,15 @@
+"""The MCP application owns its ASGI startup and shutdown lifecycle."""
+bind = "unix:{{SOCKET}}"
+worker_class = "uvicorn_worker.UvicornWorker"
+workers = 1
+preload_app = False
+control_socket_disable = True
+timeout = 60
+graceful_timeout = 60
+keepalive = 5
+max_requests = 0
+worker_tmp_dir = "/dev/shm"
+accesslog = None
+errorlog = "-"
+capture_output = True
+umask = 0o007

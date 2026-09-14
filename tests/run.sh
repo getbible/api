@@ -60,8 +60,18 @@ if [[ "$("$VENV/bin/python" -c 'import sys; print(sys.version_info[:2])')" != "$
 fi
 # Install both kinds on every invocation: cached virtual environments must
 # follow changes to the pinned dependencies instead of silently staying stale.
-"$VENV/bin/python" -m pip install --quiet --requirement src/apps/query/requirements.txt --requirement src/apps/search/requirements.txt
-"$VENV/bin/python" -m pip install --quiet --no-deps --force-reinstall src/apps/common src/apps/query src/apps/search
+MCP_REQUIREMENTS=src/apps/mcp/requirements.txt
+if [[ -n "${GB_TEST_MCP_WHEEL:-}" ]]; then
+    # A release candidate may verify an explicitly supplied local wheel before
+    # publication. Production/native/image requirements always remain PyPI pins.
+    [[ "$GB_TEST_MCP_WHEEL" == /*.whl && -f "$GB_TEST_MCP_WHEEL" ]] || { echo 'GB_TEST_MCP_WHEEL must be an absolute wheel path' >&2; exit 1; }
+    MCP_REQUIREMENTS="$(mktemp)"
+    sed '/^getbible-mcp==/d' src/apps/mcp/requirements.txt > "$MCP_REQUIREMENTS"
+    "$VENV/bin/python" -m pip install --quiet --no-deps "$GB_TEST_MCP_WHEEL"
+fi
+"$VENV/bin/python" -m pip install --quiet --requirement src/apps/query/requirements.txt --requirement src/apps/search/requirements.txt --requirement "$MCP_REQUIREMENTS"
+[[ "$MCP_REQUIREMENTS" == src/apps/mcp/requirements.txt ]] || rm -f "$MCP_REQUIREMENTS"
+"$VENV/bin/python" -m pip install --quiet --no-deps --force-reinstall src/apps/common src/apps/query src/apps/search src/apps/mcp
 "$VENV/bin/python" -m pip check || fail "python dependency compatibility"
 rm -rf src/apps/*/build src/apps/*/*.egg-info
 "$VENV/bin/python" -m unittest discover -s tests/python -t . -v 2>&1 | tail -50 || fail "python unit tests"

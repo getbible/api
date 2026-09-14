@@ -18,7 +18,7 @@ for lib in core platform ui config deployment registry resources users telegram 
     # shellcheck source=/dev/null
     source "$GB_REPO_DIR/src/lib/$lib.sh"
 done
-for extra in analytics cloudflare update doctor golive dashboard menu; do
+for extra in analytics cloudflare update doctor golive dashboard mcp menu; do
     # shellcheck source=/dev/null
     [[ -f "$GB_REPO_DIR/src/lib/$extra.sh" ]] && source "$GB_REPO_DIR/src/lib/$extra.sh"
 done
@@ -107,6 +107,8 @@ Observability
   logs archives DOMAIN | logs rotate
   logs reset --discard-history           start a fresh traffic history; keep raw logs and settings
   analytics [--window today|24h|7d|30d|all] [--domain D] [--json]
+  mcp status|enable|update|disable|rollback DOMAIN
+                                         optional /mcp covering all API versions
   dashboard status|enable DOMAIN|apply|update|disable
                                          update installs/restarts the current dashboard;
                                          status compares manager, installed and running releases
@@ -186,6 +188,7 @@ cmd_container_init() {
         cp -a "$stage/." "$GB_NGINX/" || return 1
     fi
     dashboard_restore_route || return 1
+    mcp_restore || return 1
     if [[ -n "$(ep_list_by_type runtime)" ]]; then
         endpoint_source_type runtime
         rt_restore_resource_settings || return 1
@@ -523,6 +526,7 @@ main() {
             update_image "$@" ;;
         resources) gb_system_init; resources_cli "$@" ;;
         dashboard) gb_system_init; dashboard_cli "$@" ;;
+        mcp) gb_system_init; mcp_cli "$@" ;;
         list) ep_list ;;
         status)
             if [[ -n "${1:-}" ]]; then endpoint_status_text "$1"; else
