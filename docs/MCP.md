@@ -5,7 +5,7 @@ to the domain root, for example **`https://mcp.example.org/`**. One protocol
 endpoint covers every supported upstream API version; tools select those
 versions through their arguments.
 
-The installable **`getbible-mcp==2.0.1` PyPI package** owns the protocol, tools,
+The installable **`getbible-mcp==2.0.2` PyPI package** owns the protocol, tools,
 resources, prompts and API contracts. This engine owns the domain, Python
 runtime, ASGI host, systemd lifecycle, local origin routing and nginx
 configuration. Query and search remain separate services on their own domains.
@@ -130,7 +130,7 @@ Before the package is published, tests may install an explicitly supplied
 local release wheel:
 
 ```bash
-GB_TEST_MCP_WHEEL=/absolute/path/getbible_mcp-2.0.1-py3-none-any.whl tests/run.sh
+GB_TEST_MCP_WHEEL=/absolute/path/getbible_mcp-2.0.2-py3-none-any.whl tests/run.sh
 ```
 
 This test-only option does not change production requirements.
