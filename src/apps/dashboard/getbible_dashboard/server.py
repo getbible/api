@@ -314,7 +314,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return self._json(200, self.app.broker.call("state", {"actor": {"session_id": session["id"]}}))
         if name == "sessions":
             return self._json(200, {"sessions": self.app.auth.sessions(), "current_session_id": session["id"]})
-        if name in {"overview", "history", "requests", "events", "audience"}:
+        if name in {"overview", "history", "requests", "events", "audience", "mcp"}:
             result = self.app.lifecycle.report(session["id"], self.app.analytics.report, name, query)
             if name == "overview":
                 result["dashboard"] = self.app.lifecycle.state()

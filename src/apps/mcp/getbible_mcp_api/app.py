@@ -8,12 +8,14 @@ the configured public URL and virtual-host identity for every API result.
 from __future__ import annotations
 
 import ipaddress
+import logging
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from urllib.parse import urlsplit
 
 import httpx
+from getbible_api_common.logging import configure_logging
 from getbible_mcp import create_app as create_mcp_app
 from getbible_mcp.client import GetBibleClient
 from getbible_mcp.config import Settings
@@ -22,6 +24,8 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
+
+from .telemetry import MCPRequestTelemetry, record_upstream
 
 DEFAULT_ORIGIN = "http://127.0.0.1:80"
 PRIVATE_NETWORKS = (
@@ -88,6 +92,11 @@ class LocalOriginTransport(httpx.AsyncBaseTransport):
             for contract in ContractRegistry().catalog()
             for url in [httpx.URL(settings.service_base(contract["service"], contract["version"]))]
         }
+        self._service_roots = [
+            (httpx.URL(settings.service_base(entry["service"], entry["version"])),
+             entry["service"], entry["version"])
+            for entry in ContractRegistry().catalog()
+        ]
         if transport is not None:
             self._transports = dict.fromkeys(self._allowed, transport)
         elif self.origin.scheme == "https":
@@ -108,6 +117,12 @@ class LocalOriginTransport(httpx.AsyncBaseTransport):
             raise httpx.UnsupportedProtocol(
                 "MCP may only request configured GetBible services", request=request,
             )
+        for base, service, version in self._service_roots:
+            if (base.scheme, base.host, base.port) == authority and (
+                request.url.path == base.path or request.url.path.startswith(base.path.rstrip("/") + "/")
+            ):
+                record_upstream(service, version)
+                break
         headers = request.headers.copy()
         for name in ("authorization", "proxy-authorization", "cookie", "forwarded"):
             headers.pop(name, None)
@@ -142,8 +157,9 @@ def create_app(
     *,
     origin: str | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
+    logger: logging.Logger | None = None,
 ) -> Starlette:
-    """Create the sole /mcp endpoint; construction and readiness perform no network I/O.
+    """Serve MCP at the domain root; construction and readiness perform no network I/O.
 
     Production: ``gunicorn 'getbible_mcp_api.app:create_app()' -k
     uvicorn_worker.UvicornWorker``. The injected transport is for host tests;
@@ -164,7 +180,7 @@ def create_app(
         headers={"User-Agent": resolved_settings.user_agent},
     )
     api_client = GetBibleClient(settings=resolved_settings, http_client=http_client)
-    app = create_mcp_app(settings=resolved_settings, api_client=api_client, path="/mcp")
+    app = create_mcp_app(settings=resolved_settings, api_client=api_client, path="/")
     app.state.ready = False
     library_lifespan = app.router.lifespan_context
 
@@ -189,10 +205,17 @@ def create_app(
                 headers={"Cache-Control": "no-store"},
             )
         return JSONResponse(
-            {"status": "ok", "mcp_endpoint": "/mcp"},
+            {"status": "ok", "mcp_endpoint": "/"},
             headers={"Cache-Control": "no-store"},
         )
 
     app.router.lifespan_context = lifespan
     app.routes.append(Route("/readyz", readiness, methods=["GET"], name="readiness"))
+    app.add_middleware(
+        MCPRequestTelemetry,
+        logger=logger if logger is not None else configure_logging(
+            "getbible.mcp", os.getenv("GETBIBLE_LOG_LEVEL", "INFO"),
+            os.getenv("GETBIBLE_LOG_FILE", ""),
+        ),
+    )
     return app

@@ -118,10 +118,11 @@ def inventory(registry: Path, runtime: Path) -> list[dict]:
 
 
 def mcp_memory_reserve(args) -> int:
-    """Include MCP candidates and every still-draining sidecar generation."""
+    """Include MCP candidates and every still-draining service generation."""
     total = 0
     for path in Path(args.registry).glob("*/endpoint.conf"):
-        enabled = config(path).get("MCP_ENABLED") == "true"
+        settings = config(path)
+        enabled = settings.get("TYPE") == "mcp" and settings.get("ENABLED", "true") == "true"
         running = 0
         if not args.offline:
             # The manager records these bounded unit names alongside its
@@ -345,7 +346,7 @@ def plan(args) -> dict:
         source = "cgroup (lower than configured budget)"
     policy = policy_values(args)
     reserve = max(256 * MIB, budget * bounded(policy["RESOURCE_RESERVE_PERCENT"], "RESOURCE_RESERVE_PERCENT", 5, 75) // 100)
-    # Each optional MCP sidecar has a 256-MiB process ceiling. Reserve its
+    # Each MCP domain has a 256-MiB process ceiling. Reserve its
     # serving and candidate generations independently of Bible corpus budgets.
     mcp_reserve = mcp_memory_reserve(args)
     reserve += mcp_reserve

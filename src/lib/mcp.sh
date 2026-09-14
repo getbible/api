@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Optional, version-independent MCP service attached to an existing domain.
+# Dedicated MCP domain: one unversioned transport at the domain root.
 [[ -n "${GB_MCP_LOADED:-}" ]] && return 0
 GB_MCP_LOADED=1
 
-mcp_enabled() { [[ "$(ep_get "$1" MCP_ENABLED false)" == true ]]; }
+mcp_enabled() { [[ "$(ep_get "$1" TYPE)" == mcp && "$(ep_get "$1" ENABLED true)" == true ]]; }
 mcp_default_origin() {
     if nginx_external_tls; then printf 'http://127.0.0.1:%s\n' "$(nginx_origin_http_port)"
     else printf 'https://127.0.0.1:443\n'; fi
@@ -30,11 +30,19 @@ mcp_proxy_socket() {
 mcp_validate() {
     local domain="$1" origin file
     ep_exists "$domain" || { gb_warn "Unknown domain: $domain"; return 1; }
+    [[ "$(ep_get "$domain" TYPE)" == mcp ]] || { gb_warn "$domain is not an MCP domain."; return 1; }
     origin="$(ep_get "$domain" MCP_ORIGIN "$(mcp_default_origin)")"
-    [[ "$origin" =~ ^https?://(localhost|127\.[0-9.]+|10\.[0-9.]+|192\.168\.[0-9.]+|172\.(1[6-9]|2[0-9]|3[01])\.[0-9.]+|\[::1\])(:[0-9]{1,5})?$ ]] \
-        || { gb_warn 'MCP_ORIGIN must identify the local/private nginx origin without a path.'; return 1; }
     file="$(ep_get "$domain" MCP_ENV_FILE)"
-    [[ -z "$file" || ( "$file" == /* && "$file" != *[[:space:]]* && "$file" != *'%'* && -f "$file" ) ]] \
+    mcp_validate_origin "$origin" && mcp_validate_env_file "$file"
+}
+
+mcp_validate_origin() {
+    [[ "$1" =~ ^https?://(localhost|127\.[0-9.]+|10\.[0-9.]+|192\.168\.[0-9.]+|172\.(1[6-9]|2[0-9]|3[01])\.[0-9.]+|\[::1\])(:[0-9]{1,5})?$ ]] \
+        || { gb_warn 'MCP_ORIGIN must identify the local/private nginx origin without a path.'; return 1; }
+}
+
+mcp_validate_env_file() {
+    [[ -z "$1" || ( "$1" == /* && "$1" != *[[:space:]]* && "$1" != *'%'* && -f "$1" ) ]] \
         || { gb_warn 'MCP_ENV_FILE must be an existing absolute file path without whitespace or %.'; return 1; }
 }
 
@@ -59,9 +67,10 @@ mcp_prepare() {
     elif [[ ! -x "$release/.venv/bin/python" || "$(py_release_inputs "$release")" != "$inputs" ]]; then
         release="$(py_build_release "$root" "$domain MCP" "$python" mcp)" || return 1
     fi
-    [[ "$GB_DRY_RUN" != true ]] || { gb_log "Would prepare MCP at https://$domain/mcp"; return 0; }
+    [[ "$GB_DRY_RUN" != true ]] || { gb_log "Would prepare MCP at https://$domain/"; return 0; }
     gb_ensure_base_groups || return 1
     gb_ensure_system_user getbible-mcp getbible-mcp /nonexistent || return 1
+    gb_ensure_dir "$(ep_log_dir "$domain")/app" 0750 getbible-mcp:getbible-mcp || return 1
     gb_ensure_dir "$root/deployments" 0755 || return 1
     generation="$(mktemp -d "$root/deployments/$(date -u +%Y%m%dT%H%M%SZ)-XXXXXXXX")" || return 1
     MCP_CANDIDATE="$generation"
@@ -90,7 +99,7 @@ mcp_render_generation() {
     extra="$(ep_get "$domain" MCP_ENV_FILE)"
     gb_render "$GB_SRC/systemd/getbible-mcp.service.tmpl" "$generation/service.unit" \
         "DOMAIN=$domain" "UNIT=$(mcp_unit "$domain" "$generation")" "RELEASE=$release" \
-        "GENERATION=$generation" "ORIGIN=$origin" "EXTRA_ENV=$extra" || return 1
+        "GENERATION=$generation" "ORIGIN=$origin" "EXTRA_ENV=$extra" "LOG_DIR=$(ep_log_dir "$domain")" || return 1
     gb_render "$GB_TYPES/runtime/templates/socket.tmpl" "$generation/socket.unit" \
         "KIND=MCP" "DOMAIN=$domain" "LABEL=mcp" "SOCKET=$(mcp_socket "$generation")" \
         "USER=getbible-mcp" "NGINX_USER=$GB_NGINX_USER" || return 1
@@ -145,7 +154,7 @@ mcp_finish() {
             || gb_warn 'The previous MCP generation remains available while nginx drains.'
     fi
     if [[ -n "$MCP_CANDIDATE" ]]; then
-        tg_notify ok "MCP ready: $domain" "All supported APIs are available at https://$domain/mcp."
+        tg_notify ok "MCP ready: $domain" "All supported APIs are available at https://$domain/."
     fi
     mcp_reap_unselected "$domain"
     MCP_CANDIDATE=""
@@ -207,6 +216,7 @@ mcp_restore() {
         generation="$(mcp_active "$domain")"
         [[ -n "$generation" ]] || continue
         gb_ensure_system_user getbible-mcp getbible-mcp /nonexistent || return 1
+        gb_ensure_dir "$(ep_log_dir "$domain")/app" 0750 getbible-mcp:getbible-mcp || return 1
         mcp_install_units "$domain" "$generation" || return 1
         sd_enable "$(mcp_unit "$domain" "$generation").socket" "$(mcp_unit "$domain" "$generation").service" || return 1
     done < <(ep_list)
@@ -229,7 +239,7 @@ mcp_remove() {
 mcp_status() {
     local domain="$1" generation
     generation="$(mcp_active "$domain")"
-    printf 'Domain: %s\nMCP enabled: %s\nEndpoint: https://%s/mcp\n' "$domain" "$(ep_get "$domain" MCP_ENABLED false)" "$domain"
+    printf 'Domain: %s\nMCP enabled: %s\nEndpoint: https://%s/\n' "$domain" "$(ep_get "$domain" ENABLED true)" "$domain"
     printf 'Origin: %s\nEnvironment file: %s\n' "$(ep_get "$domain" MCP_ORIGIN "$(mcp_default_origin)")" "$(ep_get "$domain" MCP_ENV_FILE '(library defaults)')"
     if [[ -n "$generation" ]]; then
         printf 'Generation: %s\nService: %s\n' "$(basename "$generation")" "$(sd_status_line "$(mcp_unit "$domain" "$generation").service")"
@@ -237,14 +247,14 @@ mcp_status() {
 }
 
 mcp_cli() {
-    local action="${1:-status}" domain="${2:-}" key value backup old_enabled
+    local action="${1:-status}" domain="${2:-}" key value backup
     local -a keys=() values=()
-    [[ -n "$domain" ]] || { gb_warn 'Usage: getbible mcp status|enable|update|disable|rollback DOMAIN [--python VERSION] [--origin URL] [--env-file FILE]'; return 1; }
+    [[ -n "$domain" ]] || { gb_warn 'Usage: getbible mcp status|configure|update|rollback DOMAIN [--python VERSION] [--origin URL] [--env-file FILE]'; return 1; }
     ep_exists "$domain" || { gb_warn "Unknown domain: $domain"; return 1; }
+    [[ "$(ep_get "$domain" TYPE)" == mcp ]] || { gb_warn "$domain is not an MCP domain; use deploy mcp for a new domain."; return 1; }
     shift 2
-    if [[ "$action" == status ]]; then mcp_status "$domain"; return; fi
-    case "$action" in enable|update|disable|rollback) ;; *) gb_warn "Unknown MCP action: $action"; return 1 ;; esac
-    old_enabled="$(ep_get "$domain" MCP_ENABLED false)"
+    if [[ "$action" == status ]]; then [[ $# -eq 0 ]] || return 1; mcp_status "$domain"; return; fi
+    case "$action" in configure|update|rollback) ;; *) gb_warn "Unknown MCP action: $action"; return 1 ;; esac
     while (( $# )); do
         [[ $# -ge 2 ]] || return 1
         case "$1" in --python) key=MCP_PYTHON_VERSION; value="$(py_resolve_version "$2")" || return 1 ;;
@@ -253,9 +263,6 @@ mcp_cli() {
         keys+=("$key"); values+=("$value")
         shift 2
     done
-    if [[ "$action" != enable && "$action" != disable && "$old_enabled" != true ]]; then
-        gb_warn 'Enable MCP before updating it.'; return 1
-    fi
     local MCP_ROLLBACK=""
     if [[ "$action" == rollback ]]; then
         MCP_ROLLBACK="$(readlink -f -- "$(mcp_root "$domain")/previous" 2>/dev/null)" || return 1
@@ -269,11 +276,6 @@ mcp_cli() {
             return 1
         fi
     done
-    if [[ "$action" == disable ]]; then value=false; else value=true; fi
-    if ! ep_set "$domain" MCP_ENABLED "$value"; then
-        gb_restore_file "$(ep_conf "$domain")" "$backup" || return 1
-        return 1
-    fi
     if ! endpoint_apply "$domain"; then
         gb_restore_file "$(ep_conf "$domain")" "$backup" || return 1
         return 1
@@ -282,11 +284,16 @@ mcp_cli() {
 }
 
 mcp_menu() {
-    local domain action python origin file
-    domain="$(menu_pick_domain)" || return 0
-    action="$(ui_menu 'MCP endpoint' "One /mcp endpoint on $domain covers every supported API version." \
-        status 'Status' enable 'Enable or configure' update 'Update installed package' disable 'Disable' rollback 'Restore previous release')" || return 0
-    if [[ "$action" == enable ]]; then
+    local domain="${1:-}" action python origin file item
+    local -a domains=()
+    if [[ -z "$domain" ]]; then
+        while IFS= read -r item; do [[ -z "$item" ]] || domains+=("$item" "MCP at https://$item/"); done < <(ep_list_by_type mcp)
+        [[ ${#domains[@]} -gt 0 ]] || { ui_msg 'MCP domains' 'Deploy an MCP domain from Deploy > MCP service.'; return 0; }
+        domain="$(ui_menu 'MCP domains' 'Choose a dedicated MCP domain.' "${domains[@]}")" || return 0
+    fi
+    action="$(ui_menu 'MCP service' "https://$domain/ covers every supported API version." \
+        status 'Status' configure 'Configure Python and upstream origin' update 'Update installed package' rollback 'Restore previous release')" || return 0
+    if [[ "$action" == configure ]]; then
         python="$(ui_input 'MCP Python' 'Managed Python selection' "$(ep_get "$domain" MCP_PYTHON_VERSION auto)")" || return 0
         origin="$(ui_input 'MCP local origin' 'Local nginx origin; HTTPS preserves the upstream TLS hostname' "$(ep_get "$domain" MCP_ORIGIN "$(mcp_default_origin)")")" || return 0
         file="$(ui_input 'MCP configuration' 'Optional absolute environment file for custom upstream domains' "$(ep_get "$domain" MCP_ENV_FILE)")" || return 0

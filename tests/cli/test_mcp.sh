@@ -26,10 +26,10 @@ sd_status_line() { printf 'active\n'; }
 sd_is_enabled() { return 1; }
 sd_is_active() { return 1; }
 tg_notify() { :; }
-domain=api.example.test
+domain=mcp.example.test
 gb_ensure_dir "$(ep_dir "$domain")"
-ep_set "$domain" TYPE static
-ep_set "$domain" MCP_ENABLED true
+ep_set "$domain" TYPE mcp
+ep_set "$domain" ENABLED true
 check mcp_validate "$domain"
 check test -z "$(mcp_active "$domain")"
 ep_set "$domain" MCP_ORIGIN https://outside.example.test
@@ -56,7 +56,7 @@ check grep -q 'getbible_mcp_api.app:create_app()' "$candidate/service.unit"
 check grep -q 'uvicorn_worker.UvicornWorker' "$candidate/gunicorn.conf.py"
 check grep -q 'MemoryMax=256M' "$candidate/service.unit"
 mcp_render_location "$domain" "$TEST_ROOT/location.conf"
-check grep -q 'location = /mcp' "$TEST_ROOT/location.conf"
+check grep -q 'location = / {' "$TEST_ROOT/location.conf"
 check grep -q 'proxy_cache off' "$TEST_ROOT/location.conf"
 check grep -q 'proxy_buffering off' "$TEST_ROOT/location.conf"
 check grep -q "auth.conf" "$TEST_ROOT/location.conf"
@@ -70,19 +70,19 @@ check test "$(readlink -f "$root/previous")" = "$old"
 check grep -q "retire $(mcp_unit "$domain" "$old")" "$TEST_ROOT/events"
 
 # Disabling is reversible if another participant cannot finish its commit.
-ep_set "$domain" MCP_ENABLED false
+ep_set "$domain" ENABLED false
 mcp_prepare "$domain"
 mcp_commit "$domain"
 check test -z "$(mcp_active "$domain")"
 mcp_abort "$domain"
 check test "$(mcp_active "$domain")" = "$candidate"
-ep_set "$domain" MCP_ENABLED true
+ep_set "$domain" ENABLED true
 
-# A failed enable/update restores the exact prior configuration.
+# A failed configure/update restores the exact prior configuration.
 cp "$(ep_conf "$domain")" "$TEST_ROOT/config-before"
 endpoint_apply() { return 1; }
-if mcp_cli enable "$domain" --origin http://127.0.0.1:81; then echo 'Failed apply accepted' >&2; exit 1; fi
+if mcp_cli configure "$domain" --origin http://127.0.0.1:81; then echo 'Failed apply accepted' >&2; exit 1; fi
 check cmp "$(ep_conf "$domain")" "$TEST_ROOT/config-before"
-if mcp_cli enable "$domain" --origin http://127.0.0.1:81 --invalid x; then echo 'Unknown option accepted' >&2; exit 1; fi
+if mcp_cli configure "$domain" --origin http://127.0.0.1:81 --invalid x; then echo 'Unknown option accepted' >&2; exit 1; fi
 check cmp "$(ep_conf "$domain")" "$TEST_ROOT/config-before"
 printf 'MCP lifecycle and configuration tests passed\n'

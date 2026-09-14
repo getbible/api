@@ -165,10 +165,13 @@ ep_summary_line() {
     ep_load "$domain"
     local extra endpoints
     endpoints="$(ep_versions "$domain" | sed 's/^root$/domain root/' | tr '\n' ' ')"
-    if [[ "$EP_TYPE" == static ]]; then
+    if [[ "$EP_TYPE" == mcp ]]; then
+        extra="MCP at https://$domain/"
+    elif [[ "$EP_TYPE" == static ]]; then
         extra="endpoints: ${endpoints:-none}"
     else
         extra="kind: $EP_KIND · endpoints: ${endpoints:-none}"
     fi
     printf '%-32s %-8s %-8s %s · %s\n' "$domain" "$EP_TYPE" "$EP_ACCESS_MODE" "$extra" "$(ep_publication "$domain")"
 }
+

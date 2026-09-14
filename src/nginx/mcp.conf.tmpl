@@ -1,22 +1,48 @@
     # One stateless MCP transport, independent of the upstream API versions.
-    location = /mcp {
+    location = / {
         client_max_body_size 1m;
         include {{NGINX_GB_DIR}}/{{DOMAIN}}/auth.conf;
         include snippets/getbible/headers.conf;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Host $host;
         # nginx has already applied the public domain's access policy.
         proxy_set_header Authorization "";
         proxy_set_header Connection "";
         proxy_set_header X-Request-ID $request_id;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-GetBible-Token-Id $gb_token_id;
+        proxy_set_header X-GetBible-Auth-State $gb_auth_state;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $gb_public_scheme;
         proxy_buffering off;
         proxy_request_buffering off;
         proxy_cache off;
         proxy_read_timeout 300s;
         proxy_hide_header Cache-Control;
+        proxy_hide_header X-Request-ID;
+        proxy_hide_header X-GetBible-Telemetry-Endpoint-Kind;
+        proxy_hide_header X-GetBible-Telemetry-Operation;
         add_header Cache-Control "no-store" always;
         proxy_pass http://unix:{{SOCKET}}:;
     }
-    location ^~ /mcp/ { return 404; }
+    # Readiness probes are independent of the protocol and require no token.
+    location = /healthz {
+        include snippets/getbible/headers.conf;
+        proxy_set_header Host $host;
+        proxy_set_header Authorization "";
+        proxy_cache off;
+        proxy_hide_header Cache-Control;
+        add_header Cache-Control "no-store" always;
+        proxy_pass http://unix:{{SOCKET}}:;
+    }
+    location = /readyz {
+        include snippets/getbible/headers.conf;
+        proxy_set_header Host $host;
+        proxy_set_header Authorization "";
+        proxy_cache off;
+        proxy_hide_header Cache-Control;
+        add_header Cache-Control "no-store" always;
+        proxy_pass http://unix:{{SOCKET}}:;
+    }
+    location / { return 404; }

@@ -46,6 +46,9 @@ class LocalCatalog:
     def endpoint(self, domain, version):
         self._refresh()
         config, versions = self._domains.get(domain, ({}, {}))
+        if config.get("TYPE") == "mcp" or config.get("KIND") == "mcp":
+            return {"kind": "mcp", "version": "", "label": "", "repository": "",
+                    "default_translation": ""}
         label = version if version in versions else "root" if "root" in versions else config.get("DEFAULT_ENDPOINT", "")
         selected = versions.get(label, {})
         return {"kind": config.get("KIND", config.get("TYPE", "")),

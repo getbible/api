@@ -70,12 +70,14 @@ EO = field("endpoint", "endpoint", required=False)
 OPS = {}
 
 
-def operation(name, title, command, fields=(), *, category="Domains", mutates=True, destructive=False, secret_output=False, description=None):
+def operation(name, title, command, fields=(), *, category="Domains", mutates=True, destructive=False, secret_output=False, description=None, domain_types=None):
     OPS[name] = {"id": name, "name": name, "title": title, "category": category,
                  "fields": list(fields), "mutates": mutates, "destructive": destructive,
                  "secret_output": secret_output, "_command": command}
     if description:
         OPS[name]["description"] = description
+    if domain_types is not None:
+        OPS[name]["domain_types"] = list(domain_types)
 
 
 operation("domain.status", "Domain status", ["status", "{domain}"], [D], mutates=False)
@@ -87,26 +89,30 @@ operation("domain.stage", "Stage a domain", ["stage", "{domain}"], [D], destruct
 operation("domain.remove", "Remove a domain", ["remove", "{domain}", ("--purge", "purge")], [D, field("purge", "boolean", default=False)], destructive=True)
 operation("domain.deploy_static", "Deploy a static domain", ["deploy", "static", "--domain", "{domain}", "--version", "{endpoint}", "--repo", "{repository}", ("--ref", "ref"), ("--path", "source_path"), ("--extensions", "extensions"), ("--access", "access"), ("--schedule", "schedule"), "--staged"], [D, E, field("repository"), field("ref", default="master"), field("source_path", default="."), field("extensions", default="json,sha,txt"), field("access", choices="open|metered|token", default="metered"), field("schedule", choices="daily|weekly|monthly", default="monthly")])
 operation("domain.deploy_runtime", "Deploy a runtime domain", ["deploy", "runtime", "--domain", "{domain}", "--kind", "{kind}", ("--version", "version"), ("--root", "root"), ("--repository", "repository"), ("--access", "access"), ("--warm", "warm"), ("--python", "python"), "--staged"], [D, field("kind"), field("version", "endpoint", required=False), field("root", "boolean", default=False), field("repository", "path", required=False), field("access", choices="open|metered|token", default="metered"), field("warm", "translations", default="kjv"), field("python", default="auto")])
-operation("endpoint.add_static", "Add a static endpoint", ["version", "add", "{domain}", "{endpoint}", "--repo", "{repository}", ("--ref", "ref"), ("--path", "source_path")], [D, E, field("repository"), field("ref", default="master"), field("source_path", default=".")])
-operation("endpoint.add_runtime", "Add a runtime endpoint", ["version", "add", "{domain}", "{endpoint}", ("--repository", "repository"), ("--warm", "warm"), ("--python", "python")], [D, E, field("repository", "path", required=False), field("warm", "translations", default="kjv"), field("python", default="auto")])
-operation("endpoint.change_source", "Change a static repository", ["version", "change", "{domain}", "{endpoint}", ("--repo", "repository"), ("--ref", "ref"), ("--path", "source_path")], [D, E, field("repository", required=False), field("ref", required=False), field("source_path", required=False)])
-operation("endpoint.remove", "Remove an endpoint", ["version", "remove", "{domain}", "{endpoint}"], [D, E], destructive=True)
-operation("endpoint.default", "Select the default runtime endpoint", ["version", "default", "{domain}", "{endpoint}"], [D, E])
-operation("endpoint.sync", "Synchronize repository files", ["sync", "{domain}", "{endpoint?}", ("--force", "force")], [D, EO, field("force", "boolean", default=False)])
-operation("endpoint.deploy_key", "Show repository deploy key", ["deploy-key", "{domain}", "{endpoint}"], [D, E], mutates=False)
-operation("endpoint.repo_access", "Test repository access", ["repo-access", "{domain}", "{endpoint}"], [D, E], mutates=False)
-operation("endpoint.filetypes", "Set served static file types", ["filetypes", "{domain}", "{extensions}"], [D, field("extensions", default="json,sha,txt")])
+operation("domain.deploy_mcp", "Deploy an MCP domain", ["deploy", "mcp", "--domain", "{domain}", ("--access", "access"), ("--python", "python"), ("--origin", "origin"), ("--env-file", "env_file"), "--staged"], [D, field("access", choices="open|metered|token", default="metered"), field("python", default="auto"), field("origin", required=False, label="Local API origin URL"), field("env_file", "path", required=False, label="Environment file")], description="Prepare a dedicated domain with its MCP transport at the domain root. Activate it through Go live when ready.")
+operation("mcp.status", "MCP service status", ["mcp", "status", "{domain}"], [D], category="MCP", mutates=False, domain_types=("mcp",))
+for action in ("configure", "update", "rollback"):
+    operation("mcp." + action, action.title() + " MCP service", ["mcp", action, "{domain}", ("--python", "python"), ("--origin", "origin"), ("--env-file", "env_file")], [D, field("python", required=False), field("origin", required=False, label="Local API origin URL"), field("env_file", "path", required=False, label="Environment file")], category="MCP", destructive=action == "rollback", domain_types=("mcp",))
+operation("endpoint.add_static", "Add a static endpoint", ["version", "add", "{domain}", "{endpoint}", "--repo", "{repository}", ("--ref", "ref"), ("--path", "source_path")], [D, E, field("repository"), field("ref", default="master"), field("source_path", default=".")], domain_types=("static",))
+operation("endpoint.add_runtime", "Add a runtime endpoint", ["version", "add", "{domain}", "{endpoint}", ("--repository", "repository"), ("--warm", "warm"), ("--python", "python")], [D, E, field("repository", "path", required=False), field("warm", "translations", default="kjv"), field("python", default="auto")], domain_types=("runtime",))
+operation("endpoint.change_source", "Change a static repository", ["version", "change", "{domain}", "{endpoint}", ("--repo", "repository"), ("--ref", "ref"), ("--path", "source_path")], [D, E, field("repository", required=False), field("ref", required=False), field("source_path", required=False)], domain_types=("static",))
+operation("endpoint.remove", "Remove an endpoint", ["version", "remove", "{domain}", "{endpoint}"], [D, E], destructive=True, domain_types=("static", "runtime"))
+operation("endpoint.default", "Select the default runtime endpoint", ["version", "default", "{domain}", "{endpoint}"], [D, E], domain_types=("runtime",))
+operation("endpoint.sync", "Synchronize repository files", ["sync", "{domain}", "{endpoint?}", ("--force", "force")], [D, EO, field("force", "boolean", default=False)], domain_types=("static",))
+operation("endpoint.deploy_key", "Show repository deploy key", ["deploy-key", "{domain}", "{endpoint}"], [D, E], mutates=False, domain_types=("static",))
+operation("endpoint.repo_access", "Test repository access", ["repo-access", "{domain}", "{endpoint}"], [D, E], mutates=False, domain_types=("static",))
+operation("endpoint.filetypes", "Set served static file types", ["filetypes", "{domain}", "{extensions}"], [D, field("extensions", default="json,sha,txt")], domain_types=("static",))
 operation("access.mode", "Change API access mode", ["access", "{domain}", "{mode}"], [D, field("mode", choices="open|metered|token")], category="Access", destructive=True)
 operation("access.limits", "Configure anonymous origin limits", ["limits", "{domain}", ("--rate", "rate"), ("--burst", "burst"), ("--hour", "hour"), ("--day", "day"), ("--conn", "connections")], [D] + [field(n, "integer", required=False) for n in ("rate", "burst", "hour", "day", "connections")], category="Access")
 operation("token.list", "List API tokens", ["token", "{domain}", "list"], [D], category="Access", mutates=False)
 operation("token.add", "Issue an API token", ["token", "{domain}", "add", "{label}", ("--expires", "expires")], [D, field("label"), field("expires", "date", required=False)], category="Access", secret_output=True)
 operation("token.revoke", "Revoke an API token", ["token", "{domain}", "revoke", "{id}"], [D, field("id", "id")], category="Access", destructive=True)
 for action in ("update", "rollback"):
-    operation("runtime." + action, action.title() + " runtime endpoint", ["runtime", "{domain}", "{endpoint?}", action] + ([("--python", "python")] if action == "update" else []), [D, EO] + ([field("python", required=False)] if action == "update" else []), category="Runtime", destructive=action == "rollback")
-operation("runtime.redeploy", "Redeploy runtime services", ["runtime", "{domain}", "redeploy"], [D], category="Runtime")
-operation("runtime.set", "Set runtime endpoint configuration", ["runtime", "{domain}", "{endpoint?}", "set", "{key}", "{value}"], [D, EO, field("key", "key", choices=RUNTIME_KEYS), field("value", allow_empty=True)], category="Runtime")
+    operation("runtime." + action, action.title() + " runtime endpoint", ["runtime", "{domain}", "{endpoint?}", action] + ([("--python", "python")] if action == "update" else []), [D, EO] + ([field("python", required=False)] if action == "update" else []), category="Runtime", destructive=action == "rollback", domain_types=("runtime",))
+operation("runtime.redeploy", "Redeploy runtime services", ["runtime", "{domain}", "redeploy"], [D], category="Runtime", domain_types=("runtime",))
+operation("runtime.set", "Set runtime endpoint configuration", ["runtime", "{domain}", "{endpoint?}", "set", "{key}", "{value}"], [D, EO, field("key", "key", choices=RUNTIME_KEYS), field("value", allow_empty=True)], category="Runtime", domain_types=("runtime",))
 operation("runtime.versions", "List prepared Python versions", ["runtime", "versions"], category="Runtime", mutates=False)
-operation("runtime.cache", "Manage translation memory", ["runtime", "{domain}", "cache", "{endpoint}", "{action}", "{translation?}"], [D, E, field("action", choices="info|warm|drop|reload|refresh-source"), field("translation", "translation", required=False)], category="Runtime")
+operation("runtime.cache", "Manage translation memory", ["runtime", "{domain}", "cache", "{endpoint}", "{action}", "{translation?}"], [D, E, field("action", choices="info|warm|drop|reload|refresh-source"), field("translation", "translation", required=False)], category="Runtime", domain_types=("runtime",))
 operation("resources.show", "Show resource allocation", ["resources", "show", "--json"], category="Runtime", mutates=False)
 operation("resources.apply", "Apply resource allocation", ["resources", "apply"], category="Runtime")
 for action in ("status", "renew"):
@@ -115,8 +121,8 @@ operation("certificate.issue", "Issue a certificate", ["cert", "{domain}", "issu
 for action in ("show", "publish"):
     operation("pages." + action, action.title() + " domain pages", ["pages", "{domain}", action], [D], category="Pages", mutates=action != "show")
 for kind in ("docs", "openapi"):
-    operation("pages." + kind, "Configure " + kind, ["pages", "{domain}", kind, "{endpoint?}", "{action}", "{source?}"], [D, EO if kind == "docs" else E, field("action", choices="generated|custom|none|repository|from"), field("source", "path", required=False)], category="Pages")
-operation("pages.write", "Edit custom page or OpenAPI content", ["pages", "{domain}", "{kind}", "{endpoint?}", "from", "{source}"], [D, field("kind", choices="docs|openapi"), EO, field("content", "multiline")], category="Pages")
+    operation("pages." + kind, "Configure " + kind, ["pages", "{domain}", kind, "{endpoint?}", "{action}", "{source?}"], [D, EO if kind == "docs" else E, field("action", choices="generated|custom|none|repository|from"), field("source", "path", required=False)], category="Pages", domain_types=("static", "runtime"))
+operation("pages.write", "Edit custom page or OpenAPI content", ["pages", "{domain}", "{kind}", "{endpoint?}", "from", "{source}"], [D, field("kind", choices="docs|openapi"), EO, field("content", "multiline")], category="Pages", domain_types=("static", "runtime"))
 operation("pages.upload_icon", "Upload a favicon or logo", ["{kind}", "{source}"], [field("domain", "domain", required=False), field("kind", choices="favicon|logo"), field("filename"), field("content", "file")], category="Pages")
 for kind in ("favicon", "logo"):
     operation("pages." + kind, "Set domain " + kind, ["pages", "{domain}", kind, "{source}"], [D, field("source", "path", default="default")], category="Pages")
@@ -412,6 +418,19 @@ class Broker:
                         choices.append({"value": str(root), "label": f"{domain} ({label}) · reads {source}", "version": version})
         return choices
 
+    def validate_domain_selection(self, operation_id, values):
+        """Reject incompatible domain operations before imports or job persistence."""
+        allowed = OPS[operation_id].get("domain_types")
+        domain = values.get("domain")
+        if not domain or (allowed is None and not values.get("endpoint")):
+            return
+        config = read_config(Path(self.prefix + "/etc/getbible/endpoints") / domain / "endpoint.conf")
+        domain_type = config.get("TYPE")
+        if allowed is not None and domain_type not in allowed:
+            raise ValueError(f"{operation_id} requires an existing {' or '.join(allowed)} domain")
+        if domain_type == "mcp" and values.get("endpoint"):
+            raise ValueError("MCP domains have no version endpoints; select the domain scope")
+
     def validate_runtime_selection(self, operation_id, values):
         if operation_id not in {"domain.deploy_runtime", "endpoint.add_runtime"}:
             return
@@ -452,6 +471,7 @@ class Broker:
             raise ValueError("Unknown management operation")
         spec = OPS[name]
         values = validate_arguments(spec, parameters.get("arguments", {}))
+        self.validate_domain_selection(name, values)
         self.validate_file_access(name, values)
         self.validate_runtime_selection(name, values)
         if spec["destructive"] and parameters.get("confirm") is not True:
@@ -497,6 +517,8 @@ class Broker:
         return str(candidate if directory else resolved)
 
     def validate_file_access(self, operation_id, values):
+        if (operation_id == "domain.deploy_mcp" or operation_id.startswith("mcp.")) and values.get("env_file"):
+            values["env_file"] = self.safe_import(values["env_file"])
         if operation_id == "settings.set":
             key = values.get("key", "")
             if key not in self.setting_keys():

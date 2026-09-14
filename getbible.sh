@@ -45,6 +45,9 @@ Domains
                 [--default-translation CODE] [--default-reference REFERENCE]
                 [--staged|--live]      (--root serves the version at https://D/ instead of /vN/)
                                          --default-reference sets the query readiness probe only
+  deploy mcp --domain D [--access open|metered|token] [--python auto|VERSION]
+                [--origin LOCAL_ORIGIN] [--env-file FILE] [--staged|--live]
+                                         one MCP transport at https://D/
   go-live DOMAIN [--cert auto|http|dns-cloudflare]
                                          take a staged domain live: certificate,
                                          Cloudflare DNS and rules, HTTPS, verification
@@ -107,8 +110,8 @@ Observability
   logs archives DOMAIN | logs rotate
   logs reset --discard-history           start a fresh traffic history; keep raw logs and settings
   analytics [--window today|24h|7d|30d|all] [--domain D] [--json]
-  mcp status|enable|update|disable|rollback DOMAIN
-                                         optional /mcp covering all API versions
+  mcp status|configure|update|rollback DOMAIN
+                                         dedicated domain root covering all API versions
   dashboard status|enable DOMAIN|apply|update|disable
                                          update installs/restarts the current dashboard;
                                          status compares manager, installed and running releases
@@ -206,7 +209,8 @@ cmd_deploy() {
     case "$type" in
         static) endpoint_source_type static; type_static_deploy_cli "$@" ;;
         runtime) endpoint_source_type runtime; type_runtime_deploy_cli "$@" ;;
-        *) gb_die "deploy needs a type: static or runtime" ;;
+        mcp) endpoint_source_type mcp; type_mcp_deploy_cli "$@" ;;
+        *) gb_die "deploy needs a type: static, runtime or mcp" ;;
     esac
 }
 
@@ -219,6 +223,7 @@ cmd_version() {
         cmd_runtime_version "$action" "$domain" "$label" "$@"
         return
     fi
+    [[ "$(ep_get "$domain" TYPE)" == static ]] || gb_die "MCP domains have one unversioned root and do not accept version changes."
     endpoint_source_type static
     case "$action" in
         add)
@@ -425,6 +430,11 @@ cmd_logs() {
     case "$which" in
         access|error) logs_tail "$(ep_log_dir "$domain")/$which.log" "$lines" ;;
         app)
+            if [[ "$EP_TYPE" == mcp ]]; then
+                [[ -z "$label" ]] || gb_die "MCP has no version labels."
+                logs_tail "$(ep_log_dir "$domain")/app/mcp.log" "$lines"
+                return
+            fi
             [[ "$EP_TYPE" == runtime ]] || gb_die "$domain is a static domain; it has no application log."
             for label in $(if [[ -n "$label" ]]; then printf '%s\n' "$label"; else type_runtime_endpoints "$domain"; fi); do
                 printf '== %s %s: %s ==\n' "$domain" "$label" "$(rt_app_log "$domain" "$label")"
@@ -436,6 +446,12 @@ cmd_logs() {
                     printf '== %s %s ==\n' "$domain" "$label"
                     sd_journal "$(rt_live_unit "$domain" "$label").service" "$lines"
                 done
+            elif [[ "$EP_TYPE" == mcp ]]; then
+                [[ -z "$label" ]] || gb_die "MCP has no version labels."
+                local generation
+                generation="$(mcp_active "$domain")"
+                [[ -n "$generation" ]] || gb_die "MCP has no active generation."
+                sd_journal "$(mcp_unit "$domain" "$generation").service" "$lines"
             else
                 sd_journal "getbible-sync-$EP_SLUG-${label:-$(ep_versions "$domain" | head -1)}.service" "$lines"
             fi ;;

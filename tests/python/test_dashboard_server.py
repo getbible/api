@@ -176,7 +176,7 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(self.request("POST", "/health")[0], 405)
 
     def test_private_reports_and_actions_require_authentication(self):
-        for path in ("/api/overview", "/api/history", "/api/requests", "/api/events", "/api/endpoints",
+        for path in ("/api/overview", "/api/history", "/api/requests", "/api/events", "/api/endpoints", "/api/mcp",
                      "/api/management/state", "/api/translations", "/api/storage", "/api/sessions", "/api/jobs", "/api/operations"):
             status, headers, data = self.request("GET", path)
             self.assertEqual(status, 401, path)
@@ -235,11 +235,16 @@ class HTTPTests(unittest.TestCase):
     def test_reports_need_viewer_lease(self):
         self.login()
         self.assertEqual(self.request("GET", "/api/overview")[0], 409)
+        self.assertEqual(self.request("GET", "/api/mcp")[0], 409)
         self.heartbeat()
         status, _, data = self.request("GET", "/api/overview?start=100&end=200")
         self.assertEqual(status, 200)
         self.assertEqual(data["calls"], 42)
         self.assertIn(("overview", {"start": "100", "end": "200"}), self.analytics.calls)
+        status, _, data = self.request("GET", "/api/mcp?start=100&end=200&mcp_tool=query_verses")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["calls"], 42)
+        self.assertIn(("mcp", {"start": "100", "end": "200", "mcp_tool": "query_verses"}), self.analytics.calls)
 
     def test_admin_job_arguments_are_typed_and_actor_is_not_spoofable(self):
         self.login()
