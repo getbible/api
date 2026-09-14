@@ -21,6 +21,7 @@ import time
 MIB = 1024 ** 2
 MINIMUM = {"query": 192 * MIB, "search": 512 * MIB}
 WEIGHT = {"query": 1, "search": 4}
+MCP_MEMORY_MAX = 256 * MIB
 
 
 def memory_bytes(value: str) -> int:
@@ -117,13 +118,13 @@ def inventory(registry: Path, runtime: Path) -> list[dict]:
     return entries
 
 
-def mcp_memory_reserve(args) -> int:
-    """Include MCP candidates and every still-draining service generation."""
-    total = 0
-    for path in Path(args.registry).glob("*/endpoint.conf"):
+def mcp_memory(args) -> tuple[int, int, list[dict]]:
+    """Separate planned MCP capacity from the generations needed right now."""
+    reserve, candidate, live = 0, 0, []
+    for path in sorted(Path(args.registry).glob("*/endpoint.conf")):
         settings = config(path)
         enabled = settings.get("TYPE") == "mcp" and settings.get("ENABLED", "true") == "true"
-        running = 0
+        units = set()
         if not args.offline:
             # The manager records these bounded unit names alongside its
             # immutable generation. No environment file or token is read.
@@ -132,14 +133,16 @@ def mcp_memory_reserve(args) -> int:
                 unit = unit_path.read_text().strip()
                 if not re.fullmatch(r"getbible-mcp-[a-zA-Z0-9-]+", unit):
                     raise ValueError("Invalid saved MCP unit name")
-                result = subprocess.run([args.systemctl, "is-active", "--quiet", unit + ".service"],
-                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                        check=False, timeout=10)
-                running += result.returncode == 0
+                units.add(unit + ".service")
+        running, generations = unit_memory(units, args.systemctl, args.offline)
+        live.extend(generations)
         # Keep room for serving+candidate even before first deployment; a
         # slow drain or interrupted prior switch adds its actual process cap.
-        total += max(2 if enabled else 0, running + int(enabled)) * 256 * MIB
-    return total
+        reserve += max(2 * MCP_MEMORY_MAX if enabled else 0,
+                       running + (MCP_MEMORY_MAX if enabled else 0))
+        if enabled and path.parent.name == getattr(args, "candidate_domain", None):
+            candidate = MCP_MEMORY_MAX
+    return reserve, candidate, live
 
 
 def allocated(entries: list[dict], extra: int) -> tuple[list[int], int]:
@@ -275,32 +278,39 @@ def endpoint_settings(item: dict, size: int, cpus: float, policy: dict | None = 
     }
 
 
-def running_memory(entries: list[dict], ctl: str, offline: bool) -> tuple[int, list[dict]]:
-    if offline:
-        return 0, []
-    candidates = {}
-    for item in entries:
-        for path in Path(item["root"]).glob("deployments/*/limits.conf"):
-            unit = f"getbible-{item['kind']}-{item['label']}-{path.parent.name}.service"
-            candidates[unit] = path
-    if not candidates:
+def unit_memory(units: set[str], ctl: str, offline: bool) -> tuple[int, list[dict]]:
+    """Inspect actual ceilings, including starting and still-draining units."""
+    if offline or not units:
         return 0, []
     # A single systemd query includes active, retiring and interrupted candidates.
     # Active symlinks alone would miss still-serving workers during nginx drain.
-    run = subprocess.run([ctl, "show", "--property=Id,ActiveState,MemoryMax", *sorted(candidates)],
+    run = subprocess.run([ctl, "show", "--property=Id,ActiveState,MemoryMax", *sorted(units)],
                          capture_output=True, text=True, timeout=20, check=False)
     if run.returncode:
         raise ValueError("Cannot inspect running runtime memory ceilings; ensure systemd is running before applying resources.")
     live = []
+    inspected = set()
     for block in run.stdout.strip().split("\n\n"):
         props = dict(line.split("=", 1) for line in block.splitlines() if "=" in line)
-        if props.get("ActiveState") not in {"active", "activating", "reloading", "deactivating"}:
+        unit, state = props.get("Id"), props.get("ActiveState")
+        if unit not in units or unit in inspected or not state:
+            raise ValueError("Cannot inspect running runtime memory ceilings; systemd returned incomplete unit state.")
+        inspected.add(unit)
+        if state in {"inactive", "failed"}:
             continue
         maximum = props.get("MemoryMax", "infinity")
-        if not maximum.isdigit() or int(maximum) >= 2 ** 63:
+        if not maximum.isdigit() or not 0 < int(maximum) < 2 ** 63:
             raise ValueError(f"Running runtime {props.get('Id', '?')} has no finite memory ceiling; apply its limits before budgeting more services.")
         live.append({"unit": props.get("Id", "?"), "memory_max": int(maximum)})
+    if inspected != units:
+        raise ValueError("Cannot inspect running runtime memory ceilings; systemd omitted requested units.")
     return sum(item["memory_max"] for item in live), live
+
+
+def running_memory(entries: list[dict], ctl: str, offline: bool) -> tuple[int, list[dict]]:
+    units = {f"getbible-{item['kind']}-{item['label']}-{path.parent.name}.service"
+             for item in entries for path in Path(item["root"]).glob("deployments/*/limits.conf")}
+    return unit_memory(units, ctl, offline)
 
 
 def wait_drain(args) -> None:
@@ -345,11 +355,11 @@ def plan(args) -> dict:
     if requested is not None and cap is not None and cap < requested:
         source = "cgroup (lower than configured budget)"
     policy = policy_values(args)
-    reserve = max(256 * MIB, budget * bounded(policy["RESOURCE_RESERVE_PERCENT"], "RESOURCE_RESERVE_PERCENT", 5, 75) // 100)
+    infrastructure = max(256 * MIB, budget * bounded(policy["RESOURCE_RESERVE_PERCENT"], "RESOURCE_RESERVE_PERCENT", 5, 75) // 100)
     # Each MCP domain has a 256-MiB process ceiling. Reserve its
     # serving and candidate generations independently of Bible corpus budgets.
-    mcp_reserve = mcp_memory_reserve(args)
-    reserve += mcp_reserve
+    mcp_reserve, mcp_candidate, mcp_live = mcp_memory(args)
+    reserve = infrastructure + mcp_reserve
     available = budget - reserve
     entries = inventory(Path(args.registry), Path(args.runtime_root))
     policy = policy_values(args)
@@ -396,8 +406,16 @@ def plan(args) -> dict:
                           "settings": endpoint_settings(item, size, limits["cpus"], policy, args.mode)})
     running, live = running_memory(entries, args.systemctl, args.offline) if args.candidate_domain else (None, [])
     candidate = sum(item["settings"]["MEMORY_MAX"] for item in effective if item["domain"] == args.candidate_domain)
-    if running is not None and running + candidate > available:
-        raise ValueError(f"Candidate admission needs {(running + candidate) // MIB} MiB but only {available // MIB} MiB "
+    if running is not None:
+        live.extend(mcp_live)
+        running += sum(item["memory_max"] for item in mcp_live)
+        candidate += mcp_candidate
+    # Deployment is serialized: reconciliation must first shrink old runtimes
+    # before a newly registered MCP domain starts. Admit the current candidate
+    # against live ceilings, not memory reserved for future MCP generations.
+    admission_available = budget - infrastructure
+    if running is not None and running + candidate > admission_available:
+        raise ValueError(f"Candidate admission needs {(running + candidate) // MIB} MiB but only {admission_available // MIB} MiB "
                          "is available after infrastructure reserve. A previous generation may still be draining, "
                          "or the memory cap was reduced. Existing services were not changed; retry after drain "
                          "or restore the previous memory budget.")
