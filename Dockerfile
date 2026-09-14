@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 FROM ubuntu:24.04
 
-ARG GETBIBLE_VERSION=3.0.3
+ARG GETBIBLE_VERSION=3.0.4
 ARG GETBIBLE_REVISION=unknown
 ARG GETBIBLE_IMAGE_PYTHONS=
 LABEL org.opencontainers.image.title="getBible API" \
