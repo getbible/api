@@ -5,6 +5,11 @@
 # format and the maps that identify a caller. Zones and caches are rendered
 # per endpoint into conf.d/getbible-ep-<slug>.conf.
 
+# Token map keys are long ("<host> Bearer <token>"); size the hash for them.
+# These settings must precede every map, which initializes the hash defaults.
+map_hash_bucket_size 256;
+map_hash_max_size 8192;
+
 # Every vhost has a default; managed API domains set their exact method list.
 map $host $gb_allowed_methods {
     default "GET, HEAD, OPTIONS";
@@ -39,10 +44,6 @@ log_format getbible_json escape=json '{'
     '"tls":"$ssl_protocol",'
     '"country":"$http_cf_ipcountry"'
 '}';
-
-# Token map keys are long ("<host> Bearer <token>"); size the hash for them.
-map_hash_bucket_size 256;
-map_hash_max_size 8192;
 
 # The public scheme is configured by the operator in external TLS mode.
 # Never derive it from a caller-controlled X-Forwarded-Proto header.
@@ -89,4 +90,3 @@ map $gb_token_id $gb_limit_key {
     "" $binary_remote_addr;
     default "";
 }
-
