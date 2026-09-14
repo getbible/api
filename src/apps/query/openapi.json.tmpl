@@ -1,11 +1,12 @@
 {
   "info": {
-    "contact": {"name":"getBible","url":"https://getbible.net"},
+    "contact": {"name":"getBible","url":"https://getBible.net"},
     "description": "Scripture references in, verses out. The reference is the last path segment; multiple references are separated by semicolons. Missing or unresolved references and explicitly supplied unknown translations return RFC 9457 HTTP 404 errors; requests never fall back to another verse. The endpoint takes no query parameters. Documentation, OpenAPI, liveness and readiness are public without a token. Conditional GET and HEAD are supported; API data uses the domain's selected access policy.",
     "title": "getBible query endpoint",
     "version": "{{VERSION}}"
   },
   "openapi": "3.1.0",
+  "externalDocs": {"description":"getBible project and API documentation","url":"https://getBible.net"},
   "servers": [{"url":"https://{{DOMAIN}}"}],
   "paths": {
     "/healthz": {
