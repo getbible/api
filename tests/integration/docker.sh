@@ -429,20 +429,15 @@ container sha256sum /srv/getbible/static.example.test/v2/test/1/1.json > "$TEST_
 # proves actual running services use its new template; the failed image proves
 # a candidate cannot replace a serving generation or mark an update complete.
 mkdir "$TEST_ROOT/image-fixture"
+cp "$ROOT/tests/integration/prepare-image-fixture.sh" "$TEST_ROOT/image-fixture/"
 cat > "$TEST_ROOT/image-fixture/Dockerfile" <<'DOCKERFILE'
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 ARG TEST_VERSION
 ARG TEST_FAILURE=false
-RUN printf '%s\n' "$TEST_VERSION" > /usr/share/getbible/api/VERSION \
-    && sed -i "/^Environment=PYTHONUNBUFFERED=1$/a Environment=GETBIBLE_CI_IMAGE_RELEASE=$TEST_VERSION" \
-       /usr/share/getbible/api/src/types/runtime/templates/service.tmpl \
-       /usr/share/getbible/api/src/systemd/getbible-mcp.service.tmpl \
-    && if test "$TEST_FAILURE" = true; then \
-         sed -i '/^ExecStartPre=/i ExecStartPre=/bin/false' \
-           /usr/share/getbible/api/src/types/runtime/templates/service.tmpl \
-           /usr/share/getbible/api/src/systemd/getbible-mcp.service.tmpl; \
-       fi
+COPY prepare-image-fixture.sh /tmp/prepare-image-fixture.sh
+RUN bash /tmp/prepare-image-fixture.sh /usr/share/getbible/api "$TEST_VERSION" "$TEST_FAILURE" \
+    && rm /tmp/prepare-image-fixture.sh
 DOCKERFILE
 IFS=. read -r image_major image_minor image_patch <<< "$BASE_VERSION"
 FAILED_VERSION="$image_major.$image_minor.$((image_patch + 1))"

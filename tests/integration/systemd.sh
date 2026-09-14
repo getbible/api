@@ -296,12 +296,13 @@ check 'configuration update reuses immutable code' "$OLD_RELEASE" "$(readlink -f
 check 'old configuration retained for rollback' Ge1:1 "$(env_value "$OLD_DEPLOYMENT/runtime.env" QUERY_DEFAULT_REFERENCE)"
 check 'new service reads updated configuration' QUERY_DEFAULT_REFERENCE=Ge1:2 "$(tr '\0' '\n' < "/proc/$(main_pid query)/environ" | grep '^QUERY_DEFAULT_REFERENCE=')"
 
-# A bad application preflight must never displace the healthy generation.
+# The same rejected-update fixture used by Docker must preserve serving
+# generations under real systemd before any image is built.
 install -d -m 0755 /srv/getbible-ci/broken-checkout
 tar --exclude=.git --exclude=.venv-test --exclude=__pycache__ --exclude=build \
     -C "$ROOT" -cf - . | tar -C /srv/getbible-ci/broken-checkout -xf -
-printf 'raise RuntimeError("intentional CI candidate startup failure")\n' \
-    > /srv/getbible-ci/broken-checkout/src/apps/query/getbible_query_api/check.py
+bash "$ROOT/tests/integration/prepare-image-fixture.sh" \
+    /srv/getbible-ci/broken-checkout "$(cat "$ROOT/VERSION")" true
 ACTIVE_PID="$(main_pid query)"
 start_probe
 if /srv/getbible-ci/broken-checkout/getbible.sh apply "$Q"; then
@@ -314,8 +315,6 @@ check 'failed upgrade preserves active process' "$ACTIVE_PID" "$(main_pid query)
 check 'failed upgrade preserves active code' "$OLD_RELEASE" "$(readlink -f /opt/getbible/query/v2/current)"
 check 'failed upgrade preserves configuration' Ge1:2 "$(env_value "$(deployment query)/runtime.env" QUERY_DEFAULT_REFERENCE)"
 
-printf 'raise RuntimeError("intentional MCP candidate startup failure")\n' \
-    > /srv/getbible-ci/broken-checkout/src/apps/mcp/getbible_mcp_api/check.py
 MCP_RETAINED_GENERATION="$(mcp_deployment)"
 MCP_RETAINED_PID="$(mcp_pid)"
 if /srv/getbible-ci/broken-checkout/getbible.sh mcp update "$M"; then
