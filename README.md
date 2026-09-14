@@ -11,6 +11,10 @@ server, securely and at high volume. A **domain** is a host name with one
 vhost and TLS at its selected terminator; its **endpoints** are its version folders
 (`/v2/`, `/v3/`), or the domain root itself when it has none.
 
+The project and public API documentation website is
+[getBible.net](https://getBible.net). The [MCP usage guide](https://getBible.net/mcp)
+describes the official MCP service at [https://mcp.getbible.net/](https://mcp.getbible.net/).
+
 - **Static domains**: each endpoint a tree of JSON, checksum and text files
   copied faithfully from its own trusted git repository with its own deploy
   key. Endpoints share their domain's isolated sync user and nginx vhost;
@@ -76,6 +80,10 @@ See [runtime setup and response contracts](docs/RUNTIME_ENDPOINTS.md) and the
 [v3 source OpenAPI](https://api.getbible.net/v3/openapi.json).
 
 ## MCP domain
+
+Consumer documentation is at [getBible.net/mcp](https://getBible.net/mcp).
+The official client endpoint is [https://mcp.getbible.net/](https://mcp.getbible.net/);
+this engine can deploy the same service on any operator-configured domain.
 
 Deploy MCP on its own domain:
 

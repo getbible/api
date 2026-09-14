@@ -1,11 +1,12 @@
 {
   "info": {
-    "contact": {"name":"getBible","url":"https://getbible.net"},
+    "contact": {"name":"getBible","url":"https://getBible.net"},
     "description": "Full-text scripture search through GET URL parameters or POST URL parameters and/or JSON. Both methods use the same implementation and filters. Precedence: path, query, body, configured defaults. All filters are optional. Documentation, OpenAPI, health and readiness are public without a token. The deployment search probe is socket-only.",
     "title": "getBible search endpoint",
     "version": "{{VERSION}}"
   },
   "openapi": "3.1.0",
+  "externalDocs": {"description":"getBible project and API documentation","url":"https://getBible.net"},
   "servers": [{"url":"https://{{DOMAIN}}"}],
   "paths": {
     "/healthz": {

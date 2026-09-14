@@ -4,7 +4,7 @@ services:
   getbible:
     # Production deployment only pulls the prebuilt image. No checkout
     # or Dockerfile is required on the server. See docs/DOCKER.md for login.
-    image: ${GETBIBLE_IMAGE_REPOSITORY:-ghcr.io/getbible/api}:${GETBIBLE_IMAGE_TAG:-3.1.2}
+    image: ${GETBIBLE_IMAGE_REPOSITORY:-ghcr.io/getbible/api}:${GETBIBLE_IMAGE_TAG:-3.1.3}
     restart: unless-stopped
     hostname: ${GETBIBLE_HOSTNAME:-getbible}
     user: "0:0"

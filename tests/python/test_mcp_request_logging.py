@@ -10,6 +10,7 @@ import unittest
 import httpx
 import httpx2
 from getbible_api_common.logging import JsonFormatter
+from getbible_mcp.config import Settings
 from getbible_mcp_api.app import create_app
 from getbible_mcp_api.telemetry import (
     JsonObservation,
@@ -31,6 +32,77 @@ def recording_logger() -> tuple[logging.Logger, io.StringIO]:
 
 
 class TelemetryTest(unittest.IsolatedAsyncioTestCase):
+    async def test_dictionary_lookup_and_entry_use_local_origin_and_mcp_reporting(self) -> None:
+        logger, output = recording_logger()
+        requests = []
+        index = {
+            "schema": "getbible-dictionary-index-v1", "dictionary": "easton",
+            "entries": [{"id": "mercy--2", "key": "Mercy", "search": "mercy"}],
+        }
+        entry = {
+            "dictionary": "easton", "id": "mercy--2", "key": "Mercy",
+            "definition": "Fixture definition", "see_also": ["grace"], "backlinks": [],
+        }
+
+        def upstream(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            if request.url.path == "/v1/easton/index.json":
+                payload = index
+            elif request.url.path == "/v1/easton/mercy--2.json":
+                payload = entry
+            else:
+                raise AssertionError(f"Unexpected dictionary path: {request.url.path}")
+            return httpx.Response(200, json=payload, headers={"Cache-Control": "max-age=60"})
+
+        app = create_app(
+            settings=Settings(dictionaries_base="https://dictionary.example.test/v1"),
+            origin="http://127.0.0.1:8080", transport=httpx.MockTransport(upstream), logger=logger,
+        )
+        async with (
+            app.router.lifespan_context(app),
+            httpx2.AsyncClient(
+                transport=httpx2.ASGITransport(app), base_url="http://127.0.0.1",
+            ) as http,
+            Client(streamable_http_client("http://127.0.0.1/", http_client=http,
+                                          terminate_on_close=False), cache=None) as client,
+        ):
+            tools = await client.list_tools()
+            self.assertIn("search_dictionary_entries", [tool.name for tool in tools.tools])
+            lookup = await client.call_tool("search_dictionary_entries", {
+                "dictionary": "easton", "query": "mercy", "limit": 1,
+            })
+            self.assertFalse(lookup.is_error, lookup.content)
+            self.assertEqual(lookup.structured_content["entries"], index["entries"])
+            result = await client.call_tool("call_api_operation", {
+                "service": "dictionaries", "api_version": "v1",
+                "operation_id": "getDictionaryEntry",
+                "parameters": {
+                    "dictionary": "easton", "entry": lookup.structured_content["entries"][0]["id"],
+                },
+            })
+        self.assertFalse(result.is_error, result.content)
+        self.assertEqual(result.structured_content["data"], entry)
+        self.assertEqual(result.structured_content["source"]["url"],
+                         "https://dictionary.example.test/v1/easton/mercy--2.json")
+        self.assertLessEqual(result.structured_content["cache"]["remaining_ttl_seconds"], 60)
+        self.assertEqual(len(requests), 2)
+        for request in requests:
+            self.assertEqual(request.url.host, "127.0.0.1")
+            self.assertEqual(request.url.port, 8080)
+            self.assertEqual(request.headers["host"], "dictionary.example.test")
+            self.assertNotIn("authorization", request.headers)
+        rows = [json.loads(line) for line in output.getvalue().splitlines()]
+        calls = [row for row in rows if row["mcp_method"] == "tools/call"]
+        self.assertEqual([row["mcp_tool"] for row in calls],
+                         ["search_dictionary_entries", "call_api_operation"])
+        for row in calls:
+            self.assertEqual(row["endpoint_kind"], "mcp")
+            self.assertEqual(row["upstream_service"], "dictionaries")
+            self.assertEqual(row["upstream_api_version"], "v1")
+            self.assertEqual(row["mcp_outcome"], "success")
+            self.assertNotIn("arguments", row)
+            self.assertNotIn("body", row)
+
     async def test_spool_failure_preserves_responses_and_application_exceptions(self) -> None:
         class UnavailableHandler(logging.Handler):
             def emit(self, record):
