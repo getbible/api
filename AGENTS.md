@@ -18,12 +18,21 @@ after restoring saved services; an already applied image skips this refresh on
 restart. `getbible update` reapplies/retries it; `getbible` links to this entry point.
 See `docs/DEPLOYMENT_DECISIONS.md` before changing deployment behavior.
 
-An optional MCP sidecar attaches one `/mcp` route to an existing domain.
-The PyPI `getbible-mcp` dependency owns its protocol, tools and API contracts;
-this engine owns its ASGI host, local origin routing and deployment lifecycle.
+MCP is a dedicated domain/service, deployed with `getbible deploy mcp` and an
+operator-configured hostname. Its root `/` is the MCP protocol endpoint;
+it has no version folders or endpoint suffix. The PyPI `getbible-mcp`
+dependency owns the protocol, tools and upstream API contracts. This engine
+owns the domain, ASGI host, local origin routing and deployment lifecycle.
 See `docs/MCP.md` for setup and the package-release prerequisite. Keep MCP
 outside the versioned query/search runtime kinds: `src/apps/mcp/bundle.conf`
 declares its offline package bundle without adding a runtime kind manifest.
+
+MCP telemetry has its own service classification and dashboard view. Join
+protocol metadata to nginx requests by request ID without counting the same
+origin request twice; preserve rejected/malformed requests and existing
+history. Protocol/tool failures can occur with HTTP 200 and must remain
+visible. Record declared client and operation metadata without raw tool
+arguments, request bodies or credentials.
 
 ## Vocabulary
 
@@ -34,9 +43,11 @@ declares its offline package bundle without adding a runtime kind manifest.
   synced from its own repository with its own deploy key (static) or a
   service of its own (runtime). Static deploy keys belong to endpoints,
   never to a domain: endpoints on one domain may use different repositories.
-  A domain set up without version folders serves a single endpoint at its
-  root, label `root`; that endpoint still owns its repository identity while
-  the domain owns the hostname and TLS configuration.
+  A static domain set up without version folders serves a single endpoint
+  at its root, label `root`; that endpoint still owns its repository identity
+  while the domain owns the hostname and TLS configuration. An MCP domain
+  serves its protocol at the root, has no version-endpoint records, and uses
+  the pinned PyPI library.
 - Use these words in the menu, in output and in documentation. The registry
   directory (`/etc/getbible/endpoints/<domain>/endpoint.conf` for the
   domain, `versions/<label>.conf` for its endpoints), the `endpoint_*`
@@ -49,7 +60,7 @@ declares its offline package bundle without adding a runtime kind manifest.
 - `src/lib/` - bash libraries, sourced by `getbible.sh`, never executed.
 - `src/bin/` - helper programs installed to `/usr/local/lib/getbible`.
 - `src/nginx/` - nginx templates and snippets.
-- `src/types/<type>/` - one domain type each (`static`, `runtime`).
+- `src/types/<type>/` - one domain type each (`static`, `runtime`, `mcp`).
 - `src/apps/<kind>/` - runtime applications (`common`, `query`, `search`);
   `src/apps/<kind>-<version>/` an implementation for one version that needs
   its own code. A kind's manifests declare the versions it can serve.
@@ -90,7 +101,8 @@ may be changed; do not silently change zone-wide settings for unrelated sites.
 Static pages and OpenAPI documents may be supplied freely by the repository or
 operator. Generated runtime documentation must match the actual GET query and
 POST JSON implementation. Documentation, specifications, discovery and health
-remain public regardless of the data access mode.
+remain public regardless of the data access mode. An MCP domain's root remains
+the protocol endpoint, not a generated documentation page or version index.
 
 ## Rules
 
@@ -139,7 +151,8 @@ remain public regardless of the data access mode.
 - Runtime endpoints are strictly separate: `query` serves references only,
   `search` serves searches (and resolves a reference typed as a search).
   Neither exposes the other's routes.
-- Every error is an RFC 9457 problem document (`application/problem+json`).
+- Engine HTTP errors use RFC 9457 problem documents (`application/problem+json`).
+  MCP protocol errors retain the library's protocol-defined response envelopes.
 - Static domains share one sync system user and one nginx vhost, while each
   endpoint has a separate SSH deploy key for its repository URL. Select the
   key explicitly for every sync and access test; keep ordinary repository

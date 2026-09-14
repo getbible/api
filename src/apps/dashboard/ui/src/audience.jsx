@@ -24,12 +24,12 @@ function Consumers({dimension, title, label, filters, range, live, refresh, onFi
         {rows ? <DataTable rows={rows} rowKey={row => row.value} onSelect={row => onFilter(dimension, row.value, row.filters)} columns={[
             {key: 'value', label, render: row => <span className="consumer-value" title={row.value}>{row.value}</span>},
             {key: 'calls', label: 'Requests', render: row => number(row.calls)},
-            {key: 'errors', label: 'Server errors', render: row => number(row.errors)},
+            {key: 'errors', label: 'Errors', render: row => number(row.errors)},
             {key: 'bytes', label: 'Transfer', render: row => bytes(row.bytes)},
         ]}/> : <Busy/>}
         <div className="table-footer"><small>{rows?.length === 1000 ? 'Top 1,000 matching values. Search to narrow the results.' : `${number(rows?.length || 0)} matching values`} · requests without a recorded {label.toLowerCase()} are omitted.</small></div>
     </Panel>;
 }
 export default function Audience(props) {
-    return <><p className="text-secondary">Referrers and user agents are separate request fields. Each link opens the matching requests with the selected time range and filters.</p><Consumers {...props} dimension="referrer" title="Referrers" label="Referrer"/><Consumers {...props} dimension="user_agent" title="User agents" label="User agent"/></>;
+    return <><p className="text-secondary">Referrers and user agents are recorded request fields. User agents may identify software, robots or browsers; these reported values do not establish a person's identity. Select a value to inspect matching requests in this time range.</p><Consumers {...props} dimension="referrer" title="Referrers" label="Referrer"/><Consumers {...props} dimension="user_agent" title="User agents and robots" label="User agent"/></>;
 }

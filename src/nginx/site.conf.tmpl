@@ -49,19 +49,16 @@ server {
     include snippets/getbible/errors.conf;
     include {{NGINX_GB_DIR}}/{{DOMAIN}}/limits.conf;
 
+    set $gb_allowed_methods "{{ALLOWED_METHODS}}";
+
     # Preflights are answered here, cheaply and without authentication.
     if ($request_method = OPTIONS) {
         return 204;
     }
-{{#IF MCP_ENABLED}}    # Only the MCP route adds POST to a static domain's method contract.
-    set $getbible_method_path "$request_method:$uri";
-    if ($getbible_method_path !~ ^(({{METHODS_REGEX}}):.*|POST:/mcp)$) {
+    if ($request_method !~ ^({{METHODS_REGEX}})$) {
         return 405;
     }
-{{/IF}}{{#UNLESS MCP_ENABLED}}    if ($request_method !~ ^({{METHODS_REGEX}})$) {
-        return 405;
-    }
-{{/UNLESS}}
+
 {{#IF REJECT_ARGS}}
     # Nothing on this domain accepts parameters.
     if ($args != "") {

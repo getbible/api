@@ -17,6 +17,8 @@ EXTRA_FIELDS = (
     "cache_stale", "error_type", "problem", "dropped",
     "auth_state", "worker_pid", "in_flight", "source_generation", "resident_bytes_estimate",
     "books", "matched_books", "referrer", "endpoint_kind",
+    "mcp_method", "mcp_tool", "mcp_client_name", "mcp_client_version", "mcp_outcome",
+    "mcp_resource", "mcp_prompt", "upstream_service", "upstream_api_version", "upstream_operation",
 )
 
 

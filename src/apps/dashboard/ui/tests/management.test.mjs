@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {sections, operationLocations, inventoryDomains, sectionGroups, needsExistingDomain,
+import {sections, operationLocations, inventoryDomains, sectionGroups, supportsDomain, needsExistingDomain,
     needsExistingEndpoint, operationDefaults, submittedArguments, runtimeDeploymentOptions,
     runtimeDeploymentFields, changedOperationValues} from '../src/management.js';
 
@@ -22,6 +22,33 @@ test('domain menus offer operations for the selected domain kind and publication
     const ids = domain => sectionGroups(operations, 'domains', domain).flatMap(group => group.operations.map(spec => spec.id));
     assert.deepEqual(ids({type: 'runtime', live: false}), ['domain.go_live', 'endpoint.add_runtime', 'runtime.cache', 'pages.docs']);
     assert.deepEqual(ids({type: 'static', live: true}), ['domain.stage', 'endpoint.add_static', 'pages.docs']);
+});
+
+test('MCP domains expose dedicated services and shared controls without version or root-page mutations', () => {
+    const restricted = ['endpoint.add_static', 'endpoint.add_runtime', 'endpoint.change_source', 'endpoint.remove',
+        'endpoint.default', 'endpoint.sync', 'endpoint.deploy_key', 'endpoint.repo_access', 'endpoint.filetypes',
+        'runtime.update', 'runtime.rollback', 'runtime.redeploy', 'runtime.cache', 'runtime.set',
+        'pages.docs', 'pages.openapi', 'pages.write'];
+    const shared = ['domain.status', 'domain.apply', 'domain.update', 'domain.remove', 'access.mode', 'token.add'];
+    const dedicated = ['mcp.status', 'mcp.configure', 'mcp.update', 'mcp.rollback'];
+    const operations = [...restricted, ...shared, ...dedicated].map(id => action(id, [domainField]));
+    const domain = {type: 'mcp', live: true};
+    assert.deepEqual(sectionGroups(operations, 'domains', domain).flatMap(group => group.operations.map(spec => spec.id)), [...shared, ...dedicated]);
+    assert.deepEqual(operationLocations(action('mcp.update', [domainField])), [['domains', 'MCP service']]);
+    assert.equal(needsExistingDomain(action('domain.deploy_mcp', [domainField])), false);
+    assert.equal(needsExistingEndpoint(action('mcp.configure', [domainField])), false);
+    for (const type of ['static', 'runtime', 'unknown']) {
+        for (const id of dedicated) assert.equal(supportsDomain(action(id), {type}), false);
+    }
+    for (const id of restricted) assert.equal(supportsDomain(action(id), {type: 'unknown'}), false);
+});
+
+test('domain type permissions supplied by the broker restrict newly catalogued operations', () => {
+    const spec = action('future.domain', [domainField], {domain_types: ['mcp']});
+    assert.equal(supportsDomain(spec), true);
+    assert.equal(supportsDomain(spec, {type: 'mcp'}), true);
+    assert.equal(supportsDomain(spec, {type: 'static'}), false);
+    assert.equal(supportsDomain(spec, {type: 'unknown'}), false);
 });
 
 test('deployment accepts new names while existing endpoint operations require inventory selection', () => {

@@ -7,6 +7,8 @@ import time
 FILTERS = frozenset({"endpoint", "version", "status", "auth", "ip", "path", "translation",
                      "book", "search", "reference", "cache", "method", "token", "user_agent", "operation",
                      "endpoint_kind", "referrer", "successful", "origin_only", "usage", "q",
+                     "mcp_method", "mcp_tool", "mcp_client_name", "mcp_client_version", "mcp_outcome",
+                     "upstream_service", "upstream_api_version", "upstream_operation",
                      "referrer_contains", "user_agent_contains", "path_contains"})
 
 
@@ -51,6 +53,16 @@ class Analytics:
         start, end = query_range(query)
         filters = {key: value for key, value in query.items() if key in FILTERS and value != ""}
         with self.store() as store:
+            if kind == "mcp":
+                if filters.get("endpoint_kind", "mcp") != "mcp":
+                    raise ValueError("The MCP report requires the MCP service filter")
+                filters["endpoint_kind"] = "mcp"
+                result = store.summary(start, end, filters=filters)
+                bucket = max(1, int((end - start) / 2000) + 1)
+                result["series"] = store.series(start, end, bucket_seconds=bucket, filters=filters)
+                result["start"], result["end"] = start, end
+                result["filters"] = filters
+                return result
             if kind == "audience":
                 top = int(query.get("top", 100))
                 if not 1 <= top <= 1000:

@@ -5,6 +5,11 @@
 # format and the maps that identify a caller. Zones and caches are rendered
 # per endpoint into conf.d/getbible-ep-<slug>.conf.
 
+# Every vhost has a default; managed API domains set their exact method list.
+map $host $gb_allowed_methods {
+    default "GET, HEAD, OPTIONS";
+}
+
 log_format getbible_json escape=json '{'
     '"time":"$time_iso8601",'
     '"host":"$host",'
@@ -84,3 +89,4 @@ map $gb_token_id $gb_limit_key {
     "" $binary_remote_addr;
     default "";
 }
+

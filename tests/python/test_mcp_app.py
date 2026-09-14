@@ -157,12 +157,12 @@ class AppTest(unittest.IsolatedAsyncioTestCase):
             async with app.router.lifespan_context(app):
                 readiness = await client.get("/readyz")
                 self.assertEqual(readiness.status_code, 200)
-                self.assertEqual(readiness.json()["mcp_endpoint"], "/mcp")
+                self.assertEqual(readiness.json()["mcp_endpoint"], "/")
                 self.assertEqual(readiness.headers["cache-control"], "no-store")
                 health = await client.get("/healthz")
                 self.assertEqual(health.status_code, 200)
-                self.assertEqual(health.json()["mcp_endpoint"], "/mcp")
-                for path in ("/v2", "/v3", "/mcp/"):
+                self.assertEqual(health.json()["mcp_endpoint"], "/")
+                for path in ("/v2", "/v3", "/mcp", "/mcp/"):
                     self.assertEqual((await client.get(path)).status_code, 404)
                 self.assertFalse(upstream.closed)
             self.assertEqual((await client.get("/readyz")).status_code, 503)
@@ -183,7 +183,7 @@ class AppTest(unittest.IsolatedAsyncioTestCase):
             ) as client,
             Client(
                 streamable_http_client(
-                    "http://127.0.0.1/mcp", http_client=client, terminate_on_close=False,
+                    "http://127.0.0.1/", http_client=client, terminate_on_close=False,
                 ),
                 cache=None,
             ) as session,
@@ -214,7 +214,7 @@ class AppTest(unittest.IsolatedAsyncioTestCase):
             ) as client,
             Client(
                 streamable_http_client(
-                    "http://127.0.0.1/mcp", http_client=client, terminate_on_close=False,
+                    "http://127.0.0.1/", http_client=client, terminate_on_close=False,
                 ),
                 cache=None,
             ) as session,

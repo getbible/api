@@ -12,6 +12,7 @@ User=getbible-mcp
 Group=getbible-mcp
 WorkingDirectory={{RELEASE}}
 Environment=PYTHONUNBUFFERED=1
+Environment=GETBIBLE_LOG_FILE={{LOG_DIR}}/app/mcp.log
 Environment=GETBIBLE_MCP_PUBLIC_BASE=https://{{DOMAIN}}
 Environment=GETBIBLE_MCP_ALLOWED_HOSTS={{DOMAIN}},localhost,127.0.0.1
 Environment=GETBIBLE_MCP_ALLOWED_ORIGINS=https://{{DOMAIN}}
@@ -52,7 +53,7 @@ SystemCallArchitectures=native
 CapabilityBoundingSet=
 AmbientCapabilities=
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-ReadWritePaths=/dev/shm
+ReadWritePaths=/dev/shm {{LOG_DIR}}/app
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier={{UNIT}}

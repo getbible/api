@@ -63,6 +63,23 @@ class OperationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             broker.validate_arguments(spec, {"domain": "example.test"})
 
+    def test_mcp_commands_have_domain_scope_and_stage_new_deployments(self):
+        spec = broker.OPS["domain.deploy_mcp"]
+        arguments = broker.validate_arguments(spec, {"domain": "mcp.example.test", "origin": "http://127.0.0.1:80"})
+        self.assertEqual(broker.command_arguments(spec, arguments), [
+            "deploy", "mcp", "--domain", "mcp.example.test", "--access", "metered",
+            "--python", "auto", "--origin", "http://127.0.0.1:80", "--staged", "--yes",
+        ])
+        for action in ("status", "configure", "update", "rollback"):
+            with self.subTest(action=action):
+                spec = broker.OPS["mcp." + action]
+                arguments = broker.validate_arguments(spec, {"domain": "mcp.example.test"})
+                self.assertEqual(broker.command_arguments(spec, arguments), ["mcp", action, "mcp.example.test", "--yes"])
+                self.assertEqual(spec["domain_types"], ["mcp"])
+                self.assertEqual(spec["destructive"], action == "rollback")
+                with self.assertRaises(ValueError):
+                    broker.validate_arguments(spec, {"domain": "mcp.example.test", "endpoint": "v2"})
+
 
 class JobTests(unittest.TestCase):
     def setUp(self):
@@ -313,6 +330,86 @@ class JobTests(unittest.TestCase):
         self.assertFalse(result["domains"][0]["live"])
         self.assertNotIn("do-not-show", json.dumps(result))
 
+    def test_mcp_rejects_version_and_page_operations_before_queueing(self):
+        domain = self.root / "etc/getbible/endpoints/mcp.example.test"
+        domain.mkdir(parents=True)
+        (domain / "endpoint.conf").write_text("TYPE=mcp\nKIND=mcp\nENABLED=true\n")
+        operations = {
+            "endpoint.add_static": {"endpoint": "v2", "repository": "https://example.test/bible.git"},
+            "endpoint.add_runtime": {"endpoint": "v2"},
+            "endpoint.change_source": {"endpoint": "root", "ref": "main"},
+            "endpoint.remove": {"endpoint": "root"},
+            "endpoint.default": {"endpoint": "v2"},
+            "endpoint.sync": {},
+            "endpoint.deploy_key": {"endpoint": "root"},
+            "endpoint.repo_access": {"endpoint": "root"},
+            "endpoint.filetypes": {"extensions": "json"},
+            "runtime.update": {},
+            "runtime.rollback": {},
+            "runtime.redeploy": {},
+            "runtime.set": {"key": "WORKERS", "value": "2"},
+            "runtime.cache": {"endpoint": "root", "action": "info"},
+            "pages.docs": {"action": "generated"},
+            "pages.openapi": {"endpoint": "root", "action": "none"},
+            "pages.write": {"kind": "docs", "content": "<p>Replace root</p>"},
+            "logs.view": {"endpoint": "root"},
+        }
+        for operation, arguments in operations.items():
+            with self.subTest(operation=operation), self.assertRaisesRegex(ValueError, "domain"):
+                self.app.submit({"operation": operation, "arguments": {"domain": domain.name, **arguments}, "confirm": True}, "operator")
+        self.assertEqual(self.app.jobs(), [])
+        self.assertEqual(self.app.endpoints()["endpoints"], [])
+        self.assertEqual(self.app.endpoints()["domains"][0]["type"], "mcp")
+        self.assertEqual(list(domain.iterdir()), [domain / "endpoint.conf"])
+
+    def test_domain_type_permissions_preserve_shared_mcp_management(self):
+        registry = self.root / "etc/getbible/endpoints"
+        for domain_type in ("static", "runtime", "mcp", "unknown"):
+            domain = registry / (domain_type + ".example.test")
+            domain.mkdir(parents=True)
+            (domain / "endpoint.conf").write_text(f"TYPE={domain_type}\nKIND={domain_type}\n")
+        for operation, allowed in (("endpoint.add_static", {"static"}), ("runtime.update", {"runtime"}),
+                                   ("mcp.configure", {"mcp"}), ("pages.docs", {"static", "runtime"})):
+            for domain_type in ("static", "runtime", "mcp", "unknown"):
+                with self.subTest(operation=operation, domain_type=domain_type):
+                    values = {"domain": domain_type + ".example.test"}
+                    if domain_type in allowed:
+                        self.app.validate_domain_selection(operation, values)
+                    else:
+                        with self.assertRaises(ValueError):
+                            self.app.validate_domain_selection(operation, values)
+        for operation, arguments in (("domain.apply", {}), ("access.mode", {"mode": "token"}),
+                                     ("token.list", {}), ("mcp.status", {}), ("mcp.configure", {}),
+                                     ("mcp.update", {}), ("mcp.rollback", {})):
+            result = self.app.submit({"operation": operation, "arguments": {"domain": "mcp.example.test", **arguments}, "confirm": True}, "operator")
+            self.app.work.join()
+            self.assertEqual(self.app.job(result["id"], "operator")["status"], "succeeded")
+        catalogue = {item["id"]: item for item in self.app.catalogue()}
+        self.assertEqual(catalogue["mcp.configure"]["domain_types"], ["mcp"])
+        self.assertEqual(catalogue["endpoint.remove"]["domain_types"], ["static", "runtime"])
+        self.assertNotIn("domain_types", catalogue["access.mode"])
+
+    def test_mcp_environment_imports_reject_private_paths_and_do_not_persist_contents(self):
+        domain = self.root / "etc/getbible/endpoints/mcp.example.test"
+        domain.mkdir(parents=True)
+        (domain / "endpoint.conf").write_text("TYPE=mcp\nKIND=mcp\n")
+        imports = self.root / "var/lib/getbible/imports"
+        imports.mkdir(parents=True)
+        private = self.root / "private-environment"
+        private.write_text("GETBIBLE_API_TOKEN=private-token-content\n")
+        link = imports / "linked.env"
+        link.symlink_to(private)
+        for source in (private, link):
+            with self.subTest(source=source), self.assertRaises(ValueError):
+                self.app.submit({"operation": "mcp.configure", "arguments": {"domain": domain.name, "env_file": str(source)}}, "operator")
+        public = imports / "mcp.env"
+        public.write_text(private.read_text())
+        result = self.app.submit({"operation": "mcp.configure", "arguments": {"domain": domain.name, "env_file": str(public)}}, "operator")
+        self.app.work.join()
+        self.assertEqual(self.app.job(result["id"], "operator")["arguments"]["env_file"], str(public))
+        self.assertNotIn(b"private-token-content", self.app.database.read_bytes())
+        self.assertNotIn("private-token-content", json.dumps(self.app.endpoints()))
+
     def test_runtime_settings_inventory_contains_every_editable_nonsecret_key(self):
         domain = self.root / "etc/getbible/endpoints/query.example.test"
         (domain / "versions").mkdir(parents=True)
@@ -404,6 +501,9 @@ class JobTests(unittest.TestCase):
             self.app.submit({"operation": "endpoint.add_runtime", "arguments": arguments}, "operator")
 
     def test_browser_cannot_publish_private_files_or_symlinked_imports(self):
+        domain = self.root / "etc/getbible/endpoints/api.example.test"
+        domain.mkdir(parents=True)
+        (domain / "endpoint.conf").write_text("TYPE=static\n")
         imports = self.root / "var/lib/getbible/imports"
         imports.mkdir(parents=True)
         private = self.root / "private-secret"

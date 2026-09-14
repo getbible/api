@@ -21,7 +21,7 @@ async def check() -> dict[str, str]:
     ):
         response = await client.get("/readyz")
         response.raise_for_status()
-    return {"status": "ok", "mcp_endpoint": "/mcp", "library_version": __version__}
+    return {"status": "ok", "mcp_endpoint": "/", "library_version": __version__}
 
 
 def main() -> None:

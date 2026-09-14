@@ -61,6 +61,20 @@ golive_runtime_ready() {
     gb_log "$domain is ready: every endpoint's service answers /readyz."
 }
 
+golive_mcp_ready() {
+    local domain="$1" generation unit socket
+    generation="$(mcp_active "$domain")"
+    [[ -n "$generation" ]] || { gb_warn "$domain has no active MCP generation; apply it first."; return 1; }
+    if ! sd_available; then
+        gb_log "(no systemd) MCP readiness of $domain is not checked here."
+        return 0
+    fi
+    unit="$(mcp_unit "$domain" "$generation")"
+    socket="$(mcp_socket "$generation")"
+    sd_is_active "$unit.service" || { gb_warn "$unit.service is not running."; return 1; }
+    sd_wait_ready "$socket" /readyz 15 || { gb_warn "$domain does not answer /readyz on $socket."; return 1; }
+}
+
 # golive_preflight DOMAIN METHOD: everything that must hold before the
 # certificate is requested. Never prompts; golive_interactive asks first.
 golive_preflight() {
@@ -68,6 +82,8 @@ golive_preflight() {
     nginx_validate_proxy_settings || return 1
     if [[ "$(ep_get "$domain" TYPE)" == runtime ]]; then
         golive_runtime_ready "$domain" || return 1
+    elif [[ "$(ep_get "$domain" TYPE)" == mcp ]]; then
+        golive_mcp_ready "$domain" || return 1
     else
         missing="$(golive_static_unpublished "$domain")"
         if [[ -n "$missing" && "$GOLIVE_ALLOW_UNPUBLISHED" != true ]]; then
@@ -471,6 +487,9 @@ golive_verify() {
                 golive_row "Service $label" skip "no systemd in this environment"
             fi
         done < <(type_runtime_endpoints "$domain")
+    elif [[ "$EP_TYPE" == mcp ]]; then
+        paths=(/healthz /readyz)
+        if golive_mcp_ready "$domain"; then golive_row "MCP readiness" ok "active service at domain root"; else golive_row "MCP readiness" FAIL "MCP service is not ready"; failed=$((failed + 1)); fi
     else
         while read -r label; do
             [[ -n "$label" ]] || continue
@@ -546,3 +565,4 @@ golive_verify() {
     fi
     (( failed == 0 ))
 }
+

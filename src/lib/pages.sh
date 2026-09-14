@@ -179,6 +179,7 @@ pages_openapi_location() {
 # otherwise the domain page.
 pages_domain_docs_location() {
     local domain="$1"
+    [[ "$(ep_get "$domain" TYPE)" != mcp ]] || return 0
     if pages_has_root_endpoint "$domain"; then
         # A runtime domain renders the location itself: a request for / with
         # a query string or a body belongs to its service, not to the page.
@@ -389,6 +390,7 @@ pages_publish() {
     local domain="$1" type label dir out source path
     ep_load "$domain"
     type="$EP_TYPE"
+    [[ "$type" != mcp ]] || return 0
     endpoint_source_type "$type"
     gb_ensure_dir "$(ep_www_dir "$domain")" 0755 || return 1
     pages_publish_favicon "$domain" || return 1
@@ -449,6 +451,7 @@ pages_resolve_label() {
 # pages_set_docs DOMAIN LABEL|domain SOURCE [REPO_PATH]
 pages_set_docs() {
     local domain="$1" label="$2" source="$3" path="${4:-}"
+    [[ "$(ep_get "$domain" TYPE)" != mcp ]] || gb_die "The MCP protocol owns this domain root; it has no documentation page."
     pages_valid_source "$source" || gb_die "Page sources: generated, custom, repository, none"
     label="$(pages_resolve_label "$domain" "$label")"
     if [[ "$label" == domain ]]; then
@@ -487,6 +490,7 @@ pages_set_openapi() {
 # the generated version so you edit a complete page rather than a blank one).
 pages_take_over() {
     local domain="$1" label="$2" what="$3" from="${4:-}" target out type
+    [[ "$(ep_get "$domain" TYPE)" != mcp ]] || gb_die "The MCP protocol owns this domain root; it has no documentation page."
     type="$(ep_get "$domain" TYPE)"
     endpoint_source_type "$type"
     label="$(pages_resolve_label "$domain" "$label")"
@@ -653,6 +657,10 @@ icons_status_text() {
 # --- reporting -----------------------------------------------------------------
 pages_status_text() {
     local domain="$1" label listed
+    if [[ "$(ep_get "$domain" TYPE)" == mcp ]]; then
+        printf "MCP protocol: https://%s/ (no version folders or public documentation pages)\n" "$domain"
+        return 0
+    fi
     printf 'Pages of %s\n\n' "$domain"
     if pages_has_root_endpoint "$domain"; then
         printf '  %-28s %s\n' "Page /" "$(pages_source_text "$domain" "$GB_ROOT_LABEL" docs)"
@@ -683,6 +691,7 @@ pages_status_text() {
 # --- menu ------------------------------------------------------------------------
 pages_menu() {
     local domain="$1" choice label out
+    [[ "$(ep_get "$domain" TYPE)" != mcp ]] || { ui_msg "MCP domain" "The MCP protocol owns this domain root. Use its tools and resources for API documentation."; return 0; }
     while true; do
         local -a items=()
         if pages_has_root_endpoint "$domain"; then
@@ -795,6 +804,7 @@ pages_cli() {
     local domain="${1:-}" what="${2:-show}"
     [[ -n "$domain" ]] || gb_die "pages DOMAIN [show | publish | docs [ENDPOINT] ACTION | openapi ENDPOINT ACTION | favicon default|none|FILE | logo default|none|FILE]"
     ep_exists "$domain" || gb_die "Unknown domain: $domain"
+    [[ "$(ep_get "$domain" TYPE)" != mcp || "$what" == show ]] || gb_die "MCP domains publish the protocol at / and have no editable documentation pages."
     shift
     [[ $# -eq 0 ]] || shift
     [[ "$what" == show || "$what" == publish ]] || endpoint_source_type "$(ep_get "$domain" TYPE)"
@@ -838,3 +848,4 @@ pages_cli_change() {
     esac
     endpoint_apply "$domain"
 }
+

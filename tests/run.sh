@@ -89,6 +89,7 @@ if [[ "$ALL" == true ]]; then
         bash tests/integration/runtime_rollback.sh || fail "integration runtime rollback"
         bash tests/integration/deploy_keys.sh || fail "integration SSH deploy keys"
         bash tests/integration/external_proxy.sh || fail "integration external proxy"
+        bash tests/integration/mcp.sh || fail "integration MCP domain"
     else
         fail "--all requires nginx and root; integration tests were not run"
     fi

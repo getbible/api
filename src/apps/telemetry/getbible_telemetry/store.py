@@ -46,6 +46,27 @@ _DIMENSIONS = {
     "token": "token_id", "user_agent": "user_agent", "operation": "operation",
     "referrer": "referrer", "endpoint_kind": "endpoint_kind",
 }
+_MCP_DIMENSIONS = frozenset({
+    "mcp_method", "mcp_tool", "mcp_client_name", "mcp_client_version", "mcp_outcome",
+    "upstream_service", "upstream_api_version", "upstream_operation",
+})
+_DIMENSIONS.update({name: name for name in sorted(_MCP_DIMENSIONS)})
+_MCP_FAILURE = (
+    "(requests.endpoint_kind='mcp' AND "
+    "json_extract(requests.runtime_json,'$.mcp_outcome') "
+    "IN ('tool_error','protocol_error','transport_error'))"
+)
+_ERROR = f"(requests.status>=400 OR COALESCE({_MCP_FAILURE},0))"
+
+
+def _dimension_sql(name: str) -> str:
+    """Read allow-listed protocol metadata from schema 2 without rewriting history."""
+    if name in _MCP_DIMENSIONS:
+        return ("CASE WHEN requests.endpoint_kind='mcp' THEN "
+                f"COALESCE(json_extract(requests.runtime_json,'$.{name}'),'') ELSE '' END")
+    return "requests." + _DIMENSIONS[name]
+
+
 _USAGE = frozenset({"translation", "book", "search", "reference"})
 SCHEMA_VERSION = 2
 _SCHEMA_ROOT = Path(__file__).with_name("schemas")
@@ -298,9 +319,13 @@ def _normalise(entry: dict[str, Any], endpoint: str, source: str, record_key: st
     version = _text(semantic.get("version")) or version
     operation = _text(semantic.get("operation"))
     kind = _text(semantic.get("endpoint_kind")) or configured["kind"]
+    if configured["kind"] == "mcp":
+        # An MCP domain has no version endpoints. Even rejected /vN probes
+        # belong to its root service; upstream API versions remain metadata.
+        kind = "mcp"
     if not kind and source == "runtime":
         logger = _text(entry.get("logger"))
-        kind = "query" if logger == "getbible.query" or operation == "scripture" else "search" if logger == "getbible.search" or operation in {"search", "reference"} else ""
+        kind = "mcp" if logger == "getbible.mcp" else "query" if logger == "getbible.query" or operation == "scripture" else "search" if logger == "getbible.search" or operation in {"search", "reference"} else ""
     translation = _text(semantic.get("translation")).casefold()
     reference = _text(semantic.get("reference"))
     search = _text(semantic.get("search"))
@@ -308,7 +333,10 @@ def _normalise(entry: dict[str, Any], endpoint: str, source: str, record_key: st
     static_translation, static_book = _static_bible_path(pieces)
     if not kind and static_translation:
         kind = "static"
-    if kind == "static":
+    if kind == "mcp":
+        version = ""
+        operation = operation or _text(entry.get("mcp_tool") or entry.get("mcp_method")) or "http"
+    elif kind == "static":
         translation = translation or static_translation
         book = book or static_book
         operation = operation or ("static" if static_translation else "http")
@@ -520,11 +548,11 @@ class TelemetryStore:
                 if str(value).lower() not in {"true", "false", "1", "0"}:
                     raise ValueError(name + " must be true or false")
                 if str(value).lower() in {"true", "1"}:
-                    terms.append("(status BETWEEN 200 AND 299 OR status=304)" if name == "successful" else "edge_json IS NOT NULL")
+                    terms.append("(status BETWEEN 200 AND 299 OR status=304) AND NOT COALESCE(" + _MCP_FAILURE + ",0)" if name == "successful" else "edge_json IS NOT NULL")
                 continue
             if name in {"q", "referrer_contains", "user_agent_contains", "path_contains"}:
-                columns = ["path", "query", "translation", "reference", "search", "remote_addr", "referrer", "user_agent", "book_names"] if name == "q" else [name.removesuffix("_contains")]
-                terms.append("(" + " OR ".join("instr(lower(requests." + column + "),lower(?))>0" for column in columns) + ")")
+                columns = ["requests." + column for column in ["path", "query", "translation", "reference", "search", "remote_addr", "referrer", "user_agent", "book_names", "operation"]] + [_dimension_sql(name) for name in sorted(_MCP_DIMENSIONS)] if name == "q" else ["requests." + name.removesuffix("_contains")]
+                terms.append("(" + " OR ".join("instr(lower(" + column + "),lower(?))>0" for column in columns) + ")")
                 values.extend([str(value)] * len(columns))
                 continue
             if name not in _DIMENSIONS:
@@ -534,7 +562,7 @@ class TelemetryStore:
                              "THEN book ELSE json_array(book) END) WHERE CAST(value AS TEXT)=?)")
                 values.append(str(value))
                 continue
-            terms.append("requests." + _DIMENSIONS[name] + "=?")
+            terms.append(_dimension_sql(name) + "=?")
             values.append(value)
         return " AND ".join(terms), values
 
@@ -550,6 +578,8 @@ class TelemetryStore:
             scoped["endpoint_kind"] = "search"
         elif dimension == "reference":
             scoped["endpoint_kind"] = "query"
+        elif dimension in _MCP_DIMENSIONS:
+            scoped["endpoint_kind"] = "mcp"
         # Scope constraints intersect with existing view filters; selecting a
         # query domain must not silently replace that filter with search.
         where, values = self._where(start, end, endpoint, version, filters=filters)
@@ -564,15 +594,15 @@ class TelemetryStore:
         elif dimension in {"translation", "book"}:
             where += " AND operation IN ('static','scripture','search','reference')"
         self._deadline()
-        column = _DIMENSIONS[dimension]
-        if dimension in _USAGE | {"referrer", "user_agent"}:
+        column = _dimension_sql(dimension)
+        if dimension in _USAGE | _MCP_DIMENSIONS | {"referrer", "user_agent"}:
             where += f" AND {column} NOT IN ('','-','[]')"
         if dimension in _USAGE:
             where += " AND method IN ('GET','HEAD','POST')"
         if dimension == "book":
             rows = [dict(row) for row in self.db.execute(
                 "SELECT CAST(b.value AS TEXT) AS value,count(DISTINCT requests.id) AS calls,sum(bytes) AS bytes,"
-                "avg(duration_ms) AS duration_ms,sum(status>=500) AS errors,"
+                f"avg(duration_ms) AS duration_ms,sum({_ERROR}) AS errors,"
                 "min((SELECT n.value FROM json_each(book_names) n WHERE n.key=CAST(b.value AS TEXT))) AS label FROM requests,"
                 "json_each(CASE WHEN json_valid(book) AND substr(book,1,1)='[' THEN book ELSE json_array(book) END) b "
                 f"WHERE {where} GROUP BY b.value ORDER BY calls DESC,value LIMIT ?",
@@ -580,7 +610,7 @@ class TelemetryStore:
         else:
             rows = [dict(row) for row in self.db.execute(
                 f"SELECT {column} AS value, count(*) AS calls, sum(bytes) AS bytes, "
-                f"avg(duration_ms) AS duration_ms, sum(status>=500) AS errors "
+                f"avg(duration_ms) AS duration_ms, sum({_ERROR}) AS errors "
                 f"FROM requests WHERE {where} GROUP BY {column} ORDER BY calls DESC,value LIMIT ?",
                 [*values, max(1, min(int(top), 1000))])]
         for row in rows:
@@ -601,8 +631,8 @@ class TelemetryStore:
         """Observed endpoint/version pairs, including rows awaiting an edge log."""
         self._deadline()
         return [dict(row) for row in self.db.execute(
-            "SELECT endpoint,version,count(edge_json) AS calls,min(stamp) AS first_seen,max(stamp) AS last_seen "
-            "FROM requests GROUP BY endpoint,version ORDER BY endpoint,version")]
+            "SELECT endpoint,version,endpoint_kind,count(edge_json) AS calls,min(stamp) AS first_seen,max(stamp) AS last_seen "
+            "FROM requests GROUP BY endpoint,version,endpoint_kind ORDER BY endpoint,version,endpoint_kind")]
 
     def summary(self, start: float, end: float, *, endpoint: str | None = None,
                 version: str | None = None, top: int = 20,
@@ -611,7 +641,11 @@ class TelemetryStore:
         self._deadline()
         row = self.db.execute(
             "SELECT count(*) AS calls, COALESCE(sum(bytes),0) AS bytes, "
-            "COALESCE(sum(status>=500),0) AS server_errors, COALESCE(sum(status>=400),0) AS errors, "
+            f"COALESCE(sum(status>=500),0) AS server_errors, COALESCE(sum({_ERROR}),0) AS errors, "
+            "COALESCE(sum(status>=400),0) AS http_errors, "
+            "COALESCE(sum(endpoint_kind='mcp'),0) AS mcp_requests, "
+            f"COALESCE(sum(endpoint_kind='mcp' AND {_ERROR}),0) AS mcp_errors, "
+            "COALESCE(sum(endpoint_kind='mcp' AND json_extract(runtime_json,'$.mcp_method')='tools/call'),0) AS mcp_tool_calls, "
             "COALESCE(sum(status=429),0) AS rate_limited, COALESCE(sum(method='OPTIONS'),0) AS preflights, "
             "COALESCE(sum(cache='HIT'),0) AS cache_hits, COALESCE(sum(cache NOT IN ('','-')),0) AS cache_requests, "
             "count(DISTINCT remote_addr) AS unique_ips, count(DISTINCT NULLIF(token_id,'')) AS unique_tokens, "
@@ -624,8 +658,9 @@ class TelemetryStore:
         result["requests_per_second"] = result["calls"] / max(1, end - start)
         result["cache_hit_ratio"] = result["cache_hits"] / result["cache_requests"] if result["cache_requests"] else None
         result["latency_ms"] = self.latency(start, end, endpoint=endpoint, version=version, filters=filters)
-        result["breakdowns"] = {dimension: self.breakdown(dimension, start, end, endpoint=endpoint,
-                                  version=version, top=top, filters=filters)
+        result["breakdowns"] = {dimension: ([] if dimension in _MCP_DIMENSIONS and not result["mcp_requests"] else
+                                  self.breakdown(dimension, start, end, endpoint=endpoint,
+                                  version=version, top=top, filters=filters))
                                 for dimension in _DIMENSIONS}
         orphan_where, orphan_values = self._where(start, end, endpoint, version, origin_only=False, filters=filters)
         result["runtime_without_edge"] = self.db.execute(
@@ -670,7 +705,8 @@ class TelemetryStore:
         self._deadline()
         rows = self.db.execute(
             "SELECT CAST(stamp / ? AS INTEGER) * ? AS stamp, count(*) AS calls, "
-            "sum(status>=400) AS errors, sum(status>=500) AS server_errors, "
+            f"sum({_ERROR}) AS errors, sum(status>=500) AS server_errors, "
+            f"sum(endpoint_kind='mcp' AND {_ERROR}) AS mcp_errors, "
             "sum(status=429) AS rate_limited, sum(bytes) AS bytes, "
             "avg(duration_ms) AS duration_ms, max(duration_ms) AS max_duration_ms, "
             "sum(cache='HIT') AS cache_hits FROM requests WHERE " + where + " GROUP BY 1 ORDER BY 1",
@@ -691,6 +727,10 @@ class TelemetryStore:
             item = dict(record)
             item["edge"] = json.loads(item.pop("edge_json") or "null")
             item["runtime"] = json.loads(item.pop("runtime_json") or "null")
+            for name in _MCP_DIMENSIONS:
+                item[name] = (item["runtime"] or {}).get(name, "") if item["endpoint_kind"] == "mcp" else ""
+            item["mcp_error"] = item["endpoint_kind"] == "mcp" and (
+                item["status"] >= 400 or item["mcp_outcome"] in {"tool_error", "protocol_error", "transport_error"})
             item["book_names"] = json.loads(item["book_names"])
             rows.append(item)
         return {"items": rows, "next_cursor": rows[-1]["id"] if len(rows) == limit else None}

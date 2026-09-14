@@ -34,8 +34,40 @@ for (const [dimension, values] of Object.entries(summary.breakdowns)) for (const
   if (dimension === 'book') row.label = 'John';
 }
 const worker = {pid: 123, rss_bytes: 134217728, private_bytes: 67108864, translation_status: {kjv: {ready: false, reason: 'Only part of the query translation is resident.'}}, cache: {ttl_seconds: 2592000, query_translations: {kjv: {chapters: 1, estimated_bytes: 17000, expired_chapters: 0}}, search_corpora: {translations: {}}}};
+const mcpRequests = [
+  {id: 15, mcp_method: 'initialize', mcp_outcome: 'success', mcp_client_name: 'Fixture MCP client', mcp_client_version: '2.0', duration_ms: 4},
+  {id: 14, mcp_method: 'tools/call', mcp_tool: 'call_api_operation', mcp_outcome: 'success', upstream_service: 'api', upstream_api_version: 'v3', upstream_operation: 'getChapter', duration_ms: 12},
+  {id: 13, mcp_method: 'tools/call', mcp_tool: 'call_api_operation', mcp_outcome: 'tool_error', upstream_service: 'api', upstream_api_version: 'v3', upstream_operation: 'getChapter', mcp_error: true, duration_ms: 20},
+  {id: 12, mcp_method: 'resources/read', mcp_outcome: 'unknown', duration_ms: 100},
+  {id: 11, status: 403, method: 'GET', user_agent: 'FixtureCrawler/1.0', mcp_error: true, duration_ms: 1},
+].map(row => ({stamp: now, endpoint: 'mcp.example.test', endpoint_kind: 'mcp', version: '', method: 'POST', path: '/',
+  status: 200, remote_addr: '192.0.2.20', auth: 'anonymous', user_agent: 'FixtureMCP/2.0', referrer: '', ...row}));
+const mcpDimensions = ['endpoint', 'mcp_method', 'mcp_tool', 'mcp_client_name', 'mcp_client_version', 'mcp_outcome',
+  'upstream_service', 'upstream_api_version', 'upstream_operation', 'status', 'user_agent', 'referrer'];
+const failedMcp = row => row.status >= 400 || row.mcp_error === true;
+function selectedMcpRows(params) {
+  return mcpRequests.filter(row => mcpDimensions.every(key => !params.get(key) || String(row[key] ?? '') === params.get(key)) &&
+    (!params.get('user_agent_contains') || row.user_agent.includes(params.get('user_agent_contains'))));
+}
+function mcpReport(params) {
+  const rows = selectedMcpRows(params);
+  const filters = {...Object.fromEntries(params), endpoint_kind: 'mcp', origin_only: 'true'};
+  for (const key of ['start', 'end', 'top', 'bucket_seconds']) delete filters[key];
+  const breakdowns = Object.fromEntries(mcpDimensions.map(dimension => [dimension,
+    [...new Set(rows.map(row => row[dimension]).filter(value => value !== undefined && value !== ''))].map(value => {
+      const matching = rows.filter(row => row[dimension] === value);
+      return {value, calls: matching.length, errors: matching.filter(failedMcp).length, bytes: 1024,
+        duration_ms: matching.reduce((sum, row) => sum + row.duration_ms, 0) / matching.length,
+        filters: {...filters, [dimension]: value}};
+    })]));
+  return {calls: rows.length, mcp_requests: rows.length, mcp_errors: rows.filter(failedMcp).length, errors: rows.filter(failedMcp).length,
+    http_errors: rows.filter(row => row.status >= 400).length, mcp_tool_calls: rows.filter(row => row.mcp_method === 'tools/call').length,
+    unique_ips: 1, duration_ms: rows.reduce((sum, row) => sum + row.duration_ms, 0) / Math.max(1, rows.length),
+    latency_ms: {p95: 100}, filters, breakdowns,
+    series: rows.map((row, index) => ({stamp: now - (rows.length - index) * 60, calls: 1, errors: failedMcp(row) ? 1 : 0, duration_ms: row.duration_ms}))};
+}
 const searchWorker = {...worker, translation_status: {kjv: {ready: true}}, cache: {...worker.cache, search_corpora: {translations: {kjv: {verses: 31102, estimated_bytes: 34000000, indexes: [{case_sensitive: false, fold_diacritics: true}]}}}, translation_cache: {translations: {kjv: {estimated_bytes: 13000000}}}}};
-const inventory = {endpoints: [{domain: 'query.example.test', label: 'v2', type: 'runtime', kind: 'query', live: true, settings: {ACCESS_MODE: 'open'}, endpoint_settings: {WORKERS: '9', MEMORY_TTL: '30d'}}]};
+const inventory = {domains: [{domain: 'mcp.example.test', type: 'mcp', kind: 'mcp', live: true, settings: {ACCESS_MODE: 'open'}}], endpoints: [{domain: 'query.example.test', label: 'v2', type: 'runtime', kind: 'query', live: true, settings: {ACCESS_MODE: 'open'}, endpoint_settings: {WORKERS: '9', MEMORY_TTL: '30d'}}]};
 const operations = [
   {id: 'runtime.cache', title: 'Manage translation memory', fields: [{name: 'domain', type: 'domain', required: true}, {name: 'endpoint', required: true}, {name: 'action', choices: ['warm', 'drop', 'reload'], required: true}, {name: 'translation', required: true}]},
   {id: 'pages.write', title: 'Edit page content', fields: [{name: 'domain', required: true}, {name: 'kind', choices: ['docs', 'openapi'], required: true}, {name: 'content', type: 'multiline', required: true}]},
@@ -43,6 +75,8 @@ const operations = [
   {id: 'logs.view', title: 'View diagnostics', fields: [{name: 'domain', required: true}]},
   {id: 'logs.reset', title: 'Start fresh traffic history', description: 'Discard recorded requests and begin a fresh history.', fields: []},
   {id: 'token.add', title: 'Issue an API token', secret_output: true, fields: [{name: 'domain', required: true}, {name: 'label', required: true}]},
+  {id: 'mcp.status', title: 'MCP service status', mutates: false, domain_types: ['mcp'], fields: [{name: 'domain', required: true}]},
+  {id: 'mcp.update', title: 'Update MCP service', domain_types: ['mcp'], fields: [{name: 'domain', required: true}]},
 ];
 page.on('pageerror', error => failures.push(error.message));
 await page.route('**/*', async route => {
@@ -61,10 +95,11 @@ await page.route('**/*', async route => {
     else if (name === 'dashboard/heartbeat') {heartbeatRequests.push(body); value = dashboardState;}
     else if (name === 'dashboard/state') value = dashboardState;
     else if (name === 'overview') value = summary;
-    else if (name === 'audience') value = {referrers: summary.breakdowns.referrer, user_agents: summary.breakdowns.user_agent};
+    else if (name === 'mcp') {assert.equal(url.searchParams.get('endpoint_kind'), 'mcp'); value = mcpReport(url.searchParams);}
+    else if (name === 'audience') {const breakdowns = url.searchParams.get('endpoint_kind') === 'mcp' ? mcpReport(url.searchParams).breakdowns : summary.breakdowns; value = {referrers: breakdowns.referrer, user_agents: breakdowns.user_agent};}
     else if (name === 'endpoints') value = inventory;
     else if (name === 'history') value = {series: Array.from({length: 30}, (_, i) => ({stamp: now - (30 - i) * 60, calls: 100 + i * 10, errors: i % 3})), metrics: Array.from({length: 30}, (_, i) => ({...metric, stamp: now - (30 - i) * 60}))};
-    else if (name === 'requests') value = {items: [{id: 1, stamp: now, endpoint: 'query.example.test', version: 'v2', method: 'GET', path: '/v2/kjv/43/3.json', status: 200, duration_ms: 2, remote_addr: '192.0.2.10', auth: 'valid', referrer: 'https://reader.example.test/', user_agent: 'Fixture reader/1.0'}], next_cursor: null};
+    else if (name === 'requests') value = {items: url.searchParams.get('endpoint_kind') === 'mcp' ? selectedMcpRows(url.searchParams) : [{id: 1, stamp: now, endpoint: 'query.example.test', version: 'v2', method: 'GET', path: '/v2/kjv/43/3.json', status: 200, duration_ms: 2, remote_addr: '192.0.2.10', auth: 'valid', referrer: 'https://reader.example.test/', user_agent: 'Fixture reader/1.0'}], next_cursor: null};
     else if (name === 'translations') value = {endpoints: [{domain: 'query.example.test', label: 'v2', kind: 'query', generation: 'fixture', complete: true, expected_workers: 1, workers: [worker]}, {domain: 'search.example.test', label: 'v2', kind: 'search', generation: 'fixture', complete: true, expected_workers: 9, configured_warm_translations: ['kjv'], workers: Array.from({length: 9}, (_, index) => ({...searchWorker, pid: 200 + index})), available_translations: [{translation: 'kjv', allocated_bytes: 40000000}, {translation: 'asv', allocated_bytes: 30000000}]}]};
     else if (name === 'storage') value = {components: [{name: 'Bibles', kind: 'files', bytes: 1000000000, path: '/srv/getbible'}], total_bytes: 1000000000, filesystem_available_bytes: 800000000000};
     else if (name === 'operations') value = operations;
@@ -79,6 +114,9 @@ await page.route('**/*', async route => {
     else throw new Error(`Unexpected API route: ${name}`);
     return route.fulfill({status: 200, contentType: 'application/json', body: JSON.stringify(value)});
   }
+  // The manager deploys its favicon separately from the dashboard bundle.
+  if (url.pathname === '/favicon.png') return route.fulfill({status: 200, contentType: 'image/svg+xml',
+    body: '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><rect width="40" height="40" rx="8" fill="#38bdf8"/><text x="6" y="28" font-size="23" fill="#0b1422">gB</text></svg>'});
   const relative = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
   const target = path.resolve(staticRoot, relative);
   assert.ok(target.startsWith(path.resolve(staticRoot) + path.sep));
@@ -113,7 +151,7 @@ try {
   assert.equal(requestQueries.filter(request => request.name === '/api/requests').at(-1).query.usage, undefined);
   await page.getByRole('button', {name: 'Clear all', exact: true}).click();
   await page.getByLabel('Client IP', {exact: true}).fill('192.0.2.10');
-  await page.getByLabel('Search all request data', {exact: true}).fill('reader');
+  await page.getByLabel('Search recorded request data', {exact: true}).fill('reader');
   await page.getByRole('button', {name: 'Apply filters'}).click();
   await page.getByRole('button', {name: /^q: reader/}).waitFor();
   assert.equal(requestQueries.filter(request => request.name === '/api/requests').at(-1).query.q, 'reader');
@@ -123,6 +161,47 @@ try {
   await referrers.getByRole('button', {name: 'https://reader.example.test/', exact: true}).click();
   await page.getByLabel('Exact referrer', {exact: true}).waitFor();
   assert.equal(await page.getByLabel('Exact referrer', {exact: true}).inputValue(), 'https://reader.example.test/');
+  await page.getByRole('button', {name: 'Clear all', exact: true}).click();
+  await page.getByRole('button', {name: 'MCP traffic', exact: true}).click();
+  await page.getByRole('heading', {name: 'MCP requests and errors', exact: true}).waitFor();
+  await page.locator('.metric').filter({has: page.getByText('MCP requests', {exact: true})}).getByText('5', {exact: true}).waitFor();
+  assert.equal(await page.locator('.metric').filter({has: page.getByText('Errors', {exact: true})}).locator('strong').textContent(), '2', 'HTTP and protocol errors share the MCP error total');
+  await page.locator('canvas').nth(1).waitFor();
+  await page.getByText('Fixture MCP client', {exact: true}).waitFor();
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  await page.screenshot({path: path.join(root, 'test-artifacts/dashboard-mcp.png'), fullPage: true});
+  const mcpDomains = page.locator('.panel').filter({has: page.getByRole('heading', {name: 'MCP domains', exact: true})});
+  await mcpDomains.getByRole('button', {name: 'mcp.example.test', exact: true}).click();
+  await page.getByRole('cell', {name: 'tool error', exact: true}).waitFor();
+  const protocolFailure = page.getByRole('row').filter({has: page.getByRole('cell', {name: 'tool error', exact: true})});
+  assert.equal(await protocolFailure.locator('.status-badge.warning').filter({hasText: /^200$/}).count(), 1, 'HTTP 200 tool errors are visibly marked');
+  assert.equal(await page.getByLabel('Version', {exact: true}).count(), 0, 'MCP has no hosted API-version selector');
+  const unknownOutcome = page.getByRole('row').filter({has: page.getByRole('cell', {name: 'unknown', exact: true})});
+  assert.equal(await unknownOutcome.locator('.status-badge.muted').count(), 1, 'Unknown streamed outcomes remain unknown');
+  assert.equal(requestQueries.filter(request => request.name === '/api/requests').at(-1).query.endpoint, 'mcp.example.test');
+  await page.getByRole('button', {name: 'MCP traffic', exact: true}).click();
+  await page.getByRole('heading', {name: 'Upstream API operations', exact: true}).waitFor();
+  await page.getByRole('button', {name: /^endpoint_kind: mcp/}).click();
+  const upstreamOperations = page.locator('.panel').filter({has: page.getByRole('heading', {name: 'Upstream API operations', exact: true})});
+  await upstreamOperations.getByRole('button', {name: 'getChapter', exact: true}).click();
+  await page.getByLabel('Upstream operation', {exact: true}).waitFor();
+  const operationQuery = requestQueries.filter(request => request.name === '/api/requests').at(-1).query;
+  assert.equal(operationQuery.upstream_operation, 'getChapter');
+  assert.equal(operationQuery.endpoint, 'mcp.example.test', 'Removing the service chip preserves domain scope through drilldown');
+  assert.equal(operationQuery.endpoint_kind, 'mcp');
+  assert.equal(operationQuery.version, undefined);
+  await page.getByRole('button', {name: 'Clear all', exact: true}).click();
+  await page.getByRole('button', {name: 'MCP traffic', exact: true}).click();
+  const mcpAgents = page.locator('.panel').filter({has: page.getByRole('heading', {name: 'User agents and robots', exact: true})});
+  await mcpAgents.getByLabel('Find user agent', {exact: true}).fill('Crawler');
+  await mcpAgents.getByRole('button', {name: 'Search', exact: true}).click();
+  await mcpAgents.getByRole('button', {name: 'FixtureCrawler/1.0', exact: true}).click();
+  await page.getByRole('cell', {name: '403', exact: true}).waitFor();
+  assert.equal(requestQueries.filter(request => request.name === '/api/requests').at(-1).query.user_agent, 'FixtureCrawler/1.0', 'Rejected robot requests remain discoverable');
+  await page.getByLabel('Endpoint kind', {exact: true}).selectOption('');
+  await page.getByRole('button', {name: 'Apply filters'}).click();
+  await page.getByRole('button', {name: /^endpoint_kind: mcp/}).waitFor({state: 'hidden'});
+  assert.equal(requestQueries.filter(request => request.name === '/api/requests').at(-1).query.endpoint_kind, undefined);
   await page.getByRole('button', {name: 'Clear all', exact: true}).click();
   await page.getByRole('button', {name: 'Translations', exact: true}).click();
   const searchMemory = page.locator('.panel').filter({has: page.getByRole('heading', {name: 'search.example.test / v2', exact: true})});
@@ -151,6 +230,18 @@ try {
   await page.getByText('Fixture sync completed', {exact: true}).waitFor();
   await page.getByRole('button', {name: 'Manage', exact: true}).click();
   await page.getByRole('button', {name: /Domains Status, endpoints/}).click();
+  await page.getByRole('button', {name: /mcp.example.test.*MCP at \//}).click();
+  assert.equal(await page.getByRole('button', {name: /Runtime settings|Pages and OpenAPI|Endpoints and repositories/}).count(), 0, 'MCP domains expose no Bible endpoint or generated-page controls');
+  await page.getByRole('button', {name: /MCP service MCP service status/}).click();
+  await page.getByRole('button', {name: 'Update MCP service', exact: true}).click();
+  assert.equal(await page.getByLabel('endpoint', {exact: true}).count(), 0);
+  await page.screenshot({path: path.join(root, 'test-artifacts/dashboard-mcp-management.png'), fullPage: true});
+  await page.getByRole('button', {name: 'Review operation'}).click();
+  await page.getByRole('button', {name: 'Run operation'}).click();
+  await page.getByRole('dialog').getByText('succeeded', {exact: true}).waitFor();
+  assert.deepEqual(actions.at(-1), {operation: 'mcp.update', arguments: {domain: 'mcp.example.test'}, confirm: true});
+  await page.getByRole('button', {name: 'Close details'}).click();
+  await page.getByRole('navigation', {name: 'Management navigation'}).getByRole('button', {name: 'Domains', exact: true}).click();
   await page.getByRole('button', {name: /query.example.test.*query/}).click();
   await page.screenshot({path: path.join(root, 'test-artifacts/dashboard-manage-domain.png'), fullPage: true});
   await page.getByRole('button', {name: /Runtime settings Set runtime/}).click();
@@ -198,7 +289,7 @@ try {
   await page.getByRole('button', {name: 'Sessions', exact: true}).click();
   await page.getByText('Fixture browser', {exact: true}).waitFor();
   assert.deepEqual(failures, [], 'No browser runtime errors');
-  console.log('Dashboard browser checks passed: authentication flow, charts, scoped rankings, audience filters, translation/worker layers, CLI menu navigation, waiting jobs, one-time output, themes and mobile layout.');
+  console.log('Dashboard browser checks passed: authentication flow, charts, scoped rankings, MCP traffic/errors/clients/robots/operations, dedicated MCP domain controls, audience filters, translation/worker layers, CLI menu navigation, waiting jobs, one-time output, themes and mobile layout.');
 } catch (error) {
   await fs.mkdir(path.join(root, 'test-artifacts'), {recursive: true});
   await page.screenshot({path: path.join(root, 'test-artifacts/dashboard-failure.png'), fullPage: true});

@@ -21,7 +21,7 @@ menu_main() {
             update "$update_label" \
             analytics "Traffic analytics: calls and unique callers" \
             dashboard "Private dashboard: domain, password, sessions, blocked addresses" \
-            mcp "MCP: enable, configure, update or roll back one /mcp endpoint" \
+            mcp "MCP domains: configure, update or roll back" \
             logs "Logs: view, archives, rotate" \
             settings "Settings: Telegram, Cloudflare, icons, defaults, retention" \
             system "System: host check, dependencies, self-test" \
@@ -124,8 +124,9 @@ menu_endpoint() {
     type_text="$EP_TYPE"
     [[ -z "$EP_KIND" || "$EP_KIND" == "$EP_TYPE" ]] || type_text="$EP_TYPE $EP_KIND"
     while true; do
-        local -a extra=() golive=()
+        local -a extra=() golive=() page_items=()
         mapfile -t extra < <("type_${EP_TYPE}_menu_items")
+        [[ "$EP_TYPE" == mcp ]] || page_items=(pages "Pages and OpenAPI: documentation pages, icons, versions.json")
         if ep_is_live "$domain"; then
             golive=(stage "Stage again: stop taking over this name (for rolling back; DNS is not changed)")
         else
@@ -142,7 +143,7 @@ menu_endpoint() {
             status "Status and health" \
             verify "Verify this server end to end (service, nginx, TLS)" \
             "${golive[@]+"${golive[@]}"}" \
-            pages "Pages and OpenAPI: documentation pages, icons, versions.json" \
+            "${page_items[@]}" \
             logs "Logs" \
             access "Access mode (open, metered, token only)" \
             limits "Limits for anonymous callers" \
@@ -221,10 +222,12 @@ menu_deploy() {
     choice="$(ui_menu "Deploy" "What kind of domain?" \
         static "Static files synced from git repositories (one per endpoint)" \
         runtime "Runtime service (query or search) on the librarian" \
+        mcp "MCP service at its dedicated domain root" \
         back "Back")" || return 0
     case "$choice" in
         static) endpoint_source_type static; type_static_deploy_interactive ;;
         runtime) endpoint_source_type runtime; type_runtime_deploy_interactive ;;
+        mcp) endpoint_source_type mcp; type_mcp_deploy_interactive ;;
     esac
 }
 

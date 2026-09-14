@@ -1,6 +1,6 @@
 export const sections = [
     {id: 'domains', title: 'Domains', detail: 'Status, endpoints, pages, access and runtime settings'},
-    {id: 'deploy', title: 'Deploy a new domain', detail: 'Prepare a static or runtime domain'},
+    {id: 'deploy', title: 'Deploy a new domain', detail: 'Prepare a static, runtime or MCP domain'},
     {id: 'go-live', title: 'Go live', detail: 'Activate a staged domain'},
     {id: 'self-update', title: 'Update manager', detail: 'Update the native manager checkout'},
     {id: 'update', title: 'Apply all domains', detail: 'Apply the current manager to configured domains'},
@@ -55,6 +55,7 @@ export function operationLocations(spec) {
         else if (id.startsWith('certificate.')) group = 'Certificate';
         else if (id.startsWith('cloudflare.')) group = 'Cloudflare';
         else if (id.startsWith('pages.')) group = 'Pages and OpenAPI';
+        else if (id.startsWith('mcp.')) group = 'MCP service';
         else if (id === 'runtime.set') group = 'Runtime settings';
         else if (id === 'runtime.cache') group = 'Translation memory';
         else if (id.startsWith('runtime.')) group = 'Runtime services';
@@ -76,8 +77,12 @@ export function supportsDomain(spec, domain) {
     if (!domain) return true;
     const id = operationId(spec);
     const runtime = domain.type === 'runtime';
+    const staticDomain = domain.type === 'static';
+    if (Array.isArray(spec.domain_types) && !spec.domain_types.includes(domain.type)) return false;
+    if (id.startsWith('mcp.')) return domain.type === 'mcp';
     if (id.startsWith('runtime.') || ['endpoint.add_runtime', 'endpoint.default'].includes(id)) return runtime;
-    if (['endpoint.add_static', 'endpoint.change_source', 'endpoint.sync', 'endpoint.deploy_key', 'endpoint.repo_access', 'endpoint.filetypes'].includes(id)) return !runtime;
+    if (['endpoint.add_static', 'endpoint.change_source', 'endpoint.sync', 'endpoint.deploy_key', 'endpoint.repo_access', 'endpoint.filetypes'].includes(id)) return staticDomain;
+    if (['endpoint.remove', 'pages.docs', 'pages.openapi', 'pages.write'].includes(id)) return staticDomain || runtime;
     if (id === 'domain.go_live') return !domain.live;
     if (id === 'domain.stage') return domain.live;
     return true;

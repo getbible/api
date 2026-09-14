@@ -9,7 +9,8 @@ description = "Local-origin ASGI host for the getBible MCP library."
 requires-python = ">=3.11"
 license = "Apache-2.0"
 dependencies = [
-  "getbible-mcp==2.0.0",
+  "getbible-api-common",
+  "getbible-mcp==2.0.1",
   "httpx==0.28.1",
   "starlette==1.6.0",
   "gunicorn==26.2.0",

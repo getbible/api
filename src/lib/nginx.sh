@@ -203,19 +203,13 @@ nginx_render_endpoint() {
     install -d -m 0700 "$stage/getbible/tokens" "$stage/getbible/token-validity"
 
     # Type specific pieces
-    local locations methods_regex="GET|HEAD|OPTIONS" reject_args=false max_body=1k proxy_cache=false mcp=false mcp_locations
+    local locations methods_regex="GET|HEAD|OPTIONS" reject_args=false max_body=1k proxy_cache=false
     locations="$(gb_tmpdir)/locations.$slug"
     "type_${EP_TYPE}_render_locations" "$locations" || return 1
     [[ -n "${TYPE_METHODS_REGEX:-}" ]] && methods_regex="$TYPE_METHODS_REGEX"
     [[ -n "${TYPE_REJECT_ARGS:-}" ]] && reject_args="$TYPE_REJECT_ARGS"
     [[ -n "${TYPE_MAX_BODY:-}" ]] && max_body="$TYPE_MAX_BODY"
     [[ -n "${TYPE_PROXY_CACHE:-}" ]] && proxy_cache="$TYPE_PROXY_CACHE"
-    if declare -F mcp_enabled >/dev/null && mcp_enabled "$domain"; then
-        mcp=true
-        mcp_locations="$(gb_tmpdir)/mcp-locations.$slug"
-        mcp_render_location "$domain" "$mcp_locations" || return 1
-        cat "$mcp_locations" >> "$locations" || return 1
-    fi
 
     local real_ip=false origin_pulls=false
     # Cloudflare's origin-side directives follow the endpoint's mode and the
@@ -251,11 +245,11 @@ nginx_render_endpoint() {
         "IPV6=$NG_IPV6" "HTTP2_NATIVE=$http2_native" "HTTP2_LEGACY=$http2_legacy" \
         "CERT_DIR=$cert_dir" "NGINX_GB_DIR=$GB_NGINX_GB" \
         "ORIGIN_PULLS=$origin_pulls" "REAL_IP=$real_ip" "LOG_DIR=$(ep_log_dir "$domain")" \
-        "WWW_DIR=$(ep_www_dir "$domain")" "METHODS_REGEX=$methods_regex" "REJECT_ARGS=$reject_args" \
+        "WWW_DIR=$(ep_www_dir "$domain")" "METHODS_REGEX=$methods_regex" "ALLOWED_METHODS=${methods_regex//|/, }" "REJECT_ARGS=$reject_args" \
         "DOMAIN_PAGE=$domain_page" "DOMAIN_PAGE_ROOT=$domain_page_root" "DOMAIN_PAGE_FILE=$domain_page_file" \
         "FAVICON=$favicon" "FAVICON_MIME=$favicon_mime" "IMG=$img" "VERSIONS_JSON=$versions_json" \
         "DOMAIN_OPENAPI=$domain_openapi" "DOMAIN_OPENAPI_ROOT=$domain_openapi_root" "DOMAIN_OPENAPI_FILE=$domain_openapi_file" \
-        "MCP_ENABLED=$mcp" "LOCATIONS=$(cat "$locations")" || return 1
+        "LOCATIONS=$(cat "$locations")" || return 1
 
     gb_render "$GB_NGINX_SRC/endpoint-http.conf.tmpl" "$stage/conf.d/getbible-ep-$slug.conf" \
         "DOMAIN=$domain" "SLUG=$slug" "RATE_PER_SECOND=$EP_RATE_PER_SECOND" \
