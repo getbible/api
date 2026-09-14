@@ -24,8 +24,8 @@ sudo getbible deploy mcp --domain mcp.example.org --python 3.12
 
 Configure the MCP client with `https://mcp.example.org/`. The root path speaks
 MCP directly, without version folders or an additional path suffix. A normal
-browser request is not a protocol check: an MCP client initializes the session
-and negotiates capabilities before listing or calling tools.
+browser request is not a protocol check: an MCP client discovers the server's
+supported protocol versions and capabilities before listing or calling tools.
 
 Manage the domain's service:
 

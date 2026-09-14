@@ -74,7 +74,7 @@ type_mcp_deploy_cli() {
 type_mcp_deploy_interactive() {
     local domain mode python origin file cfmode
     ui_msg 'New MCP domain' 'One dedicated domain serves the MCP protocol at /. It covers every configured API version. This walkthrough gathers all settings before preparing the Python service and nginx. Publication and TLS follow the normal domain lifecycle.'
-    domain="$(ui_input 'MCP domain' 'Dedicated domain name' 'mcp.getbible.net')" || return 1
+    domain="$(ui_input 'MCP domain' 'Dedicated domain name' 'mcp.example.org')" || return 1
     gb_valid_domain "$domain" || { ui_msg 'Invalid' 'That is not a valid domain name.'; return 1; }
     ep_exists "$domain" && { ui_msg 'Exists' "$domain is already configured."; return 1; }
     GB_DEPLOY_MODE="$(endpoint_prompt_deploy_mode "$domain")" || return 1

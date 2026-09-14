@@ -130,6 +130,9 @@ for path in /mcp /mcp/ /v2 /v2/ /v3/ /versions.json /openapi.json; do
     it_check "$path is not an MCP route" 404 "$(status "$path" -H "Authorization: Bearer $MCP_IT_TOKEN")"
 done
 it_check 'unversioned root preflight stays public' 204 "$(status / -X OPTIONS)"
+MCP_IT_CORS="$(origin / -X OPTIONS -H 'Origin: https://client.example.test' -H 'Access-Control-Request-Method: POST' -H 'Access-Control-Request-Headers: mcp-method,mcp-name' -D - -o /dev/null)"
+it_check 'preflight permits the protocol method header' 'MCP-Method' "$MCP_IT_CORS"
+it_check 'preflight permits the protocol name header' 'MCP-Name' "$MCP_IT_CORS"
 it_check 'unsupported root method is rejected' 405 "$(status / -X DELETE -H "Authorization: Bearer $MCP_IT_TOKEN")"
 it_check 'method rejection advertises protocol POST' 'Allow: GET, HEAD, POST, OPTIONS' "$(origin / -X DELETE -H "Authorization: Bearer $MCP_IT_TOKEN" -D - -o /dev/null)"
 it_check 'root response overrides upstream caching' 'Cache-Control: no-store' "$(origin / -H "Authorization: Bearer $MCP_IT_TOKEN" -D - -o /dev/null)"
