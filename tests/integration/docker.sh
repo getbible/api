@@ -20,6 +20,8 @@ export GETBIBLE_DATA_ROOT="$TEST_ROOT/persistent"
 PROJECT="getbible-ci-$$"
 PROXY_PID=""
 CONTAINER=""
+MCP_DOMAIN=mcp.example.test
+MCP_ROOT=/opt/getbible/mcp/mcp_example_test
 UPGRADE_IMAGES=()
 compose() { docker compose --env-file /dev/null -p "$PROJECT" -f "$ROOT/compose.yaml" "$@"; }
 container() { compose exec -T --user root getbible "$@"; }
@@ -73,7 +75,86 @@ runtime_generations() {
             readlink -f "/opt/getbible/$kind/$label/active"
             readlink -f "/opt/getbible/$kind/$label/current"
         done
-    done'
+    done
+    readlink -f /opt/getbible/mcp/mcp_example_test/active
+    readlink -f /opt/getbible/mcp/mcp_example_test/current'
+}
+
+mcp_protocol() {
+    container "$MCP_ROOT/current/.venv/bin/python" /var/lib/getbible/mcp-acceptance.py "${1:-discovery}"
+}
+
+mcp_service_checks() {
+    # These are the actual unit, account, socket and cgroup, not rendered text.
+    # shellcheck disable=SC2016
+    container bash -Eeuo pipefail -c '
+        root=$1 domain=$2
+        generation=$(readlink -f "$root/active")
+        unit=$(cat "$generation/.unit")
+        socket=$(cat "$generation/.socket")
+        systemctl is-active --quiet "$unit.service" "$unit.socket"
+        test "$(systemctl show -p Type --value "$unit.service")" = notify
+        test "$(systemctl show -p ProtectSystem --value "$unit.service")" = strict
+        test "$(systemctl show -p NoNewPrivileges --value "$unit.service")" = yes
+        process=$(systemctl show -p MainPID --value "$unit.service")
+        test "$(sed -n "s/^Uid:[[:space:]]*\([0-9]*\).*/\1/p" "/proc/$process/status")" = "$(id -u getbible-mcp)"
+        test "$(sed -n "s/^CapEff:[[:space:]]*//p" "/proc/$process/status")" = 0000000000000000
+        memory_max=$(systemctl show -p MemoryMax --value "$unit.service")
+        test "$memory_max" = 268435456
+        control_group=$(systemctl show -p ControlGroup --value "$unit.service")
+        test "$(cat "/sys/fs/cgroup$control_group/memory.max")" = "$memory_max"
+        test -S "$socket"
+        test "$(stat -c %U:%G "$socket")" = getbible-mcp:www-data
+        test "$(stat -c %a "$socket")" = 660
+        runuser -u www-data -- test -w "$socket"
+        runuser -u getbible-mcp -- test -w "/var/log/getbible/$domain/app/mcp.log"
+        test "$(stat -c %U "/var/log/getbible/$domain/app/mcp.log")" = getbible-mcp
+        if runuser -u getbible-mcp -- test -w "$root/current"; then exit 1; fi
+        if runuser -u getbible-mcp -- test -r "/etc/getbible/endpoints/$domain/tokens.json"; then exit 1; fi
+        test ! -e "/etc/getbible/endpoints/$domain/versions"
+        expected=$(sed -n "s/^getbible-mcp==//p" /usr/share/getbible/api/src/apps/mcp/requirements.txt)
+        "$root/current/.venv/bin/python" -c "from importlib.metadata import version; import sys; assert version(\"getbible-mcp\") == sys.argv[1]" "$expected"
+        "$root/current/.venv/bin/python" -m pip check
+    ' -- "$MCP_ROOT" "$MCP_DOMAIN"
+}
+
+mcp_telemetry_check() {
+    local request_id="$1" tool="$2"
+    container /usr/bin/python3 - "$MCP_DOMAIN" "$request_id" "$tool" <<'PY'
+import json
+from pathlib import Path
+import sqlite3
+import sys
+import time
+
+domain, request_id, tool = sys.argv[1:]
+deadline = time.monotonic() + 20
+while time.monotonic() < deadline:
+    with sqlite3.connect("file:/var/lib/getbible/telemetry/traffic.sqlite3?mode=ro", uri=True) as db:
+        db.row_factory = sqlite3.Row
+        row = db.execute("SELECT * FROM requests WHERE endpoint=? AND request_id=?",
+                         (domain, request_id)).fetchone()
+    if row and row["edge_json"] and row["runtime_json"]:
+        edge, runtime = json.loads(row["edge_json"]), json.loads(row["runtime_json"])
+        assert row["endpoint_kind"] == "mcp" and row["operation"] == tool, dict(row)
+        assert row["version"] == "", dict(row)
+        assert edge["request_id"] == runtime["request_id"] == request_id
+        assert runtime["mcp_tool"] == tool and runtime["mcp_outcome"] == "success", runtime
+        assert runtime["mcp_method"] == "tools/call", runtime
+        if tool == "query_verses":
+            assert runtime["upstream_service"] == "query" and runtime["upstream_api_version"] == "v2", runtime
+        token_file = Path("/var/lib/getbible/mcp-ci-token.json")
+        if token_file.exists():
+            token = json.loads(token_file.read_text())
+            assert row["token_id"] == runtime["token"] == token["id"]
+            assert row["auth"] == runtime["auth_state"] == "valid"
+            assert token["token"] not in row["edge_json"] + row["runtime_json"]
+        print("MCP nginx and service telemetry joined:", tool, request_id)
+        break
+    time.sleep(0.25)
+else:
+    raise SystemExit("MCP request did not acquire both nginx and service telemetry")
+PY
 }
 
 compose config --quiet
@@ -118,6 +199,85 @@ manager deploy static --domain static.example.test --version v2 \
 container bash -Eeuo pipefail -c 'sync_user=$(sed -n "s/^SYNC_USER=//p" /etc/getbible/endpoints/static.example.test/endpoint.conf)
 chown -R "$sync_user" /srv/getbible/ci-origin.git'
 manager sync static.example.test v2 --force
+# Install and launch the real bundled MCP service while the container has no
+# network. The one upstream used below is the already running query fixture.
+container sh -c 'cat > /etc/getbible/mcp-fixture.env' <<'ENV'
+GETBIBLE_QUERY_V2_BASE=https://query.example.test/v2
+GETBIBLE_QUERY_V3_BASE=https://query.example.test/v3
+ENV
+container sh -c 'cat > /var/lib/getbible/mcp-acceptance.py' <<'PY'
+import asyncio
+import json
+from pathlib import Path
+import re
+import sys
+
+import httpx2
+from mcp import Client
+from mcp.client.streamable_http import streamable_http_client
+from mcp_types.version import LATEST_PROTOCOL_VERSION
+
+
+async def main():
+    request_ids = []
+
+    async def record(response):
+        if response.request.method == "POST" and response.status_code == 200:
+            request_ids.append(response.headers.get("x-request-id", ""))
+
+    headers = {"Host": "mcp.example.test"}
+    token_file = Path("/var/lib/getbible/mcp-ci-token.json")
+    if token_file.exists():
+        headers["Authorization"] = "Bearer " + json.loads(token_file.read_text())["token"]
+    # Real TCP -> nginx -> systemd socket -> Gunicorn/Uvicorn -> MCP SDK.
+    async with (
+        httpx2.AsyncClient(headers=headers, event_hooks={"response": [record]},
+                          timeout=20, trust_env=False) as http_client,
+        Client(streamable_http_client("http://127.0.0.1/", http_client=http_client,
+                                      terminate_on_close=False), cache=None) as session,
+    ):
+        assert session.protocol_version == LATEST_PROTOCOL_VERSION
+        tools = await session.list_tools()
+        assert {"discover_apis", "query_verses"} <= {tool.name for tool in tools.tools}
+        result = await session.call_tool("discover_apis", {"service": "query"})
+        assert not result.is_error, result.content
+        assert {api["version"] for api in result.structured_content["apis"]} == {"v2", "v3"}
+        tool = "discover_apis"
+        if sys.argv[1] == "query":
+            tool = "query_verses"
+            result = await session.call_tool(tool, {"translation": "test", "references": "Ge1:1", "api_version": "v2"})
+            assert not result.is_error, result.content
+            assert "test_1_1" in result.structured_content["data"], result.structured_content
+            assert result.structured_content["source"]["url"] == "https://query.example.test/v2/test/Ge1%3A1"
+        request_id = request_ids[-1]
+        assert re.fullmatch(r"[0-9a-f]{32}", request_id), request_ids
+    print(json.dumps({"request_id": request_id, "tool": tool}))
+
+
+asyncio.run(main())
+PY
+manager deploy mcp --domain "$MCP_DOMAIN" --access open --origin http://127.0.0.1:80 \
+    --env-file /etc/getbible/mcp-fixture.env --staged
+mcp_protocol query > "$TEST_ROOT/mcp-query.json"
+mcp_service_checks
+mcp_telemetry_check "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["request_id"])' "$TEST_ROOT/mcp-query.json")" query_verses
+
+# Select another interpreter from this image to exercise a real immutable
+# release change, then restore the previous release through the normal CLI.
+MCP_FIRST_GENERATION="$(container readlink -f "$MCP_ROOT/active")"
+MCP_FIRST_RELEASE="$(container readlink -f "$MCP_ROOT/current")"
+MCP_FIRST_PYTHON="$(container "$MCP_ROOT/current/.venv/bin/python" -c 'import platform; print(platform.python_version())')"
+# shellcheck disable=SC2016 # awk evaluates fields inside the container.
+MCP_NEXT_PYTHON="$(container awk -v current="$MCP_FIRST_PYTHON" '$1 !~ /^#/ && NF && $1 != current { print $1; exit }' /usr/share/getbible/runtime/distributions.lock)"
+[[ -n "$MCP_NEXT_PYTHON" ]]
+manager mcp update "$MCP_DOMAIN" --python "$MCP_NEXT_PYTHON"
+[[ "$(container readlink -f "$MCP_ROOT/current")" != "$MCP_FIRST_RELEASE" ]]
+mcp_protocol query > /dev/null
+manager mcp rollback "$MCP_DOMAIN"
+[[ "$(container readlink -f "$MCP_ROOT/current")" == "$MCP_FIRST_RELEASE" ]]
+[[ "$(container readlink -f "$MCP_ROOT/active")" != "$MCP_FIRST_GENERATION" ]]
+mcp_protocol query > /dev/null
+mcp_service_checks
 container /usr/share/getbible/api/docker/healthcheck.sh
 container curl --fail --silent -H 'Host: query.example.test' http://127.0.0.1/v2/test/Ge1:1 \
     | python3 -c 'import json,sys; assert "test_1_1" in json.load(sys.stdin)'
@@ -141,7 +301,7 @@ container bash -Eeuo pipefail -c 'for kind in query search; do
     test "$(sed -n "s/^CapEff:[[:space:]]*//p" "/proc/$process/status")" = 0000000000000000
     "/opt/getbible/$kind/v2/current/.venv/bin/python" -m pip check
 done'
-container getbible resources --json | python3 -c 'import json,sys; p=json.load(sys.stdin); assert p["enabled"] and p["cgroup_limit_bytes"] == 4*1024**3 and p["budget_bytes"] <= 4*1024**3; assert len(p["endpoints"]) == 2'
+container getbible resources --json | python3 -c 'import json,sys; p=json.load(sys.stdin); assert p["enabled"] and p["cgroup_limit_bytes"] == 4*1024**3 and p["budget_bytes"] <= 4*1024**3; assert len(p["endpoints"]) == 2 and p["mcp_reserve_bytes"] >= 512*1024**2'
 # Write from inside the running mount namespace: systemd's private temporary
 # mounts must not hide a fixture copied through Docker's archive endpoint.
 container sh -c 'cat > /run/getbible/infrastructure-ci.py' < "$ROOT/tests/integration/infrastructure.py"
@@ -178,18 +338,37 @@ TOKEN="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["token"
 manager access query.example.test token
 [[ "$(request query.example.test /v2/test/Ge1:1 -o /dev/null -w '%{http_code}')" == 401 ]]
 request query.example.test /v2/test/Ge1:1 --fail -H "Authorization: Bearer $TOKEN" > /dev/null
+manager token "$MCP_DOMAIN" add mcp-ci-token > "$TEST_ROOT/mcp-token.json"
+container sh -c 'umask 077; cat > /var/lib/getbible/mcp-ci-token.json' < "$TEST_ROOT/mcp-token.json"
+manager access "$MCP_DOMAIN" token
+[[ "$(request "$MCP_DOMAIN" / -X POST -H 'Content-Type: application/json' --data '{}' \
+    -D "$TEST_ROOT/mcp-denied.headers" -o /dev/null -w '%{http_code}')" == 401 ]]
+python3 - "$TEST_ROOT/mcp-denied.headers" <<'PY'
+from pathlib import Path
+import sys
+headers = Path(sys.argv[1]).read_text().lower().splitlines()
+assert any(line.startswith("cache-control:") and "no-store" in line for line in headers), headers
+PY
+for path in /healthz /readyz; do
+    request "$MCP_DOMAIN" "$path" --fail | python3 -c 'import json,sys; assert json.load(sys.stdin)["status"] in {"ok", "ready"}'
+done
+for path in /mcp /v2; do
+    [[ "$(request "$MCP_DOMAIN" "$path" -o /dev/null -w '%{http_code}')" == 404 ]]
+done
+# The query fixture is now private; discovery verifies MCP's own token without
+# granting it credentials for a separate upstream service.
+mcp_protocol > "$TEST_ROOT/mcp-token-call.json"
+mcp_telemetry_check "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["request_id"])' "$TEST_ROOT/mcp-token-call.json")" discover_apis
+mcp_service_checks
 container /usr/local/lib/getbible/getbible-identities show > "$TEST_ROOT/identities-before.json"
-container bash -Eeuo pipefail -c 'id getbible-query; id getbible-search; id www-data; stat -Lc "%u:%g" /srv/getbible/static.example.test/v2/test/1/1.json' > "$TEST_ROOT/owners-before"
+container bash -Eeuo pipefail -c 'id getbible-query; id getbible-search; id getbible-mcp; id www-data
+stat -Lc "%u:%g" /srv/getbible/static.example.test/v2/test/1/1.json /var/log/getbible/mcp.example.test/app/mcp.log' > "$TEST_ROOT/owners-before"
 container bash -Eeuo pipefail -c 'find /var/lib/getbible -name "*.pub" -type f -exec sha256sum {} +' > "$TEST_ROOT/keys-before"
 test -s "$TEST_ROOT/keys-before"
 container touch /var/log/getbible/recreation-sentinel
 # Preserve both the active configuration generation and immutable application
 # release. Resource refresh at image startup must not redeploy either one.
-# shellcheck disable=SC2016
-container bash -Eeuo pipefail -c 'for kind in query search; do
-    readlink -f "/opt/getbible/$kind/v2/active"
-    readlink -f "/opt/getbible/$kind/v2/current"
-done' > "$TEST_ROOT/generations-before"
+runtime_generations > "$TEST_ROOT/generations-before"
 
 # Recreate, do not merely restart: account databases and image root are fresh.
 compose down --timeout 120
@@ -202,17 +381,16 @@ compose up -d --wait --wait-timeout 240
 CONTAINER="$(compose ps -q getbible)"
 wait_image_update "$BASE_VERSION"
 container /usr/local/lib/getbible/getbible-identities show > "$TEST_ROOT/identities-after.json"
-container bash -Eeuo pipefail -c 'id getbible-query; id getbible-search; id www-data; stat -Lc "%u:%g" /srv/getbible/static.example.test/v2/test/1/1.json' > "$TEST_ROOT/owners-after"
+container bash -Eeuo pipefail -c 'id getbible-query; id getbible-search; id getbible-mcp; id www-data
+stat -Lc "%u:%g" /srv/getbible/static.example.test/v2/test/1/1.json /var/log/getbible/mcp.example.test/app/mcp.log' > "$TEST_ROOT/owners-after"
 container bash -Eeuo pipefail -c 'find /var/lib/getbible -name "*.pub" -type f -exec sha256sum {} +' > "$TEST_ROOT/keys-after"
 cmp "$TEST_ROOT/identities-before.json" "$TEST_ROOT/identities-after.json"
 cmp "$TEST_ROOT/owners-before" "$TEST_ROOT/owners-after"
 cmp "$TEST_ROOT/keys-before" "$TEST_ROOT/keys-after"
-# shellcheck disable=SC2016
-container bash -Eeuo pipefail -c 'for kind in query search; do
-    readlink -f "/opt/getbible/$kind/v2/active"
-    readlink -f "/opt/getbible/$kind/v2/current"
-done' > "$TEST_ROOT/generations-after"
+runtime_generations > "$TEST_ROOT/generations-after"
 cmp "$TEST_ROOT/generations-before" "$TEST_ROOT/generations-after"
+mcp_protocol > /dev/null
+mcp_service_checks
 container test -f /var/log/getbible/recreation-sentinel
 container systemctl is-active --quiet getbible-logrotate.timer
 container systemctl is-active --quiet getbible-sync-static_example_test-v2.timer
@@ -259,9 +437,11 @@ ARG TEST_FAILURE=false
 RUN printf '%s\n' "$TEST_VERSION" > /usr/share/getbible/api/VERSION \
     && sed -i "/^Environment=PYTHONUNBUFFERED=1$/a Environment=GETBIBLE_CI_IMAGE_RELEASE=$TEST_VERSION" \
        /usr/share/getbible/api/src/types/runtime/templates/service.tmpl \
+       /usr/share/getbible/api/src/systemd/getbible-mcp.service.tmpl \
     && if test "$TEST_FAILURE" = true; then \
          sed -i '/^ExecStartPre=/i ExecStartPre=/bin/false' \
-           /usr/share/getbible/api/src/types/runtime/templates/service.tmpl; \
+           /usr/share/getbible/api/src/types/runtime/templates/service.tmpl \
+           /usr/share/getbible/api/src/systemd/getbible-mcp.service.tmpl; \
        fi
 DOCKERFILE
 IFS=. read -r image_major image_minor image_patch <<< "$BASE_VERSION"
@@ -287,6 +467,8 @@ runtime_generations > "$TEST_ROOT/image-generations-failed"
 cmp "$TEST_ROOT/image-generations-before" "$TEST_ROOT/image-generations-failed"
 request query.example.test /v3/test/Ge1:1 --fail -H "Authorization: Bearer $TOKEN" >/dev/null
 request search.example.test /v3/test/beginning --fail >/dev/null
+mcp_protocol > /dev/null
+mcp_service_checks
 container /usr/share/getbible/api/docker/healthcheck.sh
 
 # Exercise a versioned history migration with the preceding schema's actual
@@ -325,7 +507,14 @@ container bash -Eeuo pipefail -c 'for kind in query search; do
         process=$(systemctl show -p MainPID --value "$unit")
         tr "\0" "\n" < "/proc/$process/environ" | grep -Fx "GETBIBLE_CI_IMAGE_RELEASE=$1"
     done
-done' -- "$UPGRADE_VERSION"
+done
+generation=$(readlink -f /opt/getbible/mcp/mcp_example_test/active)
+unit=$(cat "$generation/.unit")
+process=$(systemctl show -p MainPID --value "$unit.service")
+tr "\0" "\n" < "/proc/$process/environ" | grep -Fx "GETBIBLE_CI_IMAGE_RELEASE=$1"' -- "$UPGRADE_VERSION"
+mcp_protocol > "$TEST_ROOT/mcp-upgraded-call.json"
+mcp_service_checks
+mcp_telemetry_check "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["request_id"])' "$TEST_ROOT/mcp-upgraded-call.json")" discover_apis
 container /usr/bin/python3 - <<'PY'
 from pathlib import Path
 import json
@@ -381,5 +570,24 @@ container sha256sum /srv/getbible/static.example.test/v2/test/1/1.json > "$TEST_
 cmp "$TEST_ROOT/static-before" "$TEST_ROOT/static-upgraded"
 container sh -c 'cat > /run/getbible/infrastructure-ci.py' < "$ROOT/tests/integration/infrastructure.py"
 container env GB_CI_DISPOSABLE_HOST=1 "GB_TEST_QUERY_TOKEN=$TOKEN" /usr/bin/python3 /run/getbible/infrastructure-ci.py --mode docker
+# Purging one dedicated domain must stop every retained service/socket while
+# the versioned query/search APIs continue serving their existing fixtures.
+# shellcheck disable=SC2016 # Read generation records inside the container.
+container bash -Eeuo pipefail -c 'cat "$1"/deployments/*/.unit' -- "$MCP_ROOT" > "$TEST_ROOT/mcp-units"
+test -s "$TEST_ROOT/mcp-units"
+manager remove "$MCP_DOMAIN" --purge
+# shellcheck disable=SC2016 # Check removal inside the container.
+container bash -Eeuo pipefail -c 'test ! -e "$1"
+test ! -e "/etc/getbible/endpoints/$2"
+test ! -e "/etc/nginx/sites-available/$2.conf"
+test ! -L "/etc/nginx/sites-enabled/$2.conf"
+while IFS= read -r unit; do
+    for suffix in service socket; do
+        if systemctl is-active --quiet "$unit.$suffix"; then exit 1; fi
+        if systemctl is-enabled --quiet "$unit.$suffix"; then exit 1; fi
+    done
+done' -- "$MCP_ROOT" "$MCP_DOMAIN" < "$TEST_ROOT/mcp-units"
+request query.example.test /v3/test/Ge1:1 --fail -H "Authorization: Bearer $TOKEN" > /dev/null
+request search.example.test /v3/test/beginning --fail > /dev/null
 container /usr/share/getbible/api/docker/healthcheck.sh
-printf 'Docker acceptance passed: offline v2/v3 deployment, installed infrastructure, HAProxy routing, recreation, automatic image update, reporting history migration and failed-candidate recovery.\n'
+printf 'Docker acceptance passed: offline v2/v3 and MCP deployment, MCP SDK query/discovery and telemetry, service ownership, token access, rollback/removal, HAProxy routing, recreation, automatic image update, reporting history migration and failed-candidate recovery.\n'
