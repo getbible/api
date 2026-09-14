@@ -1,0 +1,22 @@
+    # One stateless MCP transport, independent of the upstream API versions.
+    location = /mcp {
+        client_max_body_size 1m;
+        include {{NGINX_GB_DIR}}/{{DOMAIN}}/auth.conf;
+        include snippets/getbible/headers.conf;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        # nginx has already applied the public domain's access policy.
+        proxy_set_header Authorization "";
+        proxy_set_header Connection "";
+        proxy_set_header X-Request-ID $request_id;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 300s;
+        proxy_hide_header Cache-Control;
+        add_header Cache-Control "no-store" always;
+        proxy_pass http://unix:{{SOCKET}}:;
+    }
+    location ^~ /mcp/ { return 404; }

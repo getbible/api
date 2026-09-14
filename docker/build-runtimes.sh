@@ -38,7 +38,7 @@ for version in "${versions[@]}"; do
     "$build_env/bin/python" -I -m pip --isolated --disable-pip-version-check install --quiet \
         --no-cache-dir --only-binary=:all: --no-deps --require-hashes \
         --requirement "$GB_SRC/python/build-requirements.txt"
-    for manifest in "$GB_APPS"/*/manifest.conf; do
+    for manifest in "$GB_APPS"/*/manifest.conf "$GB_APPS"/mcp/bundle.conf; do
         app="$(basename -- "$(dirname -- "$manifest")")"
         package="$(cfg_get "$manifest" PACKAGE)"
         [[ "$package" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]] || gb_die "Invalid runtime package in $manifest"

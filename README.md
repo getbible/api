@@ -24,6 +24,10 @@ vhost and TLS at its selected terminator; its **endpoints** are its version fold
   Candidates pass readiness before nginx switches traffic; old workers drain
   before their backend stops. The versions a kind can serve are declared by
   its implementations under `src/apps/`, never by the tool.
+- **MCP integration**: optionally attach one `/mcp` endpoint to an existing
+  domain, covering every supported API version through the installable
+  `getbible-mcp` Python library. See [MCP setup, updates and rollback](docs/MCP.md)
+  for its PyPI release prerequisite and native/Docker configuration.
 - **Pages and OpenAPI**: every endpoint has a documentation page at `/vN/`
   and an OpenAPI address at `/vN/openapi.json`, the domain page at `/` lists
   its endpoints, `versions.json` maps them to their documents, and the getBible

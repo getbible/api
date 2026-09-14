@@ -117,6 +117,30 @@ def inventory(registry: Path, runtime: Path) -> list[dict]:
     return entries
 
 
+def mcp_memory_reserve(args) -> int:
+    """Include MCP candidates and every still-draining sidecar generation."""
+    total = 0
+    for path in Path(args.registry).glob("*/endpoint.conf"):
+        enabled = config(path).get("MCP_ENABLED") == "true"
+        running = 0
+        if not args.offline:
+            # The manager records these bounded unit names alongside its
+            # immutable generation. No environment file or token is read.
+            root = Path(args.runtime_root) / "mcp" / re.sub(r"[^a-z0-9]", "_", path.parent.name)
+            for unit_path in root.glob("deployments/*/.unit"):
+                unit = unit_path.read_text().strip()
+                if not re.fullmatch(r"getbible-mcp-[a-zA-Z0-9-]+", unit):
+                    raise ValueError("Invalid saved MCP unit name")
+                result = subprocess.run([args.systemctl, "is-active", "--quiet", unit + ".service"],
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                        check=False, timeout=10)
+                running += result.returncode == 0
+        # Keep room for serving+candidate even before first deployment; a
+        # slow drain or interrupted prior switch adds its actual process cap.
+        total += max(2 if enabled else 0, running + int(enabled)) * 256 * MIB
+    return total
+
+
 def allocated(entries: list[dict], extra: int) -> tuple[list[int], int]:
     sizes = [min(item.get("maximum", 2**63), item.get("minimum", MINIMUM[item["kind"]]) + extra * item.get("weight", WEIGHT[item["kind"]])) for item in entries]
     domains: dict[str, int] = {}
@@ -321,6 +345,10 @@ def plan(args) -> dict:
         source = "cgroup (lower than configured budget)"
     policy = policy_values(args)
     reserve = max(256 * MIB, budget * bounded(policy["RESOURCE_RESERVE_PERCENT"], "RESOURCE_RESERVE_PERCENT", 5, 75) // 100)
+    # Each optional MCP sidecar has a 256-MiB process ceiling. Reserve its
+    # serving and candidate generations independently of Bible corpus budgets.
+    mcp_reserve = mcp_memory_reserve(args)
+    reserve += mcp_reserve
     available = budget - reserve
     entries = inventory(Path(args.registry), Path(args.runtime_root))
     policy = policy_values(args)
@@ -375,7 +403,8 @@ def plan(args) -> dict:
     return {"enabled": True, "source": source, "budget_bytes": budget,
             "configured_budget": args.budget, "cgroup_limit_bytes": cap,
             "cgroup_limit_path": limits["memory_path"], "cpu_capacity": limits["cpus"],
-            "infrastructure_reserve_bytes": reserve, "steady_runtime_bytes": sum(sizes),
+            "infrastructure_reserve_bytes": reserve, "mcp_reserve_bytes": mcp_reserve,
+            "steady_runtime_bytes": sum(sizes),
             "candidate_reserve_bytes": overlap, "running_bytes": running, "running_generations": live,
             "note": "Cache byte budgets bound estimated retained objects; process RSS also includes request work, shared pages and interpreter overhead. Configured warm lists are honored and may evict under a small byte budget. Runtime readiness and cgroup ceilings remain authoritative.",
             "endpoints": effective}

@@ -18,6 +18,7 @@ endpoint_source_type() {
 endpoint_apply_abort() {
     local domain="$1" reason="$2" recovery=true
     gb_warn "$reason"
+    if declare -F mcp_before_abort >/dev/null; then mcp_before_abort "$domain" || recovery=false; fi
     if declare -F "type_${EP_TYPE}_before_abort" >/dev/null; then
         "type_${EP_TYPE}_before_abort" "$domain" || recovery=false
     fi
@@ -25,6 +26,7 @@ endpoint_apply_abort() {
         gb_restore_file "$(nginx_enabled_file "$domain")" "$EP_ENABLE_BACKUP" || recovery=false
     fi
     nginx_transaction_rollback "$domain" || recovery=false
+    if [[ "$recovery" == true ]] && declare -F mcp_abort >/dev/null; then mcp_abort "$domain" || recovery=false; fi
     if declare -F "type_${EP_TYPE}_abort" >/dev/null; then
         if [[ "$recovery" == true ]]; then
             "type_${EP_TYPE}_abort" "$domain" || recovery=false
@@ -52,9 +54,12 @@ endpoint_apply() {
     ep_load "$domain" || return 1
     endpoint_source_type "$EP_TYPE" || return 1
     nginx_validate_proxy_settings || return 1
-    if [[ "$EP_TYPE" == runtime ]] && declare -F resources_reconcile >/dev/null; then
+    if { [[ "$EP_TYPE" == runtime ]] || { declare -F mcp_enabled >/dev/null && mcp_enabled "$domain"; }; } && declare -F resources_reconcile >/dev/null; then
         resources_reconcile "$domain" || return 1
         ep_load "$domain" || return 1
+    fi
+    if [[ "$EP_TYPE" != runtime ]] && declare -F mcp_enabled >/dev/null && mcp_enabled "$domain"; then
+        resources_preflight "$domain" || return 1
     fi
     ep_is_live "$domain" || live=false
     if [[ "$local_apply" == true && "$live" == true ]] && ! nginx_external_tls && ! nginx_cert_exists "$domain"; then
@@ -76,6 +81,9 @@ endpoint_apply() {
         cloudflare_protect_access "$domain" || { endpoint_apply_abort "$domain" "Could not protect shared-cache access"; return 1; }
     fi
     "type_${EP_TYPE}_prepare" "$domain" || { endpoint_apply_abort "$domain" "Preparing the domain's services failed"; return 1; }
+    if declare -F mcp_prepare >/dev/null; then
+        mcp_prepare "$domain" || { endpoint_apply_abort "$domain" "Preparing the MCP service failed"; return 1; }
+    fi
     pages_publish "$domain" || { endpoint_apply_abort "$domain" "Publishing the domain's pages failed"; return 1; }
     if [[ "$live" == false ]] && ! nginx_external_tls && ! nginx_cert_exists "$domain"; then
         certs_placeholder_ensure "$domain" || gb_warn "$domain is staged without a placeholder certificate and renders HTTP-only until one exists."
@@ -88,6 +96,9 @@ endpoint_apply() {
     rm -rf -- "$stage" || return 1
     nginx_render_global "$stage" && nginx_render_endpoint "$stage" || { endpoint_apply_abort "$domain" "nginx rendering failed"; return 1; }
     nginx_enable_site "$domain" || { endpoint_apply_abort "$domain" "Could not enable the nginx site"; return 1; }
+    if declare -F mcp_before_switch >/dev/null; then
+        mcp_before_switch "$domain" || { endpoint_apply_abort "$domain" "Preparing the MCP traffic switch failed"; return 1; }
+    fi
     if declare -F "type_${EP_TYPE}_before_switch" >/dev/null; then
         "type_${EP_TYPE}_before_switch" "$domain" || { endpoint_apply_abort "$domain" "Could not prepare the traffic switch"; return 1; }
     fi
@@ -106,7 +117,15 @@ endpoint_apply() {
             gb_log "Offline render: certificate issuance was skipped for $domain."
         fi
     fi
+    # Promote MCP pointers before the domain type can retire its old workers.
+    # A failed pointer change can therefore still restore every old backend.
+    if declare -F mcp_commit >/dev/null; then
+        mcp_commit "$domain" || { endpoint_apply_abort "$domain" "Promoting MCP failed"; return 1; }
+    fi
     "type_${EP_TYPE}_finish" "$domain" || { endpoint_apply_abort "$domain" "Activating the domain failed"; return 1; }
+    if declare -F mcp_finish >/dev/null; then
+        mcp_finish "$domain" || { endpoint_apply_abort "$domain" "Activating MCP failed"; return 1; }
+    fi
     nginx_transaction_commit "$domain" || return 1
     EP_ENABLE_BACKUP=""
     # Go-live verifies this origin before changing public DNS. The committed
@@ -160,6 +179,7 @@ endpoint_remove() {
     endpoint_source_type "$EP_TYPE"
     "type_${EP_TYPE}_remove" "$domain" "$purge"
     nginx_remove_endpoint "$domain"
+    if declare -F mcp_remove >/dev/null; then mcp_remove "$domain" "$purge" || return 1; fi
     certs_placeholder_remove "$domain"
     if [[ "$purge" == true ]]; then
         rm -rf -- "$(ep_www_dir "$domain")" "$(ep_log_dir "$domain")"

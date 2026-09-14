@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=83.0.0", "wheel>=0.46.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "getbible-mcp-api"
+version = "1.0.0"
+description = "Local-origin ASGI host for the getBible MCP library."
+requires-python = ">=3.11"
+license = "Apache-2.0"
+dependencies = [
+  "getbible-mcp==2.0.0",
+  "httpx==0.28.1",
+  "starlette==1.6.0",
+  "gunicorn==26.2.0",
+  "uvicorn-worker==0.4.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["getbible_mcp_api*"]
