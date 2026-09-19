@@ -1,5 +1,7 @@
 name: Search dispatch test environment
 on:
+  pull_request:
+    branches: [main]
   push:
     branches: [fix/search-reference-dispatch]
     paths: [.github/workflows/search-fixtures.yml]
