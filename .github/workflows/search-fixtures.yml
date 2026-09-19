@@ -1,7 +1,5 @@
-name: Search dispatch test environment
+name: Search dispatch verification sources
 on:
-  pull_request:
-    branches: [main]
   push:
     branches: [fix/search-reference-dispatch]
     paths: [.github/workflows/search-fixtures.yml]
@@ -17,16 +15,15 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
-          python-version: '3.13'
-      - name: Prepare source and dependencies
+          python-version: '3.11'
+      - name: Export snapshot and public test dependencies
         shell: bash
         run: |
+          set -euo pipefail
           mkdir -p "$RUNNER_TEMP/search-sources/wheels"
           git archive HEAD > "$RUNNER_TEMP/search-sources/api.tar"
           git rev-parse HEAD > "$RUNNER_TEMP/search-sources/api-revision.txt"
-          find src/apps -iname '*requirements*' -print
-          grep -R -n 'getbible==' src/apps | head -15 || true
-          python -m pip download --only-binary=:all: flask getbible jsonschema pytest requests gunicorn -d "$RUNNER_TEMP/search-sources/wheels"
+          python -m pip download --only-binary=:all: flask getbible jsonschema pytest requests gunicorn pydantic python-dotenv -d "$RUNNER_TEMP/search-sources/wheels"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
