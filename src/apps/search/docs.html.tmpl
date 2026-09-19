@@ -29,7 +29,7 @@ POST https://{{DOMAIN}}{{VERSION_PATH}}                        (JSON body with t
 curl "https://{{DOMAIN}}{{PREFIX}}{{DEFAULT_TRANSLATION}}/faith%20hope?words=all&amp;scope=new_testament&amp;limit=25"
 curl -X POST -H "Content-Type: application/json" \
      -d '{"q":"faith hope","scope":"new_testament","limit":25}' https://{{DOMAIN}}{{PREFIX}}{{DEFAULT_TRANSLATION}}</code></pre>
-<p>A search string that is a scripture reference, such as <code>John 3:16</code>, returns that scripture without applying full-text filters; the <code>query.kind</code> field says which happened.</p>
+<p>An explicit scripture reference with a chapter or verse, such as <code>John 3:16</code>, returns that scripture without applying full-text filters; the <code>query.kind</code> field says which happened. Bare book names, abbreviations and numbered book names without coordinates remain full-text searches, so ordinary words cannot be replaced by an implicit first verse. Use the Query API for reference-only lookup, including bare book names. A recognized explicit reference that is unavailable remains an error; it is not retried as a word search.</p>
 
 <h2>Filters</h2>
 <p>Every filter is optional. The defaults below apply to managed deployments; explicit URL or JSON values override defaults, including <code>false</code> and <code>0</code>. The <code>q</code> parameter supplies the search text when absent from the path, and <code>translation</code> defaults to <code>{{DEFAULT_TRANSLATION}}</code> when absent from the path. POST fields set to <code>null</code> leave lower-priority values unchanged.</p>
@@ -65,6 +65,7 @@ curl -X POST -H "Content-Type: application/json" \
 <tr><td>400</td><td>invalid_search, invalid_body, unknown_parameter, repeated_parameter, request_limit</td><td>The filters are invalid or over their limits.</td></tr>
 <tr><td>401</td><td>unauthorized</td><td>A bearer token is required and was missing or invalid.</td></tr>
 <tr><td>404</td><td>translation_not_found</td><td>No such translation.</td></tr>
+<tr><td>404</td><td>not_found</td><td>A recognized explicit reference is unavailable in this translation. Correct the reference; this is not a temporary service outage.</td></tr>
 {{#UNLESS IS_ROOT}}<tr><td>404</td><td>unknown_version</td><td>Only <code>{{VERSION}}</code> is served here.</td></tr>
 {{/UNLESS}}<tr><td>415</td><td>unsupported_media_type</td><td>A POST body that is not JSON.</td></tr>
 <tr><td>429</td><td>rate_limited</td><td>The public budget for your address is used up.</td></tr>
