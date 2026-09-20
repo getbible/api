@@ -9,8 +9,9 @@
 Filters travel as query-string parameters on GET or POST, or as a JSON body
 on POST. GET bodies are not read. Precedence is
 fixed: the path wins, then the query string, then the body, then the
-endpoint's configured defaults. A search string that parses as a scripture
-reference returns that scripture instead of searching.
+endpoint's configured defaults. A search string with an explicit chapter or
+verse that the librarian recognizes returns that scripture instead of searching.
+Bare book names and aliases remain full-text searches.
 """
 
 from __future__ import annotations

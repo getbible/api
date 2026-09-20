@@ -104,6 +104,13 @@ class SearchHTTPDispatchCase(EndpointCase):
                     self.assertEqual(response.mimetype, "application/problem+json")
                     self.assertEqual(response.get_json()["code"], "not_found")
 
+    def test_missing_verse_in_an_existing_chapter_remains_a_reference_error(self):
+        for method, path, response in self.responses("Genesis1:999"):
+            with self.subTest(method=method, path=path):
+                self.assertEqual(response.status_code, 400, response.get_json())
+                self.assertEqual(response.mimetype, "application/problem+json")
+                self.assertEqual(response.get_json()["code"], "invalid_reference")
+
     def test_bare_aliases_cannot_bypass_full_text_filter_validation(self):
         for text, filters in (("Job", {"limit": 0}), ("43", {"match": "substring"})):
             for method, path, response in self.responses(text, **filters):
