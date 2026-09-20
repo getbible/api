@@ -63,9 +63,10 @@ curl -X POST -H "Content-Type: application/json" \
 <tr><th>Status</th><th>Code</th><th>Meaning</th></tr>
 <tr><td>400</td><td>missing_search</td><td>No search string in the path, the <code>q</code> parameter or the body.</td></tr>
 <tr><td>400</td><td>invalid_search, invalid_body, unknown_parameter, repeated_parameter, request_limit</td><td>The filters are invalid or over their limits.</td></tr>
+<tr><td>400</td><td>invalid_reference</td><td>A recognized explicit reference selects a verse absent from an existing chapter.</td></tr>
 <tr><td>401</td><td>unauthorized</td><td>A bearer token is required and was missing or invalid.</td></tr>
 <tr><td>404</td><td>translation_not_found</td><td>No such translation.</td></tr>
-<tr><td>404</td><td>not_found</td><td>A recognized explicit reference is unavailable in this translation. Correct the reference; this is not a temporary service outage.</td></tr>
+<tr><td>404</td><td>not_found</td><td>A recognized explicit reference selects a book or chapter absent from this translation. Correct the reference; this is not a temporary service outage.</td></tr>
 {{#UNLESS IS_ROOT}}<tr><td>404</td><td>unknown_version</td><td>Only <code>{{VERSION}}</code> is served here.</td></tr>
 {{/UNLESS}}<tr><td>415</td><td>unsupported_media_type</td><td>A POST body that is not JSON.</td></tr>
 <tr><td>429</td><td>rate_limited</td><td>The public budget for your address is used up.</td></tr>

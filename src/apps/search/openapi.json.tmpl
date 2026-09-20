@@ -1,7 +1,7 @@
 {
   "info": {
     "contact": {"name":"getBible","url":"https://getBible.net"},
-    "description": "Full-text scripture search through GET URL parameters or POST URL parameters and/or JSON. Both methods use the same implementation and filters. Precedence: path, query, body, configured defaults. All filters are optional. Documentation, OpenAPI, health and readiness are public without a token. The deployment search probe is socket-only.",
+    "description": "Full-text scripture search through GET URL parameters or POST URL parameters and/or JSON. Both methods use the same implementation and filters. Precedence: path, query, body, configured defaults. All filters are optional. Reference lookup requires an explicit chapter or verse recognized by the librarian; bare book names, abbreviations, numbered names and numeric book identifiers remain full-text searches. A recognized explicit reference to a missing book or chapter returns 404 not_found; a missing verse in an existing chapter returns 400 invalid_reference. Neither is retried as a word search. Use the Query API for reference-only lookup, including bare book names. Documentation, OpenAPI, health and readiness are public without a token. The deployment search probe is socket-only.",
     "title": "getBible search endpoint",
     "version": "{{VERSION}}"
   },
@@ -103,7 +103,7 @@
       "parameters": [
         {"description":"Translation abbreviation; case-insensitive.","in":"path","name":"translation","required":true,"schema":{"type":"string"}},
         {
-          "description": "Search words or a scripture reference, URL-encoded.",
+          "description": "Search words or an explicit scripture reference with a chapter or verse, URL-encoded. Bare book names and aliases remain full-text searches.",
           "in": "path",
           "name": "search",
           "required": true,
@@ -166,7 +166,7 @@
     },
     "{{PREFIX}}{translation}": {
       "get": {
-        "description": "The path wins over query parameters. Only book and exclude may repeat. Filters override configured defaults; scripture references return scripture without applying full-text filters. GET bodies are not read.",
+        "description": "The path wins over query parameters. Only book and exclude may repeat. Filters override configured defaults; recognized explicit references with a chapter or verse return scripture without applying full-text filters; bare book names and aliases remain full-text searches. GET bodies are not read.",
         "operationId": "searchTranslation",
         "responses": {
           "200": {"$ref":"#/components/responses/SearchResult"},
@@ -206,7 +206,7 @@
         {"$ref":"#/components/parameters/offset"}
       ],
       "post": {
-        "description": "The same search implementation as GET. Path > query parameters > JSON body > configured defaults. A body is optional when q is provided in the URL. Scripture references return scripture without applying full-text filters.",
+        "description": "The same search implementation as GET. Path > query parameters > JSON body > configured defaults. A body is optional when q is provided in the URL. Recognized explicit references with a chapter or verse return scripture without applying full-text filters; bare book names and aliases remain full-text searches.",
         "operationId": "searchTranslationPost",
         "requestBody": {
           "content": {"application/json":{"example":{"limit":25,"q":"faith hope","words":"any"},"schema":{"$ref":"#/components/schemas/SearchRequest"}}},
@@ -235,7 +235,7 @@
     },
     "{{PREFIX}}{translation}/{search}": {
       "get": {
-        "description": "The path wins over query parameters. Only book and exclude may repeat. Filters override configured defaults; scripture references return scripture without applying full-text filters. GET bodies are not read.",
+        "description": "The path wins over query parameters. Only book and exclude may repeat. Filters override configured defaults; recognized explicit references with a chapter or verse return scripture without applying full-text filters; bare book names and aliases remain full-text searches. GET bodies are not read.",
         "operationId": "search",
         "responses": {
           "200": {"$ref":"#/components/responses/SearchResult"},
@@ -256,7 +256,7 @@
       "parameters": [
         {"description":"Translation abbreviation; case-insensitive.","in":"path","name":"translation","required":true,"schema":{"type":"string"}},
         {
-          "description": "Search words or a scripture reference, URL-encoded.",
+          "description": "Search words or an explicit scripture reference with a chapter or verse, URL-encoded. Bare book names and aliases remain full-text searches.",
           "in": "path",
           "name": "search",
           "required": true,
@@ -278,7 +278,7 @@
         {"$ref":"#/components/parameters/offset"}
       ],
       "post": {
-        "description": "The same search implementation as GET. Path > query parameters > JSON body > configured defaults. A body is optional when q is provided in the URL. Scripture references return scripture without applying full-text filters.",
+        "description": "The same search implementation as GET. Path > query parameters > JSON body > configured defaults. A body is optional when q is provided in the URL. Recognized explicit references with a chapter or verse return scripture without applying full-text filters; bare book names and aliases remain full-text searches.",
         "operationId": "searchPost",
         "requestBody": {
           "content": {"application/json":{"example":{"limit":25,"q":"faith hope","words":"any"},"schema":{"$ref":"#/components/schemas/SearchRequest"}}},
@@ -303,7 +303,7 @@
     },
     "{{VERSION_PATH}}": {
       "get": {
-        "description": "The path wins over query parameters. Only book and exclude may repeat. Filters override configured defaults; scripture references return scripture without applying full-text filters. GET bodies are not read. At a domain root, a request without query parameters serves the public documentation page; API requests at that path use the configured API access policy.",
+        "description": "The path wins over query parameters. Only book and exclude may repeat. Filters override configured defaults; recognized explicit references with a chapter or verse return scripture without applying full-text filters; bare book names and aliases remain full-text searches. GET bodies are not read. At a domain root, a request without query parameters serves the public documentation page; API requests at that path use the configured API access policy.",
         "operationId": "searchDefault",
         "responses": {
           "200": {"$ref":"#/components/responses/SearchResult"},
@@ -338,7 +338,7 @@
         {"$ref":"#/components/parameters/offset"}
       ],
       "post": {
-        "description": "The same search implementation as GET. Path > query parameters > JSON body > configured defaults. A body is optional when q is provided in the URL. Scripture references return scripture without applying full-text filters.",
+        "description": "The same search implementation as GET. Path > query parameters > JSON body > configured defaults. A body is optional when q is provided in the URL. Recognized explicit references with a chapter or verse return scripture without applying full-text filters; bare book names and aliases remain full-text searches.",
         "operationId": "searchDefaultPost",
         "requestBody": {
           "content": {"application/json":{"example":{"limit":25,"q":"faith hope","words":"any"},"schema":{"$ref":"#/components/schemas/SearchRequest"}}},
@@ -403,7 +403,7 @@
         "schema": {"description":"Requires words=all.","maximum":100,"minimum":0,"type":"integer"}
       },
       "q": {
-        "description": "Search words or a scripture reference; ignored when the search is supplied in the path.",
+        "description": "Search words or an explicit scripture reference with a chapter or verse; ignored when the search is supplied in the path. Bare book names and aliases remain full-text searches.",
         "in": "query",
         "name": "q",
         "schema": {"maxLength":500,"minLength":1,"type":"string"}
@@ -426,7 +426,7 @@
       },
       "SearchResult": {
         "content": {"application/json":{"schema":{"$ref":"#/components/schemas/SearchResult"}}},
-        "description": "Search result, or scripture when the text is a reference.",
+        "description": "Search result, or scripture when the text is a recognized explicit reference with a chapter or verse.",
         "headers": {"Cache-Control":{"schema":{"type":"string"}},"ETag":{"schema":{"type":"string"}},"X-Request-ID":{"schema":{"type":"string"}}}
       }
     },
