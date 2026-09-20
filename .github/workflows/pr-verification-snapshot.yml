@@ -1,0 +1,32 @@
+name: Prepare PR verification snapshot
+on:
+  push:
+    branches: [fix/search-reference-dispatch]
+    paths: [.github/workflows/pr-verification-snapshot.yml]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Export source and pinned dependency wheels
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/verification/wheels"
+          git archive HEAD > "$RUNNER_TEMP/verification/api.tar"
+          git rev-parse HEAD > "$RUNNER_TEMP/verification/revision.txt"
+          python -m pip download --only-binary=:all: -r src/apps/query/requirements.txt -r src/apps/search/requirements.txt -r src/apps/mcp/requirements.txt setuptools wheel -d "$RUNNER_TEMP/verification/wheels"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: api-pr-verification
+          path: ${{ runner.temp }}/verification/
+          retention-days: 1
