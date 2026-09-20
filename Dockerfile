@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM ubuntu:24.04
+FROM ubuntu:25.10
 
 ARG GETBIBLE_VERSION=3.1.3
 ARG GETBIBLE_REVISION=unknown
