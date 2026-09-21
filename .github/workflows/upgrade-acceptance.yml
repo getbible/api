@@ -1,0 +1,77 @@
+name: Upgrade acceptance
+
+on:
+  pull_request:
+    paths:
+      - 'getbible.sh'
+      - 'src/**'
+      - 'docker/**'
+      - 'Dockerfile'
+      - 'compose.yaml'
+      - 'tests/**'
+      - '.github/workflows/upgrade-acceptance.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upgrade-acceptance-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source:
+    name: Validation source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Preserve the exact source used by acceptance
+        run: |
+          git rev-parse HEAD > "$RUNNER_TEMP/revision.txt"
+          git archive --format=tar HEAD | gzip -1 > "$RUNNER_TEMP/source.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: upgrade-source
+          path: |
+            ${{ runner.temp }}/revision.txt
+            ${{ runner.temp }}/source.tar.gz
+          retention-days: 3
+          compression-level: 0
+
+  docker:
+    name: Disposable Docker upgrade
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build complete offline runtime image without publishing
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: getbible-api-test:ci
+          platforms: linux/amd64
+          provenance: false
+          cache-from: type=gha,scope=getbible-upgrade-amd64
+          cache-to: type=gha,mode=max,scope=getbible-upgrade-amd64
+      - name: Install acceptance prerequisites
+        run: |
+          for list in /etc/apt/sources.list.d/*; do
+            if sudo grep -qsE 'dl\.google\.com|packages\.microsoft\.com' "$list"; then
+              sudo rm -f -- "$list"
+            fi
+          done
+          sudo apt-get update
+          sudo apt-get install -y haproxy shellcheck
+      - name: Exercise actual systemd, offline deployment and container recreation
+        shell: bash
+        run: tests/integration/docker.sh 2>&1 | tee "$RUNNER_TEMP/upgrade-acceptance.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: upgrade-acceptance-log
+          path: ${{ runner.temp }}/upgrade-acceptance.log
+          if-no-files-found: ignore
+          retention-days: 7
