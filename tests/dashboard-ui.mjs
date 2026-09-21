@@ -184,6 +184,10 @@ try {
   await page.getByRole('button', {name: 'Verify and open dashboard'}).click();
   await page.getByRole('heading', {name: 'Traffic & performance'}).waitFor();
   await page.getByText('12,000', {exact: true}).waitFor();
+  await waitForFlow(100);
+  for (const label of ['Origin requests and errors by time', 'Anonymous, authenticated and rejected request breakdown']) {
+    await page.getByRole('img', {name: label, exact: true}).locator('canvas').waitFor({state: 'visible'});
+  }
   assert.ok(await page.locator('canvas').count() >= 2, 'ECharts renders the request and access charts');
   assert.ok(heartbeatRequests.length > 0, 'Authenticated viewer keeps reporting awake');
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
