@@ -151,12 +151,18 @@ def seed(store: TelemetryStore, args: argparse.Namespace, start: float) -> tuple
 def refresh(store: TelemetryStore, timeout: float) -> dict[str, Any]:
     began = time.perf_counter()
     iterations = 0
+    batches: list[float] = []
     while True:
+        tick = time.perf_counter()
         state = store.refresh_rollups(max_buckets=4, time_budget=0.25)
         store.db.commit()
+        batches.append(time.perf_counter() - tick)
         iterations += 1
         if state.get("ready"):
-            return {"seconds": time.perf_counter() - began, "iterations": iterations, "state": state}
+            ordered = sorted(batches)
+            return {"seconds": time.perf_counter() - began, "iterations": iterations, "state": state,
+                    "max_refresh_seconds": max(ordered),
+                    "p95_refresh_seconds": ordered[math.ceil(len(ordered) * 0.95) - 1]}
         if time.perf_counter() - began >= timeout:
             raise RuntimeError(f"Rollup backfill did not finish within {timeout}s: {state}")
         if iterations % 40 == 0:
