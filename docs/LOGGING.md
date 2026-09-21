@@ -70,11 +70,11 @@ by user agents. Traffic also supports a free-text search across request fields.
 
 ## Schema preparation and manual reset
 
-The collector uses telemetry schema 2. Infrastructure installation and updates
+The collector uses telemetry schema 3. Infrastructure installation and updates
 prepare history before starting telemetry and reporting. A compatible database
 is left unchanged. For the supported earlier schema, the manager first saves
 a complete SQLite snapshot, including committed WAL records, under
-`/var/backups/getbible/telemetry/traffic-schema-1-*.sqlite3`. This directory is
+`/var/backups/getbible/telemetry/traffic-schema-<version>-*.sqlite3`. This directory is
 persistent in the supplied Docker configuration. After that backup is durable,
 the manager converts the existing database in one transaction. Every original
 request, event, metric, retention record, metadata value and ingestion cursor
@@ -83,11 +83,20 @@ commits successfully; an interrupted or failed conversion rolls back.
 
 Database versions are stored in SQLite's `PRAGMA user_version`, independently
 of manager release numbers and Bible API versions. Definitions live in
-`src/apps/telemetry/getbible_telemetry/schemas/1.sql` and `schemas/2.sql`; the
-registered conversion is `migrations/1_to_2.sql`. Schema 2 adds `endpoint_kind`,
+`src/apps/telemetry/getbible_telemetry/schemas/`; registered conversions live in
+`migrations/`. Schema 2 adds `endpoint_kind`,
 `referrer` and `book_names`. The converter fills these from already-captured
 facts where available. Unknown historical values remain empty or `{}`;
 existing request values and raw JSON are preserved without fetching Bible data.
+
+Schema 3 adds hourly reporting summaries and a resumable preparation cursor.
+The migration creates these structures without scanning all historical requests.
+The collector prepares existing history in bounded batches between ingestion
+passes. Late request metadata and retention deletions invalidate affected hours,
+which are rebuilt atomically from the canonical records. Exact partial-hour
+records are combined with completed summaries when reporting a date range.
+Unique visitors and tokens are counted across the whole range, not added from
+hourly distinct counts. Report preparation never resets history.
 
 The transition preserves producer offsets and the journal cursor. Unknown or
 future schemas, unreadable databases and failed backups stop preparation while
