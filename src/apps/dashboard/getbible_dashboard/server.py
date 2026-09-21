@@ -14,7 +14,7 @@ from socketserver import ThreadingMixIn
 import threading
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from .analytics import Analytics
+from .analytics import Analytics, ReportPreparing
 from .auth import AuthError, AuthStore, canonical_ip, csrf_token
 from .broker import BrokerClient, BrokerError
 from .lifecycle import ReportingUnavailable, ViewerLifecycle
@@ -49,6 +49,8 @@ class Dashboard:
         self._watcher = None
 
     def _sleep_notice(self):
+        if hasattr(self.analytics, "clear"):
+            self.analytics.clear()
         self.audit("dashboard.sleeping")
         try:
             self.telegram.send("getBible dashboard sleeping", "All dashboard pages are inactive. Reporting has stopped; API telemetry continues.")
@@ -291,6 +293,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._problem(503 if exc.code in {"broker_unavailable", "management_refresh_pending"} else 400, exc.code, str(exc)[:256])
         except (ReportingUnavailable, CancelledError) as exc:
             self._problem(409, "reporting_unavailable", str(exc) or "Reporting is sleeping; reconnect the dashboard")
+        except ReportPreparing as exc:
+            self._json(202, {"state": "preparing", "retry_after": 2,
+                             "detail": str(exc), "progress": exc.progress})
         except sqlite3.OperationalError as exc:
             if getattr(exc, "sqlite_errorcode", None) == sqlite3.SQLITE_INTERRUPT:
                 self._problem(503, "report_timeout", "This range exceeded the reporting time budget; narrow the dates or filters and retry")
@@ -314,7 +319,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return self._json(200, self.app.broker.call("state", {"actor": {"session_id": session["id"]}}))
         if name == "sessions":
             return self._json(200, {"sessions": self.app.auth.sessions(), "current_session_id": session["id"]})
-        if name in {"overview", "history", "requests", "events", "audience", "mcp"}:
+        if name in {"overview", "history", "requests", "events", "audience", "mcp", "metrics"}:
             result = self.app.lifecycle.report(session["id"], self.app.analytics.report, name, query)
             if name == "overview":
                 result["dashboard"] = self.app.lifecycle.state()

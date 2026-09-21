@@ -17,6 +17,7 @@ const actions = [];
 const heartbeatRequests = [];
 const requests = [];
 const requestQueries = [];
+const reportResponses = [];
 const staticRoot = process.env.DASHBOARD_STATIC_ROOT || path.join(root, 'src/apps/dashboard/static');
 let jobStatus = 'succeeded';
 let jobFailures = 0;
@@ -26,12 +27,51 @@ let secretRevealed = false;
 let managementState = {refresh: {state: 'current', pending: false}, pending_jobs: 0, accepting_jobs: true};
 const now = Math.floor(Date.now() / 1000);
 const metric = {stamp: now, cpu: {capacity: 2, used_fraction: 0.34, counters: {throttled_usec: 500}}, memory: {current_bytes: 3 * 1073741824, limit_bytes: 4 * 1073741824, events: {oom_kill: 0}}, temperatures: [{sensor: 'fixture', celsius: 45}]};
+const metrics = Array.from({length: 30}, (_, i) => ({...metric, stamp: now - (30 - i) * 60}));
 const summary = {calls: 12000, requests_per_second: 13.4, unique_ips: 86, bytes: 73400320, errors: 24, rate_limited: 7, cache_hits: 9300, cache_hit_ratio: 0.775, latency_ms: {p50: 5, p95: 25, p99: 100, approximate: true}, latest_metrics: metric, retention: {first_request: now - 604800}, breakdowns: Object.fromEntries(Object.entries({auth: ['anonymous', 'valid', 'rejected'], endpoint: ['query.example.test', 'search.example.test'], translation: ['kjv', 'asv'], search: ['faith hope'], reference: ['John 3:16'], book: ['43'], referrer: ['https://reader.example.test/'], user_agent: ['Fixture reader/1.0'], ip: ['192.0.2.10'], status: ['200', '429']}).map(([key, values]) => [key, values.map((value, i) => ({value, calls: 6000 / (i + 1), bytes: 1048576, errors: i}))]))};
 for (const [dimension, values] of Object.entries(summary.breakdowns)) for (const row of values) {
   row.filters = {[dimension]: row.value, origin_only: 'true'};
   if (['translation', 'book', 'search', 'reference'].includes(dimension)) Object.assign(row.filters, {successful: 'true', usage: dimension});
   if (['search', 'reference'].includes(dimension)) row.filters.endpoint_kind = dimension === 'search' ? 'search' : 'query';
   if (dimension === 'book') row.label = 'John';
+}
+// Each planned response belongs to one resource and time range. Holding a
+// response lets the browser exercise concurrent loads and obsolete requests
+// without relying on machine-dependent network delays.
+function planReport(name, seconds, body, {status = 200, hold = false} = {}) {
+  let arrived, release, finished;
+  const requested = new Promise(resolve => {arrived = resolve;});
+  const gate = new Promise(resolve => {release = resolve;});
+  const completed = new Promise(resolve => {finished = resolve;});
+  reportResponses.push({name, seconds, body, status, arrived, gate, finished});
+  if (!hold) release();
+  return {requested, release, completed};
+}
+function historyReport(calls) {
+  return {series: [{stamp: now - 60, calls, errors: 0}, {stamp: now, calls: calls + 1, errors: 1}]};
+}
+const reportRequestCount = () => requests.filter(name => ['/api/overview', '/api/history'].includes(name)).length;
+async function renderedFlow() {
+  return page.getByRole('img', {name: 'Origin requests and errors by time', exact: true}).evaluateAll(nodes => {
+    const chart = nodes[0] && window.echarts?.getInstanceByDom(nodes[0]);
+    return chart?.getOption().series?.[0]?.data?.[0]?.[1] ?? null;
+  });
+}
+async function waitForFlow(calls) {
+  await page.waitForFunction(expected => {
+    const node = document.querySelector('[aria-label="Origin requests and errors by time"]');
+    return node && window.echarts?.getInstanceByDom(node)?.getOption().series?.[0]?.data?.[0]?.[1] === expected;
+  }, calls);
+}
+async function settleRendering() {
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+}
+async function assertHistoricalReportsDoNotPoll(label) {
+  const before = reportRequestCount();
+  if (page.clock) await page.clock.fastForward(16000);
+  else await page.waitForTimeout(16000);
+  await settleRendering();
+  assert.equal(reportRequestCount(), before, `${label} reports do not repeat an expensive historical query after 15 seconds`);
 }
 const worker = {pid: 123, rss_bytes: 134217728, private_bytes: 67108864, translation_status: {kjv: {ready: false, reason: 'Only part of the query translation is resident.'}}, cache: {ttl_seconds: 2592000, query_translations: {kjv: {chapters: 1, estimated_bytes: 17000, expired_chapters: 0}}, search_corpora: {translations: {}}}};
 const mcpRequests = [
@@ -88,6 +128,16 @@ await page.route('**/*', async route => {
     let value;
     const body = request.method() === 'POST' ? request.postDataJSON() : null;
     const name = url.pathname.slice(5);
+    const planned = reportResponses.findIndex(response => response.name === name && response.seconds === Number(url.searchParams.get('end')) - Number(url.searchParams.get('start')));
+    if (planned >= 0) {
+      const response = reportResponses.splice(planned, 1)[0];
+      response.arrived();
+      await response.gate;
+      try {
+        await route.fulfill({status: response.status, contentType: response.status >= 400 ? 'application/problem+json' : 'application/json', body: JSON.stringify(response.body)});
+      } finally {response.finished();}
+      return;
+    }
     if (name === 'jobs/job-fixture' && jobFailures > 0) {jobFailures -= 1; return route.fulfill({status: 503, contentType: 'application/problem+json', body: JSON.stringify({detail: 'The dashboard is restarting.'})});}
     if (name === 'auth/status') value = {authenticated, telegram_configured: true, ...(authenticated ? {csrf_token: 'fixture-csrf'} : {})};
     else if (name === 'auth/password') {assert.equal(body.password, 'fixture-password-only'); value = {challenge_id: 'fixture-challenge', expires_in: 60};}
@@ -98,7 +148,8 @@ await page.route('**/*', async route => {
     else if (name === 'mcp') {assert.equal(url.searchParams.get('endpoint_kind'), 'mcp'); value = mcpReport(url.searchParams);}
     else if (name === 'audience') {const breakdowns = url.searchParams.get('endpoint_kind') === 'mcp' ? mcpReport(url.searchParams).breakdowns : summary.breakdowns; value = {referrers: breakdowns.referrer, user_agents: breakdowns.user_agent};}
     else if (name === 'endpoints') value = inventory;
-    else if (name === 'history') value = {series: Array.from({length: 30}, (_, i) => ({stamp: now - (30 - i) * 60, calls: 100 + i * 10, errors: i % 3})), metrics: Array.from({length: 30}, (_, i) => ({...metric, stamp: now - (30 - i) * 60}))};
+    else if (name === 'history') value = {series: Array.from({length: 30}, (_, i) => ({stamp: now - (30 - i) * 60, calls: 100 + i * 10, errors: i % 3}))};
+    else if (name === 'metrics') value = {metrics, retention: summary.retention};
     else if (name === 'requests') value = {items: url.searchParams.get('endpoint_kind') === 'mcp' ? selectedMcpRows(url.searchParams) : [{id: 1, stamp: now, endpoint: 'query.example.test', version: 'v2', method: 'GET', path: '/v2/kjv/43/3.json', status: 200, duration_ms: 2, remote_addr: '192.0.2.10', auth: 'valid', referrer: 'https://reader.example.test/', user_agent: 'Fixture reader/1.0'}], next_cursor: null};
     else if (name === 'translations') value = {endpoints: [{domain: 'query.example.test', label: 'v2', kind: 'query', generation: 'fixture', complete: true, expected_workers: 1, workers: [worker]}, {domain: 'search.example.test', label: 'v2', kind: 'search', generation: 'fixture', complete: true, expected_workers: 9, configured_warm_translations: ['kjv'], workers: Array.from({length: 9}, (_, index) => ({...searchWorker, pid: 200 + index})), available_translations: [{translation: 'kjv', allocated_bytes: 40000000}, {translation: 'asv', allocated_bytes: 30000000}]}]};
     else if (name === 'storage') value = {components: [{name: 'Bibles', kind: 'files', bytes: 1000000000, path: '/srv/getbible'}], total_bytes: 1000000000, filesystem_available_bytes: 800000000000};
@@ -125,6 +176,7 @@ await page.route('**/*', async route => {
 });
 
 try {
+  if (page.clock) await page.clock.install();
   await page.goto('https://dashboard.example.test/');
   await page.getByLabel('Password', {exact: true}).fill('fixture-password-only');
   await page.getByRole('button', {name: 'Continue with Telegram'}).click();
@@ -140,6 +192,97 @@ try {
   await page.getByLabel('Color theme').selectOption('light');
   assert.equal(await page.locator('html').getAttribute('data-bs-theme'), 'light');
   await page.screenshot({path: path.join(root, 'test-artifacts/dashboard-light.png'), fullPage: true});
+  await assertHistoricalReportsDoNotPoll('24-hour');
+
+  const weekSummary = planReport('overview', 604800, {...summary, calls: 700007}, {hold: true});
+  planReport('history', 604800, historyReport(701));
+  await page.getByLabel('Time range', {exact: true}).selectOption('7 days');
+  await weekSummary.requested;
+  await page.getByText('12,000', {exact: true}).waitFor({state: 'hidden'});
+  await waitForFlow(701);
+  assert.equal(await page.getByText('700,007', {exact: true}).count(), 0, 'Seven-day request flow is usable while its summary is still loading');
+  weekSummary.release();
+  await page.getByText('700,007', {exact: true}).waitFor();
+  await assertHistoricalReportsDoNotPoll('Seven-day');
+
+  planReport('overview', 2592000, {...summary, calls: 3000030});
+  const monthHistory = planReport('history', 2592000, historyReport(3001), {hold: true});
+  await page.getByLabel('Time range', {exact: true}).selectOption('30 days');
+  await monthHistory.requested;
+  await page.getByText('3,000,030', {exact: true}).waitFor();
+  assert.notEqual(await renderedFlow(), 701, 'Changing range clears the old chart while the new request flow is loading');
+  monthHistory.release();
+  await waitForFlow(3001);
+  await assertHistoricalReportsDoNotPoll('Thirty-day');
+
+  const staleSummary = planReport('overview', 604800, {...summary, calls: 999999}, {hold: true});
+  const staleHistory = planReport('history', 604800, historyReport(9999), {hold: true});
+  await page.getByLabel('Time range', {exact: true}).selectOption('7 days');
+  await Promise.all([staleSummary.requested, staleHistory.requested]);
+  await page.getByText('3,000,030', {exact: true}).waitFor({state: 'hidden'});
+  assert.notEqual(await renderedFlow(), 3001, 'Neither previous-range panel stays visible while replacement requests are pending');
+  planReport('overview', 2592000, {...summary, calls: 3100030});
+  planReport('history', 2592000, historyReport(3101));
+  await page.getByLabel('Time range', {exact: true}).selectOption('30 days');
+  await page.getByText('3,100,030', {exact: true}).waitFor();
+  await waitForFlow(3101);
+  staleSummary.release(); staleHistory.release();
+  await Promise.all([staleSummary.completed, staleHistory.completed]);
+  await settleRendering();
+  assert.equal(await page.getByText('3,100,030', {exact: true}).count(), 1, 'A late summary cannot overwrite the newly selected range');
+  assert.equal(await renderedFlow(), 3101, 'A late request-flow result cannot overwrite the newly selected range');
+
+  planReport('overview', 604800, {state: 'preparing', retry_after: 2, progress: {processed: 100, total: 200}}, {status: 202});
+  const preparedSummary = planReport('overview', 604800, {...summary, calls: 700007}, {hold: true});
+  planReport('history', 604800, historyReport(701));
+  await page.getByLabel('Time range', {exact: true}).selectOption('7 days');
+  await waitForFlow(701);
+  const flowRequestsWhilePreparing = requests.filter(name => name === '/api/history').length;
+  await preparedSummary.requested;
+  await page.getByRole('status').getByText('Preparing request totals for this time range…', {exact: true}).waitFor();
+  assert.equal(await renderedFlow(), 701, 'A ready chart remains visible during summary preparation');
+  assert.equal(requests.filter(name => name === '/api/history').length, flowRequestsWhilePreparing, 'Preparation retries only the unfinished report');
+  preparedSummary.release();
+  await page.getByText('700,007', {exact: true}).waitFor();
+
+  const summaryFailure = 'Synthetic summary failure. Request flow is still available.';
+  planReport('overview', 2592000, {detail: summaryFailure}, {status: 503});
+  planReport('history', 2592000, historyReport(3001));
+  await page.getByLabel('Time range', {exact: true}).selectOption('30 days');
+  await page.getByText(`Request totals: ${summaryFailure}`, {exact: true}).waitFor();
+  await waitForFlow(3001);
+  const recoveredSummary = planReport('overview', 2592000, {...summary, calls: 3000030}, {hold: true});
+  planReport('history', 2592000, historyReport(3001));
+  await page.getByRole('button', {name: 'Refresh all', exact: true}).click();
+  await recoveredSummary.requested;
+  await page.getByText(`Request totals: ${summaryFailure}`, {exact: true}).waitFor({state: 'hidden'});
+  recoveredSummary.release();
+  await page.getByText('3,000,030', {exact: true}).waitFor();
+
+  const flowFailure = 'Synthetic request-flow failure. The summary is still available.';
+  planReport('overview', 604800, {...summary, calls: 700007});
+  planReport('history', 604800, {detail: flowFailure}, {status: 503});
+  await page.getByLabel('Time range', {exact: true}).selectOption('7 days');
+  await page.getByText('700,007', {exact: true}).waitFor();
+  await page.locator('.panel').filter({has: page.getByRole('heading', {name: 'Request flow', exact: true})}).getByText(`Request flow: ${flowFailure}`, {exact: true}).waitFor();
+  planReport('overview', 604800, {...summary, calls: 700007});
+  planReport('history', 604800, historyReport(701));
+  await page.getByRole('button', {name: 'Refresh all', exact: true}).click();
+  await waitForFlow(701);
+  await page.getByText(`Request flow: ${flowFailure}`, {exact: true}).waitFor({state: 'hidden'});
+
+  await page.getByLabel('Time range', {exact: true}).selectOption('Live');
+  await page.getByText('12,000', {exact: true}).waitFor();
+  await waitForFlow(100);
+  const nextLiveSummary = page.waitForResponse(response => new URL(response.url()).pathname === '/api/overview');
+  const nextLiveHistory = page.waitForResponse(response => new URL(response.url()).pathname === '/api/history');
+  if (page.clock) await page.clock.fastForward(2100);
+  await Promise.all([nextLiveSummary, nextLiveHistory]);
+  await page.getByLabel('Time range', {exact: true}).selectOption('24 hours');
+  await page.getByText('12,000', {exact: true}).waitFor();
+  await waitForFlow(100);
+  assert.equal(reportResponses.length, 0, 'Every planned reporting response was exercised');
+  const overviewRequestsBeforeNavigation = reportRequestCount();
   await page.locator('.panel').filter({has: page.getByRole('heading', {name: 'Frequent searches'})}).getByRole('button', {name: /faith hope/}).click();
   await page.getByText('192.0.2.10', {exact: true}).waitFor();
   assert.deepEqual(requestQueries.filter(request => request.name === '/api/requests').at(-1).query.usage, 'search');
@@ -226,6 +369,15 @@ try {
   await page.getByRole('button', {name: 'Resources', exact: true}).click();
   await page.getByText('45 °C', {exact: true}).waitFor();
   await page.getByText('Bibles', {exact: true}).waitFor();
+  assert.ok(requests.includes('/api/metrics'), 'Resource charts load their independent metrics endpoint');
+  for (const [label, expected] of [['CPU usage over time', 34], ['Memory usage over time', 3]]) {
+    const chart = page.getByRole('img', {name: label, exact: true});
+    await chart.locator('canvas').waitFor();
+    const points = await chart.evaluate(node => window.echarts.getInstanceByDom(node).getOption().series[0].data);
+    assert.equal(points.length, metrics.length, `${label} plots the metric series`);
+    assert.equal(points.at(-1)[1], expected, `${label} uses the latest independent metrics value`);
+  }
+  assert.equal(reportRequestCount(), overviewRequestsBeforeNavigation, 'Traffic, audience, MCP, translations and resources do not load hidden overview reports');
   await page.getByRole('button', {name: 'Events', exact: true}).click();
   await page.getByText('Fixture sync completed', {exact: true}).waitFor();
   await page.getByRole('button', {name: 'Manage', exact: true}).click();
@@ -268,6 +420,7 @@ try {
   await page.getByRole('dialog').getByText('succeeded', {exact: true}).waitFor();
   assert.equal(actions.at(-1).arguments.content, '<h1>Fixture page</h1>');
   await page.getByRole('button', {name: 'Close details'}).click();
+  assert.equal(reportRequestCount(), overviewRequestsBeforeNavigation, 'Event and management actions do not refresh hidden overview reports');
   await page.getByRole('button', {name: 'Overview', exact: true}).click();
   dashboardState = {state: 'unavailable', error: 'The recorded history uses an incompatible schema. Start fresh history to continue.'};
   await page.reload();
@@ -289,7 +442,7 @@ try {
   await page.getByRole('button', {name: 'Sessions', exact: true}).click();
   await page.getByText('Fixture browser', {exact: true}).waitFor();
   assert.deepEqual(failures, [], 'No browser runtime errors');
-  console.log('Dashboard browser checks passed: authentication flow, charts, scoped rankings, MCP traffic/errors/clients/robots/operations, dedicated MCP domain controls, audience filters, translation/worker layers, CLI menu navigation, waiting jobs, one-time output, themes and mobile layout.');
+  console.log('Dashboard browser checks passed: authentication flow, independent historical reports and preparation, stale-response cancellation, local failures and refresh recovery, Live-only report polling, independent resource metrics, charts, scoped rankings, MCP traffic/errors/clients/robots/operations, dedicated MCP domain controls, audience filters, translation/worker layers, CLI menu navigation, waiting jobs, one-time output, themes and mobile layout.');
 } catch (error) {
   await fs.mkdir(path.join(root, 'test-artifacts'), {recursive: true});
   await page.screenshot({path: path.join(root, 'test-artifacts/dashboard-failure.png'), fullPage: true});

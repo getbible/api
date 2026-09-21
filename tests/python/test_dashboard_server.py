@@ -21,6 +21,7 @@ from getbible_dashboard.auth import AuthStore
 from getbible_dashboard.config import Config
 from getbible_dashboard.lifecycle import ReportingUnavailable, ViewerLifecycle
 from getbible_dashboard.server import Dashboard, DashboardHTTPServer, DashboardHandler
+from getbible_dashboard.analytics import ReportPreparing
 from tests.python.test_dashboard_auth import Clock, FakeTelegram
 from getbible_telemetry.store import TelemetrySchemaError
 
@@ -143,6 +144,21 @@ class HTTPTests(unittest.TestCase):
         result = self.request("POST", "/api/dashboard/heartbeat", {"viewer_id": "viewer-123"})
         self.assertEqual(result[0], 200)
         return result
+
+    def test_report_preparation_is_retryable_and_metrics_requires_authentication(self):
+        self.assertEqual(self.request("GET", "/api/metrics")[0], 401)
+        self.login()
+        self.heartbeat()
+        status, _, _ = self.request("GET", "/api/metrics?start=1&end=2")
+        self.assertEqual(status, 200)
+        self.assertIn(("metrics", {"start": "1", "end": "2"}), self.analytics.calls)
+        progress = {"ready": False, "pending_hours": 12, "processed": 4}
+        with patch.object(self.analytics, "report", side_effect=ReportPreparing(progress)):
+            status, _, body = self.request("GET", "/api/overview?start=1&end=2")
+        self.assertEqual(status, 202)
+        self.assertEqual(body["state"], "preparing")
+        self.assertEqual(body["retry_after"], 2)
+        self.assertEqual(body["progress"], progress)
 
     def test_full_login_cookie_and_returning_browser_status(self):
         self.assertFalse(self.request("GET", "/api/auth/status")[2]["authenticated"])

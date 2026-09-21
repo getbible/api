@@ -3,6 +3,23 @@
 from datetime import datetime
 import time
 
+from .report_cache import ReportCache
+
+OVERVIEW_DIMENSIONS = (
+    "auth", "endpoint", "status", "translation", "search", "reference", "book",
+    "ip", "referrer", "user_agent",
+)
+MCP_DIMENSIONS = (
+    "endpoint", "status", "mcp_method", "mcp_tool", "mcp_client_name", "mcp_client_version",
+    "mcp_outcome", "upstream_service", "upstream_api_version", "upstream_operation",
+)
+
+
+class ReportPreparing(Exception):
+    def __init__(self, progress):
+        self.progress = progress
+        super().__init__("Preparing historical reports; collection continues")
+
 
 FILTERS = frozenset({"endpoint", "version", "status", "auth", "ip", "path", "translation",
                      "book", "search", "reference", "cache", "method", "token", "user_agent", "operation",
@@ -37,6 +54,7 @@ class Analytics:
     def __init__(self, database, store_factory=None):
         self.database = database
         self.store_factory = store_factory
+        self.cache = ReportCache(database)
 
     def store(self):
         factory = self.store_factory
@@ -50,14 +68,30 @@ class Analytics:
             store.storage()
 
     def report(self, kind, query):
+        from getbible_telemetry.store import ReportingPreparing
         start, end = query_range(query)
+        try:
+            if kind in {"overview", "history", "mcp", "audience", "metrics"}:
+                key = (kind, start, end, tuple(sorted((key, str(value)) for key, value in query.items())))
+                return self.cache.get(key, lambda: self._report(kind, query, start, end))
+            return self._report(kind, query, start, end)
+        except ReportingPreparing as exc:
+            raise ReportPreparing(exc.progress) from exc
+
+    def clear(self):
+        self.cache.clear()
+
+    def _report(self, kind, query, start, end):
         filters = {key: value for key, value in query.items() if key in FILTERS and value != ""}
         with self.store() as store:
+            # Totals, facets and raw boundary records must describe one snapshot
+            # while the collector atomically publishes new aggregates.
+            store.db.execute("BEGIN")
             if kind == "mcp":
                 if filters.get("endpoint_kind", "mcp") != "mcp":
                     raise ValueError("The MCP report requires the MCP service filter")
                 filters["endpoint_kind"] = "mcp"
-                result = store.summary(start, end, filters=filters)
+                result = store.summary(start, end, filters=filters, dimensions=MCP_DIMENSIONS)
                 bucket = max(1, int((end - start) / 2000) + 1)
                 result["series"] = store.series(start, end, bucket_seconds=bucket, filters=filters)
                 result["start"], result["end"] = start, end
@@ -67,21 +101,36 @@ class Analytics:
                 top = int(query.get("top", 100))
                 if not 1 <= top <= 1000:
                     raise ValueError("top must be between 1 and 1000")
-                return {"referrers": store.breakdown("referrer", start, end, filters=filters, top=top),
-                        "user_agents": store.breakdown("user_agent", start, end, filters=filters, top=top),
-                        "start": start, "end": end, "top": top}
+                dimension = query.get("dimension", "")
+                if dimension not in {"", "referrer", "user_agent"}:
+                    raise ValueError("dimension must be referrer or user_agent")
+                result = {"start": start, "end": end, "top": top}
+                for name, key in (("referrer", "referrers"), ("user_agent", "user_agents")):
+                    if not dimension or dimension == name:
+                        result[key] = store.breakdown(name, start, end, filters=filters, top=top)
+                return result
             if kind == "overview":
-                result = store.summary(start, end, filters=filters)
+                dimensions = OVERVIEW_DIMENSIONS
+                if "dimensions" in query:
+                    dimensions = tuple(dict.fromkeys(str(query["dimensions"]).split(",")))
+                    if any(name not in OVERVIEW_DIMENSIONS for name in dimensions):
+                        raise ValueError("Unsupported overview dimension")
+                result = store.summary(start, end, filters=filters, dimensions=dimensions)
                 metrics = store.metrics(max(start, end - 300), end, bucket_seconds=5)
                 result["latest_metrics"] = metrics[-1] if isinstance(metrics, list) and metrics else None
                 result["start"], result["end"] = start, end
                 return result
-            if kind == "history":
+            if kind in {"history", "metrics"}:
                 bucket = int(query.get("bucket_seconds", 60))
                 if not 1 <= bucket <= 86400 * 31:
                     raise ValueError("bucket_seconds must be between 1 and 2678400")
                 # Bound result size rather than silently truncating history.
                 bucket = max(bucket, int((end - start) / 2000) + 1)
+                if kind == "metrics":
+                    return {"metrics": store.metrics(start, end, bucket_seconds=max(5, bucket)),
+                            "retention": store.storage(), "start": start, "end": end,
+                            "bucket_seconds": bucket}
+                bucket = store.effective_bucket_seconds(start, end, bucket)
                 return {"series": store.series(start, end, bucket_seconds=bucket, filters=filters),
                         "metrics": store.metrics(start, end, bucket_seconds=max(5, bucket)),
                         "start": start, "end": end, "bucket_seconds": bucket}
