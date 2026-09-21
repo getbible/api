@@ -323,7 +323,7 @@ def native_recovery(manager):
     check(persistent_state() == saved, "explicit update preserves saved configuration, authentication and identities")
     new_backups = set(backups.glob("traffic-schema-1-*.sqlite3")) - previous_backups
     check(len(new_backups) == 1, "native update preserves one completed history backup")
-    for path, schema in ((new_backups.pop(), 1), (DB, 2)):
+    for path, schema in ((new_backups.pop(), 1), (DB, 3)):
         with sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5) as db:
             check(db.execute("PRAGMA user_version").fetchone()[0] == schema,
                   f"history uses its expected schema {schema}")
