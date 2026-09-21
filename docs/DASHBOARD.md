@@ -80,7 +80,7 @@ If reporting is unavailable, inspect
 The dashboard retries temporary storage failures while a viewer remains active
 and reports permission, disk, and incompatible-schema errors separately.
 Reporting history remains in place. Before the collector starts, updates use the
-stored schema version to migrate supported older history, including schema 1 to 2,
+stored schema version to migrate supported older history through schema 3,
 with a protective backup under `/var/backups/getbible/telemetry`. Records and
 ingestion cursors are preserved. The current schema needs no work;
 unknown or newer schemas remain intact and are reported for inspection. Updates
@@ -125,6 +125,19 @@ verified Cloudflare connection; do not trust arbitrary public headers. IP blocki
 affects every person sharing that public address, so keep CLI access available.
 
 ## Live reports and retained history
+
+The 24-hour, seven-day and 30-day reports use exact hourly summaries with raw
+records at the selected range boundaries. Charts covering at least a day use
+hourly or coarser intervals; totals still respect the exact selected dates.
+After an update, existing history is prepared incrementally while collection
+continues. A report that needs unfinished historical summaries displays its
+preparation state and retries automatically. No manual reset is needed.
+
+Overview totals and history charts load independently. Fixed historical ranges
+refresh when dates or filters change, or when **Refresh all** is selected. **Live**
+reports refresh after the previous request completes. Resource charts request
+only resource samples, without rebuilding traffic reports. A bounded in-memory
+cache shares identical concurrent reports and invalidates when history changes.
 
 The traffic collector runs continuously, independently of dashboard viewers.
 Nginx and runtime events enter the canonical local telemetry database, including

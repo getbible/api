@@ -56,12 +56,15 @@ operator to the host image workflow instead of changing image code through Git.
 
 Telemetry history remains in place. Before the collector starts, updates inspect
 the stored schema version and apply supported versioned migrations, including
-schema 1 to 2, after a protective backup under `/var/backups/getbible/telemetry`.
+schemas 1 and 2 through schema 3, after a protective backup under `/var/backups/getbible/telemetry`.
 Requests, events, metrics, retention records, metadata and ingestion cursors are
 preserved. Database schema versions are independent of image releases and Bible
 API versions; the stored database version determines the migration. The current
 schema is unchanged; unknown or newer schemas remain intact and report a failure.
 There is no update-time history reset. Bible source files remain unchanged.
+Schema 3 prepares historical reporting summaries incrementally after startup;
+the dashboard retries reports while their history is being prepared. This work
+runs in the collector and does not redeploy public API workers.
 
 `latest` follows accepted merges into `main`; it is not an automatic updater. Pulling and
 recreating is still necessary. Numbered tags provide repeatability. Returning
