@@ -466,7 +466,7 @@ mcp_protocol > /dev/null
 mcp_service_checks
 container /usr/share/getbible/api/docker/healthcheck.sh
 
-# Exercise a versioned history migration with the preceding schema's actual
+# Exercise a versioned history migration with an earlier schema's actual
 # table shape. Existing records and collector positions must remain usable.
 container systemctl stop getbible-telemetry.service getbible-logrotate.timer getbible-logrotate.service
 container /usr/bin/python3 - <<'PY'
@@ -518,31 +518,31 @@ snapshots = list(Path("/var/backups/getbible/telemetry").glob("traffic-schema-1-
 assert len(snapshots) == 1, snapshots
 with sqlite3.connect("file:/var/lib/getbible/state/acceptance-history.sqlite3?mode=ro", uri=True) as expected:
     expected.row_factory = sqlite3.Row
-    for path, schema in ((snapshots[0], 1), (Path("/var/lib/getbible/telemetry/traffic.sqlite3"), 2)):
+    for path, schema in ((snapshots[0], 1), (Path("/var/lib/getbible/telemetry/traffic.sqlite3"), 3)):
         with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as db:
             db.row_factory = sqlite3.Row
             assert db.execute("PRAGMA user_version").fetchone()[0] == schema
             for table, key in (("requests", "id"), ("events", "id"), ("metrics", "id"),
                                ("retention", "id"), ("metadata", "key"), ("sources", "identity")):
                 for row in expected.execute(f"SELECT * FROM {table}"):
-                    if schema == 2 and table == "metadata" and row["key"] not in {
+                    if schema == 3 and table == "metadata" and row["key"] not in {
                         "acceptance_snapshot", "collection_started", "effective_settings", "retention_policy", "journal_cursor"
                     }:
                         # Collector status, pruning timestamps and alert state
                         # are refreshed normally once collection resumes.
                         continue
-                    if schema == 2 and table == "sources" and row["closed"]:
+                    if schema == 3 and table == "sources" and row["closed"]:
                         # Consumed rotated spools may be retired normally.
                         continue
                     actual = db.execute(f"SELECT * FROM {table} WHERE {key}=?", (row[key],)).fetchone()
                     assert actual is not None, (path, table, row[key])
-                    if schema == 2 and table == "sources":
+                    if schema == 3 and table == "sources":
                         # Normal collection can advance a restored position.
                         assert actual["offset"] >= row["offset"], (path, table, row[key])
-                    elif schema == 2 and table == "metadata" and row["key"] == "journal_cursor":
+                    elif schema == 3 and table == "metadata" and row["key"] == "journal_cursor":
                         previous, current = json.loads(row["value"]), json.loads(actual["value"])
                         assert current.get("stamp", 0) >= previous.get("stamp", 0)
-                    elif schema == 2 and table == "requests" and (row["edge_json"] is None or row["runtime_json"] is None):
+                    elif schema == 3 and table == "requests" and (row["edge_json"] is None or row["runtime_json"] is None):
                         # An unmatched record may acquire its other producer
                         # after restart. Its existing raw record is retained.
                         for name in ("endpoint", "request_id", "edge_json", "runtime_json"):
