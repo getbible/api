@@ -1,9 +1,10 @@
-import React, {useEffect, useMemo, useState} from 'react';
-import {api, query, number} from './api.js';
-import {Badge, Busy, DataTable, Panel} from './components.jsx';
+import React, {useMemo} from 'react';
+import {number} from './api.js';
+import {Badge, DataTable, Panel} from './components.jsx';
 import {Chart, lineOption} from './charts.jsx';
 import Audience from './audience.jsx';
 import {mcpReportFilters, rankingFilters} from './analytics.js';
+import {useReports, ReportState} from './reporting.jsx';
 
 const breakdowns = [
     ['endpoint', 'MCP domains', 'Origin requests to the protocol endpoint at /', 'Domain'],
@@ -19,31 +20,14 @@ const breakdowns = [
 ];
 
 export default function McpTraffic({filters, range, live, refresh, onFilter, onError, onZoom}) {
-    const [report, setReport] = useState(null);
     const scoped = useMemo(() => mcpReportFilters(filters), [filters]);
-    useEffect(() => {
-        let stopped = false;
-        let timer;
-        const controller = new AbortController();
-        async function poll() {
-            const end = live ? Math.floor(Date.now() / 1000) : range.end;
-            try {
-                const result = await api(`mcp?${query({...scoped, start: live ? end - 900 : range.start, end})}`, {signal: controller.signal});
-                if (!stopped) setReport(result);
-            } catch (error) {
-                if (!stopped && error.name !== 'AbortError') onError(error);
-            }
-            if (!stopped) timer = setTimeout(poll, live ? 2000 : 15000);
-        }
-        setReport(null);
-        poll();
-        return () => {stopped = true; clearTimeout(timer); controller.abort();};
-    }, [scoped, range.start, range.end, live, refresh]);
+    const {mcp} = useReports({page: 'MCP traffic', range, live, filters: scoped, refresh, onError});
+    const report = mcp.data;
 
     function inspect(dimension, value, scope) {
         onFilter(dimension, value, rankingFilters(dimension, {value, filters: scope}, scoped));
     }
-    if (!report) return <Busy>Loading MCP traffic…</Busy>;
+    if (!report) return <ReportState report={mcp} label="MCP traffic"/>;
     const cards = [
         ['MCP requests', number(report.mcp_requests ?? report.calls), `${number(report.unique_ips)} unique IPs`],
         ['Tool calls', number(report.mcp_tool_calls), 'Recorded tools/call requests'],
@@ -53,7 +37,7 @@ export default function McpTraffic({filters, range, live, refresh, onFilter, onE
     ];
     const durationChart = lineOption(report.series || [], [['duration_ms', 'Average duration (ms)']]);
     durationChart.xAxis.axisLabel = {hideOverlap: true};
-    return <>
+    return <><ReportState report={mcp} label="MCP traffic"/>
         <p className="text-secondary">MCP origin requests are counted once, including requests rejected before protocol handling. Protocol methods and outcomes appear when captured; user agents remain available independently of declared client metadata.</p>
         <div className="metric-grid">{cards.map(([name, value, detail]) => <div className="metric panel" key={name}><span>{name}</span><strong>{value}</strong><small>{detail}</small></div>)}</div>
         <div className="overview-grid">

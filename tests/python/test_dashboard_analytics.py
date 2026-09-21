@@ -45,11 +45,52 @@ class AnalyticsTests(unittest.TestCase):
         self.assertEqual(result["latest_metrics"]["memory"]["current_bytes"], 1024)
         self.assertEqual(result["breakdowns"]["translation"][0]["value"], "kjv")
 
+    def test_report_uses_one_snapshot_and_following_read_observes_committed_ingestion(self):
+        from unittest.mock import patch
+        summary = TelemetryStore.summary
+
+        def write_after_totals(reader, *args, **kwargs):
+            result = summary(reader, *args, **kwargs)
+            with TelemetryStore(self.path) as writer:
+                writer.append({"time": 1700000003, "request_id": "new-request", "method": "GET",
+                               "uri": "/v2/kjv/Genesis1:1", "status": 200},
+                              endpoint="query.example.test", source="edge", record_key="new-edge")
+                writer.append_metric({"memory": {"current_bytes": 2048}}, stamp=1700000004)
+                writer.db.commit()
+            return result
+
+        with patch.object(TelemetryStore, "summary", write_after_totals):
+            first = self.analytics.report("overview", self.query)
+        self.assertEqual(first["calls"], 1)
+        self.assertEqual(first["latest_metrics"]["memory"]["current_bytes"], 1024)
+        second = self.analytics.report("overview", self.query)
+        self.assertEqual(second["calls"], 2)
+        self.assertEqual(second["latest_metrics"]["memory"]["current_bytes"], 2048)
+
     def test_request_details_preserve_semantics_and_filter(self):
         result = self.analytics.report("requests", {**self.query, "translation": "kjv"})
         self.assertEqual(len(result["items"]), 1)
         self.assertEqual(result["items"][0]["runtime"]["reference"], "John 3:16")
         self.assertEqual(self.analytics.report("requests", {**self.query, "translation": "missing"})["items"], [])
+
+    def test_resources_load_metrics_without_traffic_aggregations(self):
+        from unittest.mock import patch
+        with patch.object(TelemetryStore, "summary", side_effect=AssertionError("traffic not needed")), \
+                patch.object(TelemetryStore, "series", side_effect=AssertionError("traffic not needed")):
+            result = self.analytics.report("metrics", self.query)
+        self.assertEqual(result["metrics"][-1]["memory"]["current_bytes"], 1024)
+        self.assertIn("retention", result)
+
+    def test_overview_and_audience_only_compute_requested_dimensions(self):
+        result = self.analytics.report("overview", {**self.query, "dimensions": "endpoint,status"})
+        self.assertEqual(set(result["breakdowns"]), {"endpoint", "status"})
+        result = self.analytics.report("audience", {**self.query, "dimension": "referrer"})
+        self.assertIn("referrers", result)
+        self.assertNotIn("user_agents", result)
+        for kind, extra in (("overview", {"dimensions": "not_a_dimension"}),
+                            ("audience", {"dimension": "not_a_dimension"})):
+            with self.subTest(kind=kind), self.assertRaises(ValueError):
+                self.analytics.report(kind, {**self.query, **extra})
 
     def test_time_series_and_retention_storage_share_database(self):
         result = self.analytics.report("history", {**self.query, "bucket_seconds": "1"})
