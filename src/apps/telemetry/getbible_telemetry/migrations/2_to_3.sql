@@ -53,9 +53,9 @@ CREATE TABLE IF NOT EXISTS reporting_values (
     value TEXT NOT NULL, calls INTEGER NOT NULL, bytes INTEGER NOT NULL,
     duration_total REAL NOT NULL, errors INTEGER NOT NULL, samples INTEGER NOT NULL,
     label TEXT,
-    PRIMARY KEY(hour,scope_id,dimension,value)
+    PRIMARY KEY(dimension,hour,scope_id,value)
 ) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS reporting_dimension_time ON reporting_values(dimension,hour);
+CREATE INDEX IF NOT EXISTS reporting_values_time ON reporting_values(hour);
 CREATE TABLE IF NOT EXISTS reporting_hours (hour INTEGER PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS reporting_dirty (hour INTEGER PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS reporting_state (
