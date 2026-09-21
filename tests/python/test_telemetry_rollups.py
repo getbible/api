@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import io
 import math
+from contextlib import redirect_stdout
 from pathlib import Path
 import sqlite3
 import sys
@@ -336,6 +338,14 @@ class TelemetryRollupTests(unittest.TestCase):
             self.assertFalse(raised.exception.progress["ready"])
             self.assertGreater(raised.exception.progress["pending_hours"], 0)
             self.assertEqual(len(reader.requests(START, END, limit=5)["items"]), 5)
+        from getbible_telemetry.cli import main
+        for action in ("summary", "series"):
+            with self.subTest(action=action), redirect_stdout(io.StringIO()) as output:
+                status = main([action, "--db", str(self.path), "--from", str(START), "--to", str(END)])
+            self.assertEqual(status, 75)
+            pending = json.loads(output.getvalue())
+            self.assertEqual((pending["state"], pending["retry_after"]), ("preparing", 2))
+            self.assertFalse(pending["progress"]["ready"])
         before = raised.exception.progress["pending_hours"]
         progress = self.store.refresh_rollups(max_buckets=1, time_budget=10)
         self.assertEqual(progress["processed"], 1)
