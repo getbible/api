@@ -308,8 +308,10 @@ class Rollups:
 
     @staticmethod
     def _ready(alias):
-        return (f"EXISTS(SELECT 1 FROM reporting_hours h WHERE h.hour={alias}.hour) AND "
-                f"NOT EXISTS(SELECT 1 FROM reporting_dirty d WHERE d.hour={alias}.hour)")
+        # Compute eligible hours once. Correlated checks repeat two index
+        # lookups for every dimension value in a high-cardinality report.
+        return (f"{alias}.hour IN (SELECT h.hour FROM reporting_hours h "
+                "WHERE h.hour NOT IN (SELECT hour FROM reporting_dirty))")
 
     def _totals(self, plan):
         from .store import _ERROR
