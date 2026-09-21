@@ -586,7 +586,7 @@ class MigrationTests(unittest.TestCase):
         script.write_text("ALTER TABLE requests ADD COLUMN endpoint_kind TEXT NOT NULL DEFAULT '';\n"
                           "UPDATE requests SET endpoint_kind='search';\n"
                           "SELECT missing_column FROM requests;\n")
-        with patch("getbible_telemetry.store._MIGRATIONS", {1: (2, script)}):
+        with patch("getbible_telemetry.store._MIGRATIONS", {1: (SCHEMA_VERSION, script)}):
             with self.assertRaises(sqlite3.OperationalError):
                 prepare_history(self.path, self.backups)
         self.assertEqual(self.db.execute("PRAGMA user_version").fetchone()[0], 1)
@@ -595,7 +595,7 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(len(list(self.backups.glob("*.sqlite3"))), 1)
 
     def test_current_schema_with_missing_columns_is_refused_without_mutating_history(self):
-        self.db.execute("PRAGMA user_version=2")
+        self.db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         self.db.commit()
         with self.assertRaises(sqlite3.OperationalError):
             prepare_history(self.path, self.backups)
@@ -607,7 +607,7 @@ class MigrationTests(unittest.TestCase):
         script.write_text("ALTER TABLE requests ADD COLUMN endpoint_kind TEXT NOT NULL DEFAULT '';\n"
                           "WITH RECURSIVE rows(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM rows WHERE n<100000) "
                           "INSERT INTO metrics(stamp,payload) SELECT n,'{}' FROM rows;\n")
-        with patch("getbible_telemetry.store._MIGRATIONS", {1: (2, script)}), \
+        with patch("getbible_telemetry.store._MIGRATIONS", {1: (SCHEMA_VERSION, script)}), \
                 patch("getbible_telemetry.store.time.monotonic", side_effect=[0, 1, 2, 10000]):
             with self.assertRaisesRegex(sqlite3.OperationalError, "interrupted"):
                 prepare_history(self.path, self.backups)

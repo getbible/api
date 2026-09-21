@@ -484,6 +484,10 @@ class Collector:
                         self.rotate()
                         self.cleanup()
                         next_cleanup = now + 10
+                    # Historical reporting work is resumable and follows each
+                    # bounded ingestion pass. It never delays source commits or
+                    # makes ordinary request handlers maintain the database.
+                    self.store.refresh_rollups(max_buckets=4, time_budget=0.25)
                 except (sqlite3.Error, OSError) as exc:
                     self.store.db.rollback()
                     # With a full/unavailable database, durable cursors do not
