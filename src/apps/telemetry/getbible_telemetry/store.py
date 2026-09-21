@@ -16,12 +16,13 @@ import sqlite3
 import tempfile
 import time
 from datetime import datetime
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 from .catalog import LocalCatalog
+from .rollups import ReportingPreparing, Rollups, effective_bucket_seconds
 
 _SECRET_KEYS = frozenset({
     "authorization", "proxy_authorization", "password", "passwd", "otp",
@@ -68,9 +69,10 @@ def _dimension_sql(name: str) -> str:
 
 
 _USAGE = frozenset({"translation", "book", "search", "reference"})
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 _SCHEMA_ROOT = Path(__file__).with_name("schemas")
-_MIGRATIONS = {1: (2, Path(__file__).with_name("migrations") / "1_to_2.sql")}
+_MIGRATIONS = {1: (2, Path(__file__).with_name("migrations") / "1_to_2.sql"),
+               2: (3, Path(__file__).with_name("migrations") / "2_to_3.sql")}
 
 
 class TelemetrySchemaError(RuntimeError):
@@ -96,6 +98,9 @@ def reset_history(path: str | os.PathLike[str]) -> dict[str, Any]:
     db = sqlite3.connect(path, timeout=5)
     try:
         db.executescript("BEGIN IMMEDIATE;"
+                        "DROP TABLE IF EXISTS reporting_totals; DROP TABLE IF EXISTS reporting_values;"
+                        "DROP TABLE IF EXISTS reporting_scopes; DROP TABLE IF EXISTS reporting_hours;"
+                        "DROP TABLE IF EXISTS reporting_dirty; DROP TABLE IF EXISTS reporting_state;"
                         "DROP TABLE IF EXISTS requests; DROP TABLE IF EXISTS events;"
                         "DROP TABLE IF EXISTS metrics; DROP TABLE IF EXISTS retention;" + _SCHEMA)
         db.execute("DELETE FROM metadata WHERE key!='journal_cursor'")
@@ -448,6 +453,7 @@ class TelemetryStore:
             self.db.commit()
         cutoff = self.db.execute("SELECT value FROM metadata WHERE key='collection_started'").fetchone()
         self.collection_started = float(json.loads(cutoff[0])) if cutoff else 0
+        self._rollups = Rollups(self)
 
     def __enter__(self) -> "TelemetryStore":
         return self
@@ -461,6 +467,24 @@ class TelemetryStore:
     def _deadline(self) -> None:
         deadline = self._read_deadline or time.monotonic() + self.query_timeout
         self.db.set_progress_handler(lambda: int(time.monotonic() > deadline), 10_000)
+
+    effective_bucket_seconds = staticmethod(effective_bucket_seconds)
+
+    def refresh_rollups(self, max_buckets: int = 4, time_budget: float = .25) -> dict[str, Any]:
+        """Refresh bounded reporting projections after committed ingestion."""
+        return self._rollups.refresh(max_buckets=max_buckets, time_budget=time_budget)
+
+    @contextmanager
+    def _report_snapshot(self):
+        """Keep projection markers, aggregates and raw boundaries coherent."""
+        owned = not self.db.in_transaction
+        if owned:
+            self.db.execute("BEGIN")
+        try:
+            yield
+        finally:
+            if owned:
+                self.db.rollback()
 
     def append(self, entry: dict[str, Any], *, endpoint: str, source: str,
                record_key: str) -> None:
@@ -569,6 +593,14 @@ class TelemetryStore:
     def breakdown(self, dimension: str, start: float, end: float, *, endpoint: str | None = None,
                   version: str | None = None, top: int = 20,
                   filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        with self._report_snapshot():
+            result = self._rollups.breakdown(dimension, start, end, endpoint, version, top, filters)
+            return result if result is not None else self._breakdown_raw(
+                dimension, start, end, endpoint=endpoint, version=version, top=top, filters=filters)
+
+    def _breakdown_spec(self, dimension: str, start: float, end: float,
+                        endpoint: str | None = None, version: str | None = None,
+                        filters: dict[str, Any] | None = None) -> tuple[str, list[Any], dict[str, Any]]:
         if dimension not in _DIMENSIONS:
             raise ValueError("unsupported dimension: " + dimension)
         scoped = dict(filters or {})
@@ -593,12 +625,19 @@ class TelemetryStore:
             where += " AND operation='scripture'"
         elif dimension in {"translation", "book"}:
             where += " AND operation IN ('static','scripture','search','reference')"
-        self._deadline()
         column = _dimension_sql(dimension)
         if dimension in _USAGE | _MCP_DIMENSIONS | {"referrer", "user_agent"}:
             where += f" AND {column} NOT IN ('','-','[]')"
         if dimension in _USAGE:
             where += " AND method IN ('GET','HEAD','POST')"
+        return where, values, scoped
+
+    def _breakdown_raw(self, dimension: str, start: float, end: float, *, endpoint: str | None = None,
+                       version: str | None = None, top: int = 20,
+                       filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        where, values, scoped = self._breakdown_spec(dimension, start, end, endpoint, version, filters)
+        self._deadline()
+        column = _dimension_sql(dimension)
         if dimension == "book":
             rows = [dict(row) for row in self.db.execute(
                 "SELECT CAST(b.value AS TEXT) AS value,count(DISTINCT requests.id) AS calls,sum(bytes) AS bytes,"
@@ -636,7 +675,23 @@ class TelemetryStore:
 
     def summary(self, start: float, end: float, *, endpoint: str | None = None,
                 version: str | None = None, top: int = 20,
-                filters: dict[str, Any] | None = None) -> dict[str, Any]:
+                filters: dict[str, Any] | None = None,
+                dimensions: Iterable[str] | None = None) -> dict[str, Any]:
+        dimensions = tuple(_DIMENSIONS if dimensions is None else dimensions)
+        if any(dimension not in _DIMENSIONS for dimension in dimensions):
+            raise ValueError("unsupported reporting dimension")
+        with self._report_snapshot():
+            result = self._rollups.summary(start, end, endpoint, version, top, filters, dimensions)
+            return result if result is not None else self._summary_raw(
+                start, end, endpoint=endpoint, version=version, top=top, filters=filters, dimensions=dimensions)
+
+    def _summary_raw(self, start: float, end: float, *, endpoint: str | None = None,
+                     version: str | None = None, top: int = 20,
+                     filters: dict[str, Any] | None = None,
+                     dimensions: Iterable[str] | None = None) -> dict[str, Any]:
+        dimensions = tuple(_DIMENSIONS if dimensions is None else dimensions)
+        if any(dimension not in _DIMENSIONS for dimension in dimensions):
+            raise ValueError("unsupported reporting dimension")
         where, values = self._where(start, end, endpoint, version, filters=filters)
         self._deadline()
         row = self.db.execute(
@@ -657,11 +712,11 @@ class TelemetryStore:
         result["from"], result["to"] = start, end
         result["requests_per_second"] = result["calls"] / max(1, end - start)
         result["cache_hit_ratio"] = result["cache_hits"] / result["cache_requests"] if result["cache_requests"] else None
-        result["latency_ms"] = self.latency(start, end, endpoint=endpoint, version=version, filters=filters)
+        result["latency_ms"] = self._latency_raw(start, end, endpoint=endpoint, version=version, filters=filters)
         result["breakdowns"] = {dimension: ([] if dimension in _MCP_DIMENSIONS and not result["mcp_requests"] else
-                                  self.breakdown(dimension, start, end, endpoint=endpoint,
+                                  self._breakdown_raw(dimension, start, end, endpoint=endpoint,
                                   version=version, top=top, filters=filters))
-                                for dimension in _DIMENSIONS}
+                                for dimension in dimensions}
         orphan_where, orphan_values = self._where(start, end, endpoint, version, origin_only=False, filters=filters)
         result["runtime_without_edge"] = self.db.execute(
             "SELECT count(*) FROM requests WHERE edge_json IS NULL AND " + orphan_where,
@@ -672,6 +727,13 @@ class TelemetryStore:
 
     def latency(self, start: float, end: float, *, endpoint: str | None = None,
                 version: str | None = None, filters: dict[str, Any] | None = None) -> dict[str, Any]:
+        with self._report_snapshot():
+            result = self._rollups.latency(start, end, endpoint, version, filters)
+            return result if result is not None else self._latency_raw(
+                start, end, endpoint=endpoint, version=version, filters=filters)
+
+    def _latency_raw(self, start: float, end: float, *, endpoint: str | None = None,
+                     version: str | None = None, filters: dict[str, Any] | None = None) -> dict[str, Any]:
         """Exact histogram counts with explicitly approximate percentiles.
 
         SQLite aggregates all rows in SQL; memory is independent of traffic
@@ -700,6 +762,15 @@ class TelemetryStore:
     def series(self, start: float, end: float, bucket_seconds: int = 60, *,
                endpoint: str | None = None, version: str | None = None,
                filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        bucket_seconds = self.effective_bucket_seconds(start, end, bucket_seconds)
+        with self._report_snapshot():
+            result = self._rollups.series(start, end, bucket_seconds, endpoint, version, filters)
+            return result if result is not None else self._series_raw(
+                start, end, bucket_seconds, endpoint=endpoint, version=version, filters=filters)
+
+    def _series_raw(self, start: float, end: float, bucket_seconds: int = 60, *,
+                    endpoint: str | None = None, version: str | None = None,
+                    filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         bucket_seconds = max(1, int(bucket_seconds), math.ceil((end - start) / 2000))
         where, values = self._where(start, end, endpoint, version, filters=filters)
         self._deadline()
@@ -827,6 +898,7 @@ class TelemetryStore:
                     n = self.db.execute(f"DELETE FROM {table} WHERE stamp<?", (before,)).rowcount
                     deleted[table] += n
                     count += n
+                self._rollups.discard_dirty()
             return count
 
         if retention_days:
@@ -857,6 +929,7 @@ class TelemetryStore:
                     if ids:
                         self.db.executemany(f"DELETE FROM {table} WHERE id=?", [(value,) for value in ids])
                         deleted[table] += len(ids)
+                self._rollups.discard_dirty()
                 first = candidates[0]["stamp"] if first is None else min(first, candidates[0]["stamp"])
                 last = candidates[-1]["stamp"] if last is None else max(last, candidates[-1]["stamp"])
         with self.db:

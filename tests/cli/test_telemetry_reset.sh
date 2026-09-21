@@ -37,7 +37,7 @@ bash "$ROOT/getbible.sh" logs reset --discard-history --yes > "$TEST_ROOT/reset"
 python3 - "$database" <<'PY'
 import json, sqlite3, sys
 with sqlite3.connect(sys.argv[1]) as db:
-    assert db.execute('PRAGMA user_version').fetchone()[0] == 2
+    assert db.execute('PRAGMA user_version').fetchone()[0] == 3
     assert db.execute('SELECT count(*) FROM requests').fetchone()[0] == 0
     assert json.loads(db.execute("SELECT value FROM metadata WHERE key='journal_cursor'").fetchone()[0]) == 'retained-cursor'
     assert json.loads(db.execute("SELECT value FROM metadata WHERE key='collection_started'").fetchone()[0]) > 100

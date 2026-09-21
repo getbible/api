@@ -117,7 +117,7 @@ class MCPTelemetryStoreTests(unittest.TestCase):
         self.assertEqual(search["breakdowns"]["mcp_method"], [])
         self.assertEqual(self.store.summary(0, 200)["breakdowns"]["upstream_service"][0]["calls"], 1)
 
-    def test_collector_reads_spools_once_and_retains_safe_metadata_in_schema_two(self):
+    def test_collector_reads_spools_once_and_retains_safe_metadata_in_current_schema(self):
         log_root = self.root / "log"
         domain = log_root / "mcp.example.test"
         (domain / "app").mkdir(parents=True)
@@ -132,7 +132,6 @@ class MCPTelemetryStoreTests(unittest.TestCase):
             self.assertEqual(collector.ingest_file(path, endpoint, source, rotated=rotated), 0)
         self.assertEqual(self.store.summary(0, 200)["calls"], 1)
         self.assertEqual(self.store.db.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
-        self.assertEqual(SCHEMA_VERSION, 2)
         encoded = json.dumps(self.store.requests(0, 200))
         self.assertNotIn("secret-value", encoded)
         self.assertNotIn("private-token", encoded)
