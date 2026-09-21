@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 from .collector import Collector
-from .store import TelemetryStore, prepare_history, reset_history, timestamp
+from .store import ReportingPreparing, TelemetryStore, prepare_history, reset_history, timestamp
 from .catalog import LocalCatalog
 from .settings import numeric_setting
 
@@ -115,10 +115,14 @@ def main(argv: list[str] | None = None) -> int:
                           systemctl=args.systemctl)
             return 0
         common = {"endpoint": args.endpoint, "version": args.version}
-        if args.action == "summary":
-            result = store.summary(start, end, top=args.top, **common)
-        elif args.action == "series":
-            result = store.series(start, end, args.bucket, **common)
+        if args.action in {"summary", "series"}:
+            try:
+                result = (store.summary(start, end, top=args.top, **common)
+                          if args.action == "summary" else store.series(start, end, args.bucket, **common))
+            except ReportingPreparing as exc:
+                print(json.dumps({"state": "preparing", "retry_after": 2,
+                                  "detail": str(exc), "progress": exc.progress}))
+                return 75  # EX_TEMPFAIL: the running collector will prepare this history.
         elif args.action == "requests":
             result = store.requests(start, end, limit=args.limit, cursor=args.cursor, **common)
         elif args.action == "events":

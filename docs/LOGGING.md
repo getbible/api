@@ -192,6 +192,12 @@ getbible-telemetry events --from 0 --limit 100
 getbible-telemetry storage
 ```
 
+While historical summaries are being prepared, `getbible-telemetry summary`
+and `series` return JSON with `state: "preparing"`, progress and a retry interval,
+and exit with temporary-failure status 75. The collector continues preparation;
+retry the same command after the indicated interval. Detailed requests and
+events remain available during preparation.
+
 Time ranges are half open: the start is included and the end excluded.
 Request pagination follows ingestion ID so delayed runtime/rotation records
 can be discovered; timestamps still determine all range filters and pruning.
