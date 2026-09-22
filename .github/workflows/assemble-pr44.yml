@@ -1,0 +1,65 @@
+name: Assemble reviewed upgrade implementation
+
+on:
+  pull_request:
+    paths:
+      - '.github/assembly-pr44/**'
+      - '.github/workflows/assemble-pr44.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: assemble-reviewed-upgrades-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  assemble:
+    if: >-
+      github.repository == 'getbible/api' && github.event.pull_request.number == 44 &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.head_ref == 'fix/dependable-upgrades-capacity'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Verify and apply the reviewed implementation snapshot
+        env:
+          ASSEMBLY_HEAD: ${{ github.event.pull_request.head.sha }}
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          cp .github/assembly-pr44/assemble.py "$RUNNER_TEMP/assemble-upgrades.py"
+          python3 "$RUNNER_TEMP/assemble-upgrades.py" prepare
+      - name: Verify management, capacity and planner invariants
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          python3 -m unittest tests.python.test_management_releases tests.python.test_capacity tests.python.test_upgrade_plans -v
+          for test in test_config_transactions test_configuration_transactions test_mcp_upgrades test_upgrade_selection test_image_update test_serving_health test_update; do
+            bash "tests/cli/$test.sh"
+          done
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Build and test the exact pinned frontend
+        working-directory: src/apps/dashboard/ui
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build
+          npm test
+      - name: Store verified Git objects without modifying any branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 "$RUNNER_TEMP/assemble-upgrades.py" publish
+      - uses: actions/upload-artifact@v4
+        with:
+          name: upgrade-implementation-tree
+          path: ${{ runner.temp }}/upgrade-implementation-tree.json
+          retention-days: 3
+          if-no-files-found: error
