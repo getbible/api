@@ -56,6 +56,11 @@ management_release_activate() {
             return 1
         fi
     done
+    # Fresh installations retain the historical inspection path. Existing
+    # package directories stay untouched for pre-adoption processes.
+    if [[ ! -e "$GB_LIBEXEC/apps" && ! -L "$GB_LIBEXEC/apps" ]]; then
+        ln -s -- "$(management_release_root)/current/apps" "$GB_LIBEXEC/apps" || return 1
+    fi
 }
 
 management_release_recover() {
@@ -109,6 +114,7 @@ infrastructure_install() {
         gb_render "$template" "$stage/$unit" \
             "PYTHON=$python" "PREFIX=$GB_PREFIX" "ETC=$GB_ETC" "VAR=$GB_VAR" "LOG=$GB_LOG" "RUN=$GB_RUN" \
             "OPT=$GB_OPT" "SRV=$GB_SRV" "CACHE=$GB_CACHE" "LIBEXEC=$GB_LIBEXEC" "MANAGER=$GB_SELF" \
+            "MANAGEMENT_RELEASE=${GB_MANAGEMENT_CANDIDATE:-$GB_LIBEXEC}" \
             "SYSTEMCTL=$GB_SYSTEMCTL" "NGINX_USER=$GB_NGINX_USER" "NOTIFY_GROUP=$GB_NOTIFY_GROUP" "READERS_GROUP=$GB_READERS_GROUP" || return 1
     done
     management_release_activate || return 1

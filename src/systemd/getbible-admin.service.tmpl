@@ -14,7 +14,7 @@ Group=getbible-dashboard
 UMask=0077
 RuntimeDirectory=getbible-admin
 RuntimeDirectoryMode=0750
-ExecStart={{PYTHON}} {{LIBEXEC}}/getbible-admin-broker --socket {{PREFIX}}/run/getbible-admin/broker.sock --state-dir {{VAR}}/admin --manager {{MANAGER}} --runtime-control {{LIBEXEC}}/getbible-runtime-control
+ExecStart={{PYTHON}} {{MANAGEMENT_RELEASE}}/bin/getbible-admin-broker --socket {{PREFIX}}/run/getbible-admin/broker.sock --state-dir {{VAR}}/admin --manager {{MANAGER}} --runtime-control {{MANAGEMENT_RELEASE}}/bin/getbible-runtime-control
 Restart=on-failure
 RestartSec=3
 # This service runs the existing privileged manager, which must create service
