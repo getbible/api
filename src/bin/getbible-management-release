@@ -153,7 +153,25 @@ class AssetReferences(HTMLParser):
                 self.paths.append(unquote(uri.path).lstrip("/"))
 
 
+def prepare_code_permissions(path: Path) -> None:
+    """Publish only code/assets as readable; journals and settings stay private.
+
+    mkdir's mode is filtered through the caller's umask, including intermediate
+    parents. Explicit modes are required before an unprivileged service may
+    traverse the staged tree; root-only validation would otherwise hide EACCES.
+    """
+    path.chmod(0o755)
+    for member in path.rglob("*"):
+        if member.is_symlink():
+            raise ValueError("Management release must not contain symlinks")
+        if member.is_dir():
+            member.chmod(0o755)
+
+
 def validate_release(path: Path, *, verify_hashes: bool = True, execute: bool = False) -> dict:
+    for directory in (path, *(p for p in path.rglob("*") if p.is_dir())):
+        if directory.is_symlink() or directory.stat().st_mode & 0o555 != 0o555:
+            raise ValueError("Management release directory is not service-readable: " + str(directory))
     manifest = read_json(path / "manifest.json")
     if manifest.get("format") != FORMAT_VERSION or not isinstance(manifest.get("files"), dict):
         raise ValueError("Unsupported or incomplete management release: " + str(path))
@@ -198,6 +216,7 @@ class Releases:
     @contextmanager
     def locked(self):
         self.root.mkdir(parents=True, exist_ok=True, mode=0o755)
+        self.root.chmod(0o755)
         with (self.root / ".lock").open("a") as stream:
             fcntl.flock(stream, fcntl.LOCK_EX)
             yield
@@ -225,6 +244,7 @@ class Releases:
     def stage(self, source: Path) -> Path:
         manifest, files = manifest_for(source)
         self.releases.mkdir(parents=True, exist_ok=True, mode=0o755)
+        self.releases.chmod(0o755)
         candidate = self.releases / manifest["release"]["fingerprint"]
         if candidate.exists():
             try:
@@ -248,7 +268,7 @@ class Releases:
             (temporary / "apps/dashboard/release.json").chmod(0o644)
             atomic_json(temporary / "manifest.json", manifest)
             (temporary / "manifest.json").chmod(0o644)
-            temporary.chmod(0o755)
+            prepare_code_permissions(temporary)
             validate_release(temporary, execute=True)
             for directory in sorted((p for p in temporary.rglob("*") if p.is_dir()), key=lambda p: len(p.parts), reverse=True):
                 sync_directory(directory)
@@ -294,6 +314,7 @@ class Releases:
         hashes = {name: digest(path) for name, path in files.items()}
         identity = hashlib.sha256(json.dumps(hashes, sort_keys=True).encode()).hexdigest()
         self.releases.mkdir(parents=True, exist_ok=True, mode=0o755)
+        self.releases.chmod(0o755)
         target = self.releases / ("retained-" + identity)
         temporary = Path(tempfile.mkdtemp(prefix=".retain-", dir=self.releases))
         try:
@@ -310,7 +331,7 @@ class Releases:
             (temporary / "manifest.json").chmod(0o644)
             atomic_json(temporary / "apps/dashboard/release.json", marker)
             (temporary / "apps/dashboard/release.json").chmod(0o644)
-            temporary.chmod(0o755)
+            prepare_code_permissions(temporary)
             try:
                 validate_release(temporary)
             except (ValueError, SyntaxError):

@@ -8,6 +8,7 @@ GB_VERSION='test'
 GB_YES=true
 GB_UI=none
 GB_PYTHON=python3
+GB_LIB="$ROOT/src/lib"
 # shellcheck source=../../src/lib/ui.sh
 source "$ROOT/src/lib/ui.sh"
 # shellcheck source=../../src/lib/endpoint.sh
