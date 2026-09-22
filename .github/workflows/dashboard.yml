@@ -26,7 +26,21 @@ jobs:
           npm ci --ignore-scripts --no-audit --no-fund
           npm run build
           npm test
-          git diff --exit-code -- ../static
+      - name: Preserve reproducible dashboard build inputs and output
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/dashboard-build"
+          tar -czf "$RUNNER_TEMP/dashboard-build/dashboard-build.tar.gz" \
+            src/apps/dashboard/ui/node_modules src/apps/dashboard/ui/package-lock.json src/apps/dashboard/static
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dashboard-build
+          path: ${{ runner.temp }}/dashboard-build/dashboard-build.tar.gz
+          retention-days: 3
+          if-no-files-found: error
+      - name: Verify committed frontend matches the pinned build
+        run: git diff --exit-code -- src/apps/dashboard/static
       - name: Install browser test tooling
         run: |
           npm install --prefix "$RUNNER_TEMP/dashboard-browser" --no-save --no-audit --no-fund playwright@1.62.1
