@@ -1,0 +1,495 @@
+#!/usr/bin/env python3
+"""Stage, select and recover complete local management releases without downloads.
+
+The selected release lives under the persistent runtime root. Existing installed
+package directories are never overwritten: old processes retain their code and
+assets while new helpers resolve the selected immutable generation. A failed
+upgrade may select its prior code only when the retained database is compatible.
+"""
+from __future__ import annotations
+
+import argparse
+import ast
+from contextlib import closing, contextmanager
+import fcntl
+import hashlib
+from html.parser import HTMLParser
+import json
+import os
+import re
+from pathlib import Path
+import shutil
+import secrets
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import time
+from urllib.parse import unquote, urlsplit
+
+HELPERS = (
+    "getbible-admin-broker", "getbible-dashboard", "getbible-telemetry",
+    "getbible-runtime-control", "getbible-adapt", "getbible-resources", "getbible-storage-guard",
+)
+UNITS = (
+    "getbible-prepare.service", "getbible-admin.service", "getbible-dashboard.service",
+    "getbible-telemetry.service", "getbible-adapt.service", "getbible-adapt.timer",
+    "getbible-storage.service", "getbible-storage.timer", "getbible-alert@.service",
+)
+FORMAT_VERSION = 1
+
+
+def atomic_json(path: Path, value: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, temporary = tempfile.mkstemp(prefix="." + path.name + "-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(value, stream, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        sync_directory(path.parent)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def sync_directory(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def read_json(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError("Invalid management state: " + str(path))
+    return value
+
+
+def digest(path: Path) -> str:
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def tree_files(root: Path):
+    for path in sorted(root.rglob("*")):
+        if "__pycache__" in path.parts or path.suffix == ".pyc":
+            continue
+        if path.is_symlink():
+            raise ValueError("Management release sources must not contain symlinks: " + str(path))
+        if path.is_file():
+            yield path
+
+
+def source_files(source: Path) -> dict[str, Path]:
+    files = {}
+    for package in ("dashboard", "telemetry"):
+        for part in ("getbible_" + package, "static"):
+            folder = source / "src/apps" / package / part
+            if not folder.exists():
+                if part != "static":
+                    raise ValueError("Missing management package: " + str(folder))
+                continue
+            for path in tree_files(folder):
+                files[str(Path("apps") / package / part / path.relative_to(folder))] = path
+    for helper in HELPERS:
+        files["bin/" + helper] = source / "src/bin" / helper
+    for unit in UNITS:
+        files["templates/" + unit + ".tmpl"] = source / "src/systemd" / (unit + ".tmpl")
+    return files
+
+
+def schema_version(package: Path) -> int:
+    tree = ast.parse((package / "getbible_telemetry/store.py").read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "SCHEMA_VERSION" for t in node.targets):
+            value = ast.literal_eval(node.value)
+            if type(value) is int and value > 0:
+                return value
+    raise ValueError("The telemetry package has no explicit schema version")
+
+
+def database_schema(path: Path) -> int:
+    if not path.exists():
+        return 0
+    with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)) as db:
+        schema = db.execute("PRAGMA user_version").fetchone()[0]
+        if schema == 0 and db.execute("SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1").fetchone():
+            raise ValueError("Unversioned nonempty history must be preserved and inspected")
+        return schema
+
+
+def manifest_for(source: Path) -> tuple[dict, dict[str, Path]]:
+    files = source_files(source)
+    hashes = {name: digest(path) for name, path in files.items()}
+    fingerprint = hashlib.sha256(json.dumps(hashes, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    revision = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"], capture_output=True, text=True, check=False).stdout.strip()
+    if len(revision) not in (40, 64):
+        revision = "unknown"
+    version = (source / "VERSION").read_text().strip()
+    if re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", version) is None:
+        raise ValueError("Invalid manager release version")
+    marker = {"version": version, "revision": revision, "fingerprint": fingerprint}
+    return {"format": FORMAT_VERSION, "release": marker, "files": hashes,
+            "telemetry_schema": schema_version(source / "src/apps/telemetry")}, files
+
+
+class AssetReferences(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.paths = []
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        value = attrs.get("src") if tag == "script" else attrs.get("href") if tag == "link" else None
+        if value:
+            uri = urlsplit(value)
+            if not uri.scheme and not uri.netloc:
+                self.paths.append(unquote(uri.path).lstrip("/"))
+
+
+def validate_release(path: Path, *, verify_hashes: bool = True, execute: bool = False) -> dict:
+    manifest = read_json(path / "manifest.json")
+    if manifest.get("format") != FORMAT_VERSION or not isinstance(manifest.get("files"), dict):
+        raise ValueError("Unsupported or incomplete management release: " + str(path))
+    for name, expected in manifest["files"].items():
+        relative = Path(name)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError("Unsafe management release member")
+        member = path / relative
+        if not member.is_file() or member.is_symlink():
+            raise ValueError("Missing management release member: " + name)
+        if verify_hashes and digest(member) != expected:
+            raise ValueError("Management release member changed: " + name)
+        if member.suffix == ".py" or name.startswith("bin/"):
+            compile(member.read_bytes(), str(member), "exec")
+    marker = read_json(path / "apps/dashboard/release.json")
+    if marker != manifest.get("release"):
+        raise ValueError("Management release identity mismatch")
+    static = path / "apps/dashboard/static"
+    parser = AssetReferences()
+    parser.feed((static / "index.html").read_text(encoding="utf-8"))
+    for name in parser.paths:
+        relative = Path(name)
+        if ".." in relative.parts or not (static / relative).is_file():
+            raise ValueError("Dashboard references an unavailable asset: " + name)
+    if execute:
+        for helper in ("getbible-dashboard", "getbible-telemetry", "getbible-admin-broker"):
+            result = subprocess.run([sys.executable, str(path / "bin" / helper), "--help"],
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    timeout=20, check=False)
+            if result.returncode:
+                raise ValueError("Management helper import/startup validation failed: " + helper + ": "
+                                 + result.stderr.decode("utf-8", "replace")[-2000:])
+    return manifest
+
+
+class Releases:
+    def __init__(self, root: Path):
+        self.root = root.absolute()
+        self.releases = self.root / "releases"
+        self.state_file = self.root / "state.json"
+
+    @contextmanager
+    def locked(self):
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o755)
+        with (self.root / ".lock").open("a") as stream:
+            fcntl.flock(stream, fcntl.LOCK_EX)
+            yield
+
+    def resolve(self, path: str | Path) -> Path:
+        resolved = Path(path).resolve(strict=True)
+        if resolved.parent != self.releases.resolve() or not resolved.is_dir():
+            raise ValueError("Release is outside the management release directory")
+        return resolved
+
+    def current(self) -> Path | None:
+        link = self.root / "current"
+        return self.resolve(link) if link.is_symlink() else None
+
+    def switch(self, candidate: Path) -> None:
+        candidate = self.resolve(candidate)
+        temporary = self.root / (".current-" + secrets.token_hex(6))
+        try:
+            temporary.symlink_to(os.path.relpath(candidate, self.root))
+            os.replace(temporary, self.root / "current")
+            sync_directory(self.root)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def stage(self, source: Path) -> Path:
+        manifest, files = manifest_for(source)
+        self.releases.mkdir(parents=True, exist_ok=True, mode=0o755)
+        candidate = self.releases / manifest["release"]["fingerprint"]
+        if candidate.exists():
+            try:
+                if validate_release(candidate)["release"]["fingerprint"] != manifest["release"]["fingerprint"]:
+                    raise ValueError("Retained release has different inputs")
+                return candidate
+            except (ValueError, OSError, SyntaxError):
+                # Do not repair a possibly serving directory in place. Publish
+                # a fresh identical-input generation and keep the damaged copy.
+                candidate = self.releases / (candidate.name + "-" + secrets.token_hex(6))
+        temporary = Path(tempfile.mkdtemp(prefix=".prepare-", dir=self.releases))
+        try:
+            for name, source_file in files.items():
+                target = temporary / name
+                target.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+                shutil.copyfile(source_file, target)
+                target.chmod(0o755 if name.startswith("bin/") else 0o644)
+                with target.open("rb") as stream:
+                    os.fsync(stream.fileno())
+            atomic_json(temporary / "apps/dashboard/release.json", manifest["release"])
+            (temporary / "apps/dashboard/release.json").chmod(0o644)
+            atomic_json(temporary / "manifest.json", manifest)
+            (temporary / "manifest.json").chmod(0o644)
+            temporary.chmod(0o755)
+            validate_release(temporary, execute=True)
+            for directory in sorted((p for p in temporary.rglob("*") if p.is_dir()), key=lambda p: len(p.parts), reverse=True):
+                sync_directory(directory)
+            sync_directory(temporary)
+            os.replace(temporary, candidate)
+            sync_directory(self.releases)
+            return candidate
+        finally:
+            if temporary.exists():
+                shutil.rmtree(temporary)
+
+    def capture(self, libexec: Path, systemd: Path) -> Path | None:
+        """Retain the implementation already installed before first adoption.
+
+        Do not invent compatibility for an incomplete installation. Its files
+        are left untouched and a new validated release may still repair it.
+        """
+        current = self.current()
+        if current is not None:
+            return current
+        files = {}
+        for package in ("dashboard", "telemetry"):
+            for part in ("getbible_" + package, "static"):
+                folder = libexec / "apps" / package / part
+                if not folder.is_dir():
+                    if part != "static":
+                        return None
+                    continue
+                for path in tree_files(folder):
+                    files[str(Path("apps") / package / part / path.relative_to(folder))] = path
+        for helper in HELPERS:
+            path = libexec / helper
+            if not path.is_file():
+                return None
+            files["bin/" + helper] = path.resolve()
+        # Previously rendered units are valid templates with no substitutions.
+        for unit in UNITS:
+            if (systemd / unit).is_file():
+                files["templates/" + unit + ".tmpl"] = systemd / unit
+        marker = read_json(libexec / "apps/dashboard/release.json")
+        if not marker.get("fingerprint"):
+            return None
+        hashes = {name: digest(path) for name, path in files.items()}
+        identity = hashlib.sha256(json.dumps(hashes, sort_keys=True).encode()).hexdigest()
+        self.releases.mkdir(parents=True, exist_ok=True, mode=0o755)
+        target = self.releases / ("retained-" + identity)
+        temporary = Path(tempfile.mkdtemp(prefix=".retain-", dir=self.releases))
+        try:
+            for name, source in files.items():
+                member = temporary / name
+                member.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+                shutil.copyfile(source, member)
+                member.chmod(0o755 if name.startswith("bin/") else 0o644)
+                with member.open("rb") as stream:
+                    os.fsync(stream.fileno())
+            manifest = {"format": FORMAT_VERSION, "release": marker, "files": hashes,
+                        "telemetry_schema": schema_version(temporary / "apps/telemetry"), "retained": True}
+            atomic_json(temporary / "manifest.json", manifest)
+            (temporary / "manifest.json").chmod(0o644)
+            atomic_json(temporary / "apps/dashboard/release.json", marker)
+            (temporary / "apps/dashboard/release.json").chmod(0o644)
+            temporary.chmod(0o755)
+            try:
+                validate_release(temporary)
+            except (ValueError, SyntaxError):
+                # Keep the original legacy installation untouched, but do not
+                # advertise broken/incomplete old code as a recovery release.
+                return None
+            for directory in sorted((p for p in temporary.rglob("*") if p.is_dir()), key=lambda p: len(p.parts), reverse=True):
+                sync_directory(directory)
+            sync_directory(temporary)
+            if target.exists():
+                validate_release(target)
+            else:
+                os.replace(temporary, target)
+                sync_directory(self.releases)
+            self.switch(target)
+            return target
+        finally:
+            if temporary.exists():
+                shutil.rmtree(temporary)
+
+    def select(self, candidate: Path, systemd: Path) -> bool:
+        candidate = self.resolve(candidate)
+        validate_release(candidate)
+        current = self.current()
+        saved = read_json(self.state_file)
+        if saved and saved.get("format") != FORMAT_VERSION:
+            raise ValueError("Unsupported management activation journal")
+        phase = saved.get("phase")
+        if phase not in (None, "current", "selected", "failed", "degraded", "recovery-required", "rolled-back"):
+            raise ValueError("Management recovery must complete before another activation")
+        if candidate == current:
+            return False
+        unfinished = phase in {"selected", "failed", "degraded", "recovery-required"}
+        previous = current
+        if unfinished and saved.get("candidate") == str(current):
+            # A forward retry must keep the original known-good recovery point,
+            # not replace it with a never-verified failed candidate.
+            previous = self.resolve(saved["previous"]) if saved.get("previous") else None
+            backup = Path(saved["unit_backup"]).resolve(strict=True)
+            if backup.parent != self.root.resolve() or not backup.name.startswith("units-"):
+                raise ValueError("Invalid management unit recovery directory")
+        else:
+            backup = Path(tempfile.mkdtemp(prefix="units-", dir=self.root))
+            snapshots = {}
+            for unit in UNITS:
+                source = systemd / unit
+                snapshots[unit] = source.is_file()
+                if source.is_file():
+                    shutil.copy2(source, backup / unit)
+                    with (backup / unit).open("rb") as stream:
+                        os.fsync(stream.fileno())
+            atomic_json(backup / "files.json", snapshots)
+            sync_directory(backup)
+        state = {"format": FORMAT_VERSION, "phase": "selected", "candidate": str(candidate),
+                 "previous": str(previous) if previous else None, "unit_backup": str(backup),
+                 "started_at": time.time(), "detail": "Management activation requires health verification"}
+        atomic_json(self.state_file, state)
+        self.switch(candidate)
+        return True
+
+    def finish(self, status: str, detail: str = "") -> None:
+        state = read_json(self.state_file)
+        state.update(format=FORMAT_VERSION, phase=status, updated_at=time.time(), detail=detail[:2000])
+        if status == "current":
+            current = self.current()
+            if current is None:
+                raise ValueError("No selected management release")
+            state["applied_fingerprint"] = validate_release(current)["release"]["fingerprint"]
+        atomic_json(self.state_file, state)
+
+    def rollback(self, db: Path, systemd: Path) -> bool:
+        state = read_json(self.state_file)
+        previous = state.get("previous")
+        if not previous:
+            self.finish("recovery-required", "No compatible retained management release; retry the desired release")
+            return False
+        previous = self.resolve(previous)
+        manifest = validate_release(previous)
+        schema = database_schema(db)
+        if schema not in (0, manifest["telemetry_schema"]):
+            self.finish("recovery-required", "Database migration committed; history is preserved and requires compatible forward recovery")
+            return False
+        backup = Path(state["unit_backup"]).resolve(strict=True)
+        if backup.parent != self.root.resolve() or not backup.name.startswith("units-"):
+            raise ValueError("Invalid management unit recovery directory")
+        snapshots = read_json(backup / "files.json")
+        if set(snapshots) != set(UNITS):
+            raise ValueError("Incomplete management unit recovery manifest")
+        # Refuse missing backups before changing either the serving pointer or
+        # any unit. An interrupted restoration is then safely repeatable.
+        for unit, existed in snapshots.items():
+            if type(existed) is not bool or (existed and not (backup / unit).is_file()):
+                raise ValueError("Missing management unit recovery member: " + unit)
+        self.finish("restoring", "Restoring compatible management code and service definitions")
+        self.switch(previous)
+        for unit, existed in snapshots.items():
+            target = systemd / unit
+            if existed:
+                fd, temporary = tempfile.mkstemp(prefix=".restore-", dir=systemd)
+                os.close(fd)
+                try:
+                    shutil.copy2(backup / unit, temporary)
+                    with open(temporary, "rb") as stream:
+                        os.fsync(stream.fileno())
+                    os.replace(temporary, target)
+                finally:
+                    Path(temporary).unlink(missing_ok=True)
+            else:
+                target.unlink(missing_ok=True)
+        sync_directory(systemd)
+        self.finish("rolled-back", "Prior compatible management code restored; desired release remains pending")
+        return True
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("action", choices=("manifest", "stage", "current", "select", "finish", "rollback", "status", "schema", "validate", "capture", "recover"))
+    parser.add_argument("--root", type=Path, default=Path("/opt/getbible/management"))
+    parser.add_argument("--source", type=Path)
+    parser.add_argument("--libexec", type=Path, default=Path("/usr/local/lib/getbible"))
+    parser.add_argument("--candidate", type=Path)
+    parser.add_argument("--systemd", type=Path, default=Path("/etc/systemd/system"))
+    parser.add_argument("--db", type=Path, default=Path("/var/lib/getbible/telemetry/traffic.sqlite3"))
+    parser.add_argument("--status", choices=("current", "degraded", "failed", "recovery-required"), default="current")
+    parser.add_argument("--detail", default="")
+    args = parser.parse_args(argv)
+    releases = Releases(args.root)
+    if args.action == "manifest":
+        if args.source is None:
+            parser.error("manifest requires --source")
+        print(json.dumps(manifest_for(args.source)[0]["release"], sort_keys=True))
+    elif args.action == "schema":
+        print(database_schema(args.db))
+    elif args.action == "current":
+        current = releases.current()
+        print(str(current) if current else "")
+    elif args.action == "status":
+        current = releases.current()
+        state = read_json(releases.state_file)
+        state["current"] = str(current) if current else None
+        try:
+            state["release"] = validate_release(current)["release"] if current else None
+            state["integrity"] = "valid" if current else "unmanaged"
+        except (ValueError, OSError, SyntaxError) as exc:
+            state["integrity"] = "invalid"
+            state["integrity_error"] = str(exc)
+        print(json.dumps(state, sort_keys=True))
+    elif args.action == "validate":
+        candidate = args.candidate or releases.current()
+        if candidate is None:
+            raise ValueError("No management release selected")
+        print(json.dumps(validate_release(candidate)["release"], sort_keys=True))
+    else:
+        with releases.locked():
+            if args.action == "stage":
+                if args.source is None:
+                    parser.error("stage requires --source")
+                print(releases.stage(args.source))
+            elif args.action == "capture":
+                captured = releases.capture(args.libexec, args.systemd)
+                print(str(captured) if captured else "")
+            elif args.action == "select":
+                if args.candidate is None:
+                    parser.error("select requires --candidate")
+                print("changed" if releases.select(args.candidate, args.systemd) else "unchanged")
+            elif args.action == "finish":
+                releases.finish(args.status, args.detail)
+            elif args.action == "recover":
+                state = read_json(releases.state_file)
+                if state.get("phase") == "restoring":
+                    return 0 if releases.rollback(args.db, args.systemd) else 1
+            elif args.action == "rollback":
+                return 0 if releases.rollback(args.db, args.systemd) else 1
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (OSError, ValueError, sqlite3.Error, SyntaxError, subprocess.SubprocessError) as error:
+        print("Management release error: " + str(error), file=sys.stderr)
+        raise SystemExit(1)
