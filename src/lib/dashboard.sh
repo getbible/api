@@ -279,15 +279,29 @@ dashboard_restore_route() {
     ln -sfn "$GB_NGINX/sites-available/getbible-dashboard.conf" "$link"
 }
 
-dashboard_apply() {
+# Reuse the exact production renderer for eligibility without changing routing.
+dashboard_route_matches() {
+    local domain="${1:-$(dashboard_domain)}" stage file relative
+    stage="$(mktemp -d "$(gb_tmpdir)/dashboard-route-check.XXXXXXXX")" || return 1
+    dashboard_render "$stage" "$domain" || return 1
+    [[ -L "$GB_NGINX/sites-enabled/getbible-dashboard.conf" && "$(readlink "$GB_NGINX/sites-enabled/getbible-dashboard.conf")" == "$GB_NGINX/sites-available/getbible-dashboard.conf" ]] || return 1
+    while IFS= read -r -d '' file; do
+        relative="${file#"$stage/"}"
+        [[ "$relative" != .tls-* ]] || continue
+        cmp -s "$file" "$GB_NGINX/$relative" || return 1
+    done < <(find "$stage" -type f -print0)
+}
+
+# Only changed routing is installed. Backend release activation is a separate
+# transaction; an nginx failure retains the prior route and remains retryable.
+dashboard_route_apply() {
     local domain="${1:-$(dashboard_domain)}" stage link old="" conflicts
     dashboard_require_telegram || return 1
     gb_valid_domain "$domain" || { gb_warn 'Set a valid dashboard domain.'; return 1; }
     ep_exists "$domain" && { gb_warn 'The dashboard requires its own hostname, separate from API domains.'; return 1; }
     conflicts="$(nginx_conflicts "$domain" | grep -v '/getbible-dashboard.conf' || true)"
     [[ -z "$conflicts" ]] || { gb_warn "The dashboard hostname is already served by another nginx configuration: $conflicts"; return 1; }
-    infrastructure_update --dashboard || return 1
-    sd_enable --now getbible-admin.service getbible-dashboard.service || return 1
+    if dashboard_route_matches "$domain"; then return 0; fi
     stage="$(gb_tmpdir)/dashboard-nginx"
     dashboard_render "$stage" "$domain" || return 1
     link="$GB_NGINX/sites-enabled/getbible-dashboard.conf"
@@ -300,6 +314,16 @@ dashboard_apply() {
         nginx_test && nginx_reload || true
         return 1
     fi
+}
+
+dashboard_apply() {
+    local domain="${1:-$(dashboard_domain)}"
+    dashboard_require_telegram || return 1
+    gb_valid_domain "$domain" || { gb_warn 'Set a valid dashboard domain.'; return 1; }
+    ep_exists "$domain" && { gb_warn 'The dashboard requires its own hostname, separate from API domains.'; return 1; }
+    infrastructure_update --dashboard || return 1
+    sd_enable --now getbible-admin.service getbible-dashboard.service || return 1
+    dashboard_route_apply "$domain" || return 1
     dashboard_wait_current || return 1
     tg_notify ok 'Dashboard configured' "The private dashboard is served at https://$domain."
 }

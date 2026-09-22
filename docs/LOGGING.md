@@ -237,3 +237,30 @@ trigger plus `GETBIBLE_ALERT_SYNC_GRACE_SECONDS` (3600 seconds). An unchanged
 repository with a successful monthly check is healthy even if its last
 publication is old. Diagnostics and health alert state persist in the same
 telemetry database.
+
+## Capacity incidents and collector backlog
+
+Run `getbible capacity` or `getbible capacity --json` (root), or open the dashboard's
+Resources capacity panel. A spool alert is a capacity incident, not permission
+to delete unread logs. Inspection separates unread bytes/files, budgeted transport
+bytes, safely consumed rotated files and retained archival logs. Keeping consumed
+archives does not mean those bytes are waiting for ingestion. Producers and the
+collector are sampled over an observation window; repeated bounded ingestion
+passes visit sources fairly, and backlog catch-up does not sleep for the normal
+idle interval while complete records remain ready. Partial lines and active or
+unverifiably open files remain intact. Reclamation failures stay diagnosable.
+
+Incident state persists in the telemetry store across collector restarts.
+Notifications identify sustained onset, meaningful deterioration, a bounded long
+reminder or sustained recovery rather than resending an unchanged message at
+every short cooldown. Missing/stale measurements never imply recovery. Inspect
+open incidents and the collector journal when capacity is still saturated.
+
+Recommendations use measured demand/high-water usage, saturation observations and
+available headroom, and explain their headroom assumptions. A growing or stalled
+unread backlog requires fixing collection before relying on a larger spool
+allowance. Advice is withheld when evidence/headroom is insufficient; no limit is
+automatically raised and no unread history is discarded to silence an alarm.
+Configured values controlled by deployment environment or host cgroups are shown
+as such. Collector restart retains the incident, while real recovery clears it
+after the configured stability interval.

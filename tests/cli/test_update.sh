@@ -33,6 +33,7 @@ fixture() {
     git -C "$SEED" checkout -q -b release
     cp "$ROOT/getbible.sh" "$SEED/getbible.sh"
     cp "$ROOT/src/lib/update.sh" "$SEED/src/lib/update.sh"
+    cp "$ROOT/src/lib/upgrades.sh" "$SEED/src/lib/upgrades.sh"
     chmod +x "$SEED/getbible.sh"
     local lib
     for lib in platform ui config deployment registry resources users telegram nginx certs systemd logs access sync python docs pages endpoint; do
@@ -79,7 +80,7 @@ endpoint_apply() { printf 'apply:%s\n' "$1" >> "$GB_TEST_EVENTS"; }
 CORE
     # Only deployment is replaced here; pull/manager helpers remain real.
     cat > "$SEED/src/lib/menu.sh" <<'MENU'
-update_all() { printf 'apply:all\n' >> "$GB_TEST_EVENTS"; }
+upgrade_cli() { printf 'apply:%s\n' "${1:-all}" >> "$GB_TEST_EVENTS"; }
 MENU
     printf 'initial\n' > "$SEED/tracked.txt"
     git -C "$SEED" add .
@@ -283,7 +284,7 @@ reject_update
 fixture
 git -C "$CHECKOUT" remote set-url deployment "$GB_TEST_CASE/missing.git"
 run_cli update api.example.test || fail 'existing domain update failed'
-grep -qx 'server:infrastructure-update' "$GB_TEST_EVENTS" || fail 'domain update did not refresh management infrastructure'
+if grep -q '^server:' "$GB_TEST_EVENTS"; then fail 'target dispatch performed installation before shared planning'; fi
 grep -qx 'apply:api.example.test' "$GB_TEST_EVENTS" || fail 'domain update did not apply the domain'
 assert_eq "$(git -C "$CHECKOUT" rev-parse HEAD)" "$BEFORE" 'domain update unexpectedly pulled source'
 run_cli update || fail 'existing all-domain update failed'
@@ -316,40 +317,20 @@ assert_source_only
 
 printf 'ok: source-only self-update, tracked upstream, SSH, worktrees, menu, refusals and dry-run\n'
 
-# Reporting is auxiliary: a collector failure is visible in the final outcome
-# while otherwise valid API updates still run. Essential install failures abort.
-# shellcheck disable=SC2317,SC2329 # Sourced update hooks; codes differ across ShellCheck versions.
+# Native and image update entry points now delegate to the same planner. The
+# target isolation, partial completion and failure cases are exercised against
+# the real journal in test_upgrade_selection.sh and test_image_update.sh.
+# shellcheck disable=SC2317,SC2329 # Sourced update hooks.
 (
-    export GB_REPO_DIR="$ROOT" GB_VAR="$T/update-state" GB_YES=true
-    mkdir -p "$GB_VAR"
-    # shellcheck source=/dev/null
     source "$ROOT/src/lib/update.sh"
-    gb_warn() { :; }
-    gb_step() { :; }
-    gb_log() { :; }
-    gb_die() { exit 1; }
-    gb_is_docker() { return 1; }
-    tg_notify() { :; }
-    logs_render_rotation() { :; }
-    ep_list() { printf '%s\n' api.example.test query.example.test; }
-    endpoint_apply() { printf '%s\n' "$1" >> "$T/applied"; }
-    infrastructure_update() {
-        GB_INFRASTRUCTURE_TELEMETRY_FAILED="$reporting_failure"
-        return "$infrastructure_result"
-    }
-    reporting_failure=true infrastructure_result=1
-    : > "$T/applied"
-    if update_domain api.example.test; then fail 'reporting failure was hidden'; fi
-    assert_eq "$(cat "$T/applied")" api.example.test 'reporting blocked domain update'
-    : > "$T/applied"
-    if update_all; then fail 'all-domain update hid reporting failure'; fi
-    assert_eq "$(cat "$T/applied")" $'api.example.test\nquery.example.test' 'reporting blocked remaining domains'
-    reporting_failure=false
-    : > "$T/applied"
-    if update_all; then fail 'essential infrastructure failure was ignored'; fi
-    [[ ! -s "$T/applied" ]] || fail 'domains updated after essential infrastructure failure'
-    infrastructure_result=0
-    update_all || fail 'healthy update failed'
-    assert_eq "$(cat "$T/applied")" $'api.example.test\nquery.example.test' 'healthy update missed a domain'
+    upgrade_cli() { printf '%s\n' "$*" >> "$T/planner-calls"; return "$planner_status"; }
+    planner_status=0
+    : > "$T/planner-calls"
+    update_domain api.example.test
+    update_all --retry
+    assert_eq "$(cat "$T/planner-calls")" $'api.example.test\n--all --retry' 'native entry points bypassed the shared planner'
+    planner_status=7
+    if update_domain api.example.test; then fail 'domain wrapper hid planner failure'; fi
+    if update_all; then fail 'all-target wrapper hid planner failure'; fi
 )
-printf 'ok: reporting failures remain visible without blocking API updates\n'
+printf 'ok: native update commands share selection, no-op and failure transactions\n'

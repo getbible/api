@@ -17,7 +17,7 @@ class BrokerClient:
         self.timeout = timeout
 
     def call(self, method, params=None):
-        if method not in {"capacity", "state", "operations", "submit", "job", "jobs", "endpoints", "storage", "translations"}:
+        if method not in {"capacity", "upgrades", "state", "operations", "submit", "job", "jobs", "endpoints", "storage", "translations"}:
             raise BrokerError("Unsupported management request", "invalid_method")
         request_id = secrets.token_hex(16)
         encoded = json.dumps({"id": request_id, "method": method, "params": params or {}},
@@ -27,7 +27,7 @@ class BrokerClient:
             raise BrokerError("Management request is too large", "invalid_request")
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-                connection.settimeout(self.timeout)
+                connection.settimeout(max(self.timeout, 50) if method == "upgrades" else self.timeout)
                 connection.connect(self.path)
                 connection.sendall(encoded)
                 with connection.makefile("rb") as stream:

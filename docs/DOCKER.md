@@ -486,7 +486,7 @@ build. No Git tag or version in a commit message is needed.
 | Add `VERSION` containing `2.0.0` | `2.0.0`, `latest` and commit-SHA tags, all from the same tested images |
 | Merge with unchanged or lower `VERSION` | Validation fails; no image build or publication |
 | Increase `VERSION` to a reviewed number | Publish that immutable number, `latest` and commit-SHA tags |
-| Open or update a pull request | Source checks only; no Docker build or publication |
+| Open or update a pull request | Source checks and disposable Docker upgrade acceptance; no image publication |
 
 The main build/publication pipeline is serialized and an active run is not
 cancelled by a newer merge. Up to 100 pending runs are queued, so a newer merge
@@ -585,3 +585,20 @@ has been changed; confirm the corresponding workflow and deployment results.
 - [Docker container resource constraints](https://docs.docker.com/engine/containers/resource_constraints/)
 - [systemd container interface](https://systemd.io/CONTAINER_INTERFACE/)
 - [Linux cgroup-v2 memory accounting](https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html)
+
+### Selective application and serving health
+
+`getbible update --plan` shows management, runtime-version, MCP and static software
+targets. `getbible update --select` opens the checklist; `--target ID` and
+`--targets ID,ID` provide exact noninteractive subsets. An empty `--targets ''`
+changes nothing. Automatic image application uses the same planner with changed
+targets, leaving unchanged workers alone. `APPLIED_VERSION` advances only when
+all required targets are current; `partial` means required changes were skipped,
+and failed/interrupted targets remain retryable. See [UPDATING.md](UPDATING.md).
+
+The container health check verifies selected query/search generations, MCP and an
+enabled dashboard, as well as nginx. Missing selected releases fail readiness;
+rejected/unselected candidates do not. An old healthy serving generation can keep
+the container available during a failed upgrade without making the upgrade
+complete. Whole-container replacement still involves the configured graceful
+shutdown and startup, not a zero-downtime rolling cluster.

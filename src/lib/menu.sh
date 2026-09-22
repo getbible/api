@@ -234,10 +234,10 @@ menu_deploy() {
 }
 
 menu_update() {
-    local state commit dirty text apply_label='Update all domains from the current checkout'
+    local state commit dirty text apply_label='Choose changed upgrade targets from this checkout'
     if gb_is_docker; then
         text="$(update_image_status)\nNew image releases apply automatically after startup. Use this action to retry or reapply the installed release. Image replacement is done from the Docker host."
-        apply_label='Update all domains from the current image'
+        apply_label='Choose changed upgrade targets from this image'
     else
         state="$(update_repo_state)"
         commit="${state%%$'\n'*}"
@@ -250,7 +250,7 @@ menu_update() {
         apply "$apply_label" \
         back "Back")" || return 0
     case "$choice" in
-        apply) ui_run "Update all" update_system || true ;;
+        apply) upgrade_menu || true ;;
     esac
 }
 

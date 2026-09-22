@@ -269,7 +269,8 @@ rt_deployment_inputs() {
             local variable="RES_$key"
             printf '%s=%s\n' "$variable" "${!variable}"
         done
-        sha256sum "$GB_TYPES/runtime/type.sh" "$GB_TYPES/runtime/templates/"*.tmpl "$GB_APPS/$RM_DIR/manifest.conf"
+        (cd "$GB_TYPES/runtime" && sha256sum type.sh templates/*.tmpl) || return 1
+        sha256sum < "$GB_APPS/$RM_DIR/manifest.conf" || return 1
     } | sha256sum | cut -d' ' -f1
 }
 

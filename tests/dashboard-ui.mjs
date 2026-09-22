@@ -108,7 +108,25 @@ function mcpReport(params) {
 }
 const searchWorker = {...worker, translation_status: {kjv: {ready: true}}, cache: {...worker.cache, search_corpora: {translations: {kjv: {verses: 31102, estimated_bytes: 34000000, indexes: [{case_sensitive: false, fold_diacritics: true}]}}}, translation_cache: {translations: {kjv: {estimated_bytes: 13000000}}}}};
 const inventory = {domains: [{domain: 'mcp.example.test', type: 'mcp', kind: 'mcp', live: true, settings: {ACCESS_MODE: 'open'}}], endpoints: [{domain: 'query.example.test', label: 'v2', type: 'runtime', kind: 'query', live: true, settings: {ACCESS_MODE: 'open'}, endpoint_settings: {WORKERS: '9', MEMORY_TTL: '30d'}}]};
+const upgradePlan = {format: 1, plan_id: 'a'.repeat(64), version: '3.2.0', pending: 2, state: 'pending', note: 'Static synchronization is separate.', targets: [
+  {id: 'management', kind: 'management', status: 'pending', eligible: true, serving: 'ready', outcome: 'failed', reason: 'Retry failed upgrade'},
+  {id: 'runtime/query.example.test/v2', kind: 'runtime', status: 'pending', eligible: true, serving: 'ready', outcome: 'applied', reason: 'Implementation changed'},
+  {id: 'mcp/mcp.example.test', kind: 'mcp', status: 'current', eligible: false, serving: 'ready', outcome: 'applied', reason: 'Current'},
+  {id: 'static/api.example.test', kind: 'static', status: 'current', eligible: false, serving: 'ready', outcome: 'applied', reason: 'Current'},
+]};
+const capacityFixture = {state: 'observed', stale: false, sampled_at: now, window_seconds: 86400, headroom_fraction: .25,
+  note: 'Peak demand with explicit headroom; no limits change automatically.',
+  collection: {state: 'catching_up', unread_bytes: 1048576, unread_files: 2, budgeted_spool_bytes: 2000000000,
+    retained_archive_bytes: 10000000000, producer_bytes_per_second: 1048576, collector_bytes_per_second: 2097152,
+    backlog_growth_bytes_per_second: -1048576, backlog_observed_seconds: 120, rate_window_seconds: 300},
+  limits: [{id: 'telemetry_spool', label: 'Telemetry transport', setting: 'TELEMETRY_SPOOL_MAX_GIB', unit: 'GiB', available: true,
+    used: 1.8, effective_limit: 1, high_water: 2, samples: 60, observed_seconds: 300, saturated_samples: 45, saturated_seconds: 225,
+    episodes: 2, saturation_threshold: .9, configuration: {owner: 'saved', value: '1', editable: true},
+    recommendation: {status: 'suggested', value: 3, reason: 'Observed peak with 25% headroom.'}}],
+  incidents: [{id: 'telemetry_spool', since: now - 120, last_sent: now - 60, last_event: 'onset'}]};
 const operations = [
+  {id: 'system.update', title: 'Upgrade selected targets', fields: [{name: 'targets', type: 'upgrade_targets', required: true}, {name: 'plan_id', type: 'plan_id', required: true}]},
+  {id: 'settings.set', title: 'Set a system configuration value', fields: [{name: 'key', required: true}, {name: 'value', required: true}]},
   {id: 'runtime.cache', title: 'Manage translation memory', fields: [{name: 'domain', type: 'domain', required: true}, {name: 'endpoint', required: true}, {name: 'action', choices: ['warm', 'drop', 'reload'], required: true}, {name: 'translation', required: true}]},
   {id: 'pages.write', title: 'Edit page content', fields: [{name: 'domain', required: true}, {name: 'kind', choices: ['docs', 'openapi'], required: true}, {name: 'content', type: 'multiline', required: true}]},
   {id: 'runtime.set', title: 'Set runtime endpoint configuration', fields: [{name: 'domain', required: true}, {name: 'endpoint'}, {name: 'key', choices: ['WORKERS', 'MEMORY_TTL'], required: true}, {name: 'value', required: true}]},
@@ -149,6 +167,8 @@ await page.route('**/*', async route => {
     else if (name === 'audience') {const breakdowns = url.searchParams.get('endpoint_kind') === 'mcp' ? mcpReport(url.searchParams).breakdowns : summary.breakdowns; value = {referrers: breakdowns.referrer, user_agents: breakdowns.user_agent};}
     else if (name === 'endpoints') value = inventory;
     else if (name === 'history') value = {series: Array.from({length: 30}, (_, i) => ({stamp: now - (30 - i) * 60, calls: 100 + i * 10, errors: i % 3}))};
+    else if (name === 'capacity') value = capacityFixture;
+    else if (name === 'upgrades') value = upgradePlan;
     else if (name === 'metrics') value = {metrics, retention: summary.retention};
     else if (name === 'requests') value = {items: url.searchParams.get('endpoint_kind') === 'mcp' ? selectedMcpRows(url.searchParams) : [{id: 1, stamp: now, endpoint: 'query.example.test', version: 'v2', method: 'GET', path: '/v2/kjv/43/3.json', status: 200, duration_ms: 2, remote_addr: '192.0.2.10', auth: 'valid', referrer: 'https://reader.example.test/', user_agent: 'Fixture reader/1.0'}], next_cursor: null};
     else if (name === 'translations') value = {endpoints: [{domain: 'query.example.test', label: 'v2', kind: 'query', generation: 'fixture', complete: true, expected_workers: 1, workers: [worker]}, {domain: 'search.example.test', label: 'v2', kind: 'search', generation: 'fixture', complete: true, expected_workers: 9, configured_warm_translations: ['kjv'], workers: Array.from({length: 9}, (_, index) => ({...searchWorker, pid: 200 + index})), available_translations: [{translation: 'kjv', allocated_bytes: 40000000}, {translation: 'asv', allocated_bytes: 30000000}]}]};
@@ -373,6 +393,17 @@ try {
   await page.getByRole('button', {name: 'Resources', exact: true}).click();
   await page.getByText('45 °C', {exact: true}).waitFor();
   await page.getByText('Bibles', {exact: true}).waitFor();
+  await page.getByRole('heading', {name: 'Capacity and sizing advice', exact: true}).waitFor();
+  await page.getByText('Telemetry transport', {exact: true}).waitFor();
+  const beforeAdvice = actions.length;
+  await page.getByRole('button', {name: 'Review suggested setting', exact: true}).click();
+  assert.equal(actions.length, beforeAdvice, 'Displaying a sizing recommendation never changes a limit');
+  await page.getByRole('button', {name: 'Run operation'}).click();
+  await page.getByRole('dialog').getByText('succeeded', {exact: true}).waitFor();
+  assert.deepEqual(actions.at(-1), {operation: 'settings.set', arguments: {key: 'TELEMETRY_SPOOL_MAX_GIB', value: '3'}, confirm: true});
+  await page.getByRole('button', {name: 'Close details'}).click();
+  await page.screenshot({path: path.join(root, 'test-artifacts/dashboard-capacity.png'), fullPage: true});
+
   assert.ok(requests.includes('/api/metrics'), 'Resource charts load their independent metrics endpoint');
   for (const [label, expected] of [['CPU usage over time', 34], ['Memory usage over time', 3]]) {
     const chart = page.getByRole('img', {name: label, exact: true});
@@ -384,6 +415,20 @@ try {
   assert.equal(reportRequestCount(), overviewRequestsBeforeNavigation, 'Traffic, audience, MCP, translations and resources do not load hidden overview reports');
   await page.getByRole('button', {name: 'Events', exact: true}).click();
   await page.getByText('Fixture sync completed', {exact: true}).waitFor();
+  await page.getByRole('button', {name: 'Manage', exact: true}).click();
+  await page.getByRole('button', {name: /Upgrade targets Review changes/}).click();
+  await page.getByLabel('Upgrade management', {exact: true}).waitFor();
+  assert.equal(await page.getByLabel('Upgrade management', {exact: true}).isChecked(), true);
+  assert.equal(await page.getByLabel('Upgrade static/api.example.test', {exact: true}).isDisabled(), true, 'Unchanged static code is not eligible without an explicit force');
+  await page.getByRole('button', {name: 'Clear selection', exact: true}).click();
+  assert.equal(await page.getByRole('button', {name: 'Review selected upgrades', exact: true}).isDisabled(), true, 'Empty selections cannot become upgrade-all');
+  await page.getByLabel('Upgrade runtime/query.example.test/v2', {exact: true}).check();
+  await page.screenshot({path: path.join(root, 'test-artifacts/dashboard-upgrades.png'), fullPage: true});
+  await page.getByRole('button', {name: 'Review selected upgrades', exact: true}).click();
+  await page.getByRole('button', {name: 'Run operation'}).click();
+  await page.getByRole('dialog').getByText('succeeded', {exact: true}).waitFor();
+  assert.deepEqual(actions.at(-1), {operation: 'system.update', arguments: {targets: ['runtime/query.example.test/v2'], plan_id: upgradePlan.plan_id, force: false, retry: false}, confirm: true});
+  await page.getByRole('button', {name: 'Close details'}).click();
   await page.getByRole('button', {name: 'Manage', exact: true}).click();
   await page.getByRole('button', {name: /Domains Status, endpoints/}).click();
   await page.getByRole('button', {name: /mcp.example.test.*MCP at \//}).click();

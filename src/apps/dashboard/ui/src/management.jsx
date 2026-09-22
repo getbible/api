@@ -1,3 +1,4 @@
+import Upgrades from './upgrades.jsx';
 import React, {useEffect, useMemo, useState} from 'react';
 import {api, date} from './api.js';
 import {Panel, Busy, Empty, Badge, DataTable, ErrorNotice} from './components.jsx';
@@ -160,6 +161,8 @@ export default function Management({execute, onError, onDetail, refresh, initial
         const items = (selectedDomain?.endpoints || []).map(endpoint => ({id: endpoint.label, title: endpoint.label === 'root' ? 'Domain root' : `/${endpoint.label}/`, detail: endpoint.repository || `${endpoint.kind} endpoint`}));
         if (!field.required) items.unshift({id: '', title: endpointScopeLabel(spec), detail: 'Use the domain scope for this operation'});
         content = items.length ? <MenuCards items={items} onSelect={item => navigate({...navigation, endpoint: item.id})}/> : <Empty>No endpoints are registered for this domain. Add an endpoint from Endpoints and repositories.</Empty>;
+    } else if (operationId(spec) === 'system.update') {
+        content = <Upgrades execute={execute} refresh={refresh} paused={paused}/>;
     } else {
         content = <form className="management-form" onSubmit={submit}>
             {spec.description && <p className="text-secondary">{spec.description}</p>}

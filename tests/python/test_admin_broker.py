@@ -29,6 +29,22 @@ class OperationTests(unittest.TestCase):
             with self.subTest(arguments=arguments), self.assertRaises(ValueError):
                 broker.validate_arguments(spec, arguments)
 
+    def test_upgrade_selection_is_typed_and_empty_never_means_all(self):
+        spec = broker.OPS["system.update"]
+        plan_id = "a" * 64
+        values = broker.validate_arguments(spec, {"targets": [], "plan_id": plan_id})
+        self.assertEqual(broker.command_arguments(spec, values), ["update", "--targets", "", "--expected-plan", plan_id, "--yes"])
+        selected = ["runtime/query.example.test/v2", "management"]
+        values = broker.validate_arguments(spec, {"targets": selected, "plan_id": plan_id, "force": True})
+        self.assertEqual(broker.command_arguments(spec, values), ["update", "--targets", ",".join(selected), "--expected-plan", plan_id, "--force", "--yes"])
+        for targets in ("management", None, ["--all"], ["management", "management"], ["runtime/query.example.test/../../secret"], [False], ["x" * 1000]):
+            with self.subTest(targets=targets), self.assertRaises(ValueError):
+                broker.validate_arguments(spec, {"targets": targets, "plan_id": plan_id})
+        with self.assertRaises(ValueError):
+            broker.validate_arguments(spec, {"targets": selected})
+        with self.assertRaises(ValueError):
+            broker.validate_arguments(spec, {"targets": selected, "plan_id": "--help"})
+
     def test_optional_endpoint_preserves_existing_cli_grammar(self):
         spec = broker.OPS["runtime.update"]
         arguments = broker.validate_arguments(spec, {"domain": "search.example.test", "python": "auto"})

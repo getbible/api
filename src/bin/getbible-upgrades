@@ -1,0 +1,306 @@
+#!/usr/bin/env python3
+"""Read-only upgrade plans and durable per-target outcomes.
+
+The Bash deployment driver owns resolution, readiness and traffic transactions.
+This helper only hashes bounded implementation/configuration inputs and records
+outcomes. It never reads a Bible corpus, executes registry values or changes a
+serving pointer. Unknown state formats are preserved and rejected.
+"""
+from __future__ import annotations
+
+import argparse
+from contextlib import contextmanager
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import sys
+import tempfile
+import time
+
+FORMAT = 1
+DOMAIN = r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?"
+TARGET = re.compile(rf"(?:management|(?:mcp|static)/{DOMAIN}|runtime/{DOMAIN}/(?:v[1-9][0-9]*|root))\Z")
+OUTCOMES = {"applied", "verified", "updating", "failed", "interrupted"}
+EXCLUDED = {"__pycache__", "node_modules", ".git", "build"}
+
+
+def read_json(path: Path, default=None):
+    try:
+        with path.open(encoding="utf-8") as stream:
+            return json.load(stream)
+    except FileNotFoundError:
+        return default
+
+
+def digest(value) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
+
+
+def file_digest(path: Path) -> str:
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def fingerprint(root: Path, sources: list[str], records: list[str], values: list[str], overrides: list[str]) -> str:
+    """Hash relative implementation names and canonical raw KEY=value records."""
+    files = {}
+    for name in sources:
+        relative = Path(name)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError("Source paths must stay inside the manager checkout")
+        path = root / relative
+        if not path.exists():
+            raise ValueError("Required upgrade implementation input is missing: " + name)
+        members = [path] if path.is_file() else sorted(path.rglob("*"))
+        for member in members:
+            if any(part in EXCLUDED or part.endswith(".egg-info") for part in member.relative_to(root).parts) or member.suffix == ".pyc":
+                continue
+            if member.is_symlink():
+                raise ValueError("Implementation inputs must not be symbolic links")
+            if member.is_file():
+                files[member.relative_to(root).as_posix()] = file_digest(member)
+    replacement = dict(item.split("=", 1) for item in overrides)
+    configurations = {}
+    for record in records:
+        role, path = record.split("=", 1)
+        fields = {}
+        try:
+            for line in Path(path).read_text(encoding="utf-8").splitlines():
+                key, sep, value = line.partition("=")
+                if sep and re.fullmatch(r"[A-Z][A-Z0-9_]*", key):
+                    fields[key] = value
+        except FileNotFoundError:
+            fields = {"__missing__": True}
+        fields.update({key.split(".", 1)[1]: value for key, value in replacement.items() if key.startswith(role + ".")})
+        configurations[role] = fields
+    return digest({"files": files, "configuration": configurations, "values": dict(item.split("=", 1) for item in values)})
+
+
+def atomic_write(path: Path, value: dict) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".upgrade-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(value, stream, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def process_identity(pid: int) -> str | None:
+    try:
+        # The name in parentheses may contain spaces or parentheses.
+        stat = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        return f"{boot}:{pid}:{stat[19]}"
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+class Journal:
+    def __init__(self, path: Path):
+        self.path = path
+
+    def read(self) -> dict:
+        state = read_json(self.path, {"format": FORMAT, "targets": {}})
+        if not isinstance(state, dict) or state.get("format") != FORMAT or not isinstance(state.get("targets"), dict):
+            raise ValueError("Unsupported upgrade journal; it has not been modified")
+        for key, row in state["targets"].items():
+            if not TARGET.fullmatch(key) or not isinstance(row, dict) or row.get("outcome") not in OUTCOMES:
+                raise ValueError("Invalid per-target upgrade journal; it has been preserved")
+        return state
+
+    @contextmanager
+    def locked(self):
+        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with self.path.with_suffix(".lock").open("a") as stream:
+            fcntl.flock(stream, fcntl.LOCK_EX)
+            yield
+
+    def record(self, row: dict, outcome: str, owner: int, detail: str = "") -> None:
+        if not TARGET.fullmatch(row.get("id", "")) or outcome not in OUTCOMES:
+            raise ValueError("Invalid upgrade target/outcome")
+        desired = row.get("desired_fingerprint")
+        if desired is not None and not re.fullmatch(r"[0-9a-f]{64}", desired):
+            raise ValueError("Invalid desired fingerprint")
+        with self.locked():
+            state = self.read()
+            prior = state["targets"].get(row["id"], {})
+            now = time.time()
+            entry = {**prior, "desired_fingerprint": desired, "outcome": outcome,
+                     "updated_at": now, "detail": detail[:2000], "serving": row.get("serving", "unknown")}
+            if outcome == "updating":
+                identity = process_identity(owner)
+                if not identity:
+                    raise ValueError("Upgrade owner is not a live process")
+                entry.update(started_at=now, owner_pid=owner, owner_identity=identity)
+            else:
+                entry.update(finished_at=now, owner_pid=None, owner_identity=None)
+            if outcome in {"applied", "verified"}:
+                if desired is None or row.get("serving") not in {"ready", "offline"} or not row.get("matches"):
+                    raise ValueError("Cannot mark an unverified target as applied")
+                entry.update(applied_fingerprint=desired, generation=row.get("generation", ""))
+            state["targets"][row["id"]] = entry
+            state["updated_at"] = now
+            atomic_write(self.path, state)
+
+    def plan(self, inventory: list[dict], version: str) -> dict:
+        state = self.read()
+        targets = []
+        seen = set()
+        for item in inventory:
+            row = dict(item)
+            identity = row.get("id", "")
+            if not TARGET.fullmatch(identity) or identity in seen:
+                raise ValueError("Invalid or duplicate upgrade inventory target")
+            seen.add(identity)
+            prior = dict(state["targets"].get(identity, {}))
+            outcome = prior.get("outcome", "untracked")
+            if outcome == "updating":
+                live_owner = process_identity(prior.get("owner_pid") or 0)
+                if not live_owner or live_owner != prior.get("owner_identity"):
+                    outcome = "interrupted"
+            row.update(applied_fingerprint=prior.get("applied_fingerprint"), outcome=outcome,
+                       last_attempt=prior.get("updated_at"), last_error=prior.get("detail", ""))
+            if row.get("error"):
+                row.update(status="blocked", eligible=False, required=True, reason=row["error"])
+            elif outcome == "updating":
+                row.update(status="updating", eligible=False, required=True, reason="An upgrade of this target is running")
+            else:
+                verified = bool(row.get("matches")) and row.get("serving") in {"ready", "offline"}
+                same = prior.get("applied_fingerprint") == row.get("desired_fingerprint") and prior.get("generation") == row.get("generation")
+                # A first inventory may adopt an installed generation only when
+                # its own recorded code/configuration inputs have been verified.
+                current = verified and (same or outcome == "untracked") and outcome not in {"failed", "interrupted"}
+                reason = ("Implementation and selected generation are current" if current else
+                          "Retry interrupted upgrade" if outcome == "interrupted" else
+                          "Retry failed upgrade" if outcome == "failed" else
+                          "Serving readiness needs recovery" if row.get("serving") not in {"ready", "offline"} else
+                          "Implementation, dependencies or effective settings changed")
+                row.update(status="current" if current else "pending", eligible=not current,
+                           required=not current, reason=reason)
+            targets.append(row)
+        pending = sum(row["required"] for row in targets)
+        return {"format": FORMAT, "version": version, "plan_id": digest([
+                    (row["id"], row.get("desired_fingerprint"), row.get("generation"), row.get("status")) for row in targets]),
+                "state": "pending" if pending else "current", "pending": pending,
+                "targets": targets, "note": "Static targets update software/configuration only, not corpus data. Targets on one domain share nginx routing; unselected runtime generations are retained."}
+
+
+def select(plan: dict, requested: list[str], domain: str, force: bool, retry: bool, explicit: bool) -> list[dict]:
+    rows = plan["targets"]
+    known = {row["id"] for row in rows}
+    if any(item not in known for item in requested):
+        raise ValueError("Unknown upgrade target; refresh the upgrade plan")
+    if domain and not any(row.get("domain") == domain for row in rows):
+        raise ValueError("Domain is not enabled or has no upgrade targets")
+    if domain and explicit:
+        raise ValueError("Choose a domain or explicit targets, not both")
+    selected = []
+    for row in rows:
+        if explicit and row["id"] not in requested:
+            continue
+        if domain and row.get("domain") != domain:
+            continue
+        if retry and row.get("outcome") not in {"failed", "interrupted"}:
+            continue
+        if row["status"] in {"blocked", "updating"}:
+            if explicit or domain or retry:
+                raise ValueError(row["id"] + ": " + row["reason"])
+            continue
+        if row["eligible"] or force:
+            selected.append(row)
+    return selected
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("action", choices=("fingerprint", "row", "plan", "select", "record", "render"))
+    parser.add_argument("--state", type=Path, default=Path("/var/lib/getbible/state/upgrades.json"))
+    parser.add_argument("--root", type=Path, default=Path.cwd())
+    parser.add_argument("--source", action="append", default=[])
+    parser.add_argument("--record-file", action="append", default=[])
+    parser.add_argument("--value", action="append", default=[])
+    parser.add_argument("--override", action="append", default=[])
+    parser.add_argument("--inventory", type=Path)
+    parser.add_argument("--plan", type=Path)
+    parser.add_argument("--row", type=Path)
+    parser.add_argument("--version", default="unknown")
+    parser.add_argument("--target", action="append", default=[])
+    parser.add_argument("--domain", default="")
+    parser.add_argument("--kind", default="")
+    parser.add_argument("--label", default="")
+    parser.add_argument("--fingerprint", default="")
+    parser.add_argument("--generation", default="")
+    parser.add_argument("--serving", choices=("ready", "unavailable", "unknown", "offline"), default="unknown")
+    parser.add_argument("--matches", action="store_true")
+    parser.add_argument("--error", default="")
+    parser.add_argument("--outcome", choices=sorted(OUTCOMES), default="failed")
+    parser.add_argument("--detail", default="")
+    parser.add_argument("--owner", type=int, default=os.getppid())
+    parser.add_argument("--force", action="store_true")
+    parser.add_argument("--retry", action="store_true")
+    parser.add_argument("--explicit", action="store_true")
+    parser.add_argument("--expected-plan", default="")
+    parser.add_argument("--format", choices=("json", "text", "ids", "checklist"), default="json")
+    args = parser.parse_args(argv)
+    if args.action == "fingerprint":
+        print(fingerprint(args.root, args.source, args.record_file, args.value, args.override))
+    elif args.action == "row":
+        if len(args.target) != 1 or not TARGET.fullmatch(args.target[0]):
+            raise ValueError("row requires one valid target")
+        print(json.dumps({"id": args.target[0], "kind": args.kind, "domain": args.domain, "label": args.label,
+                          "desired_fingerprint": args.fingerprint or None, "generation": args.generation,
+                          "serving": args.serving, "matches": args.matches, "error": args.error or None}))
+    elif args.action == "plan":
+        if args.inventory is None:
+            parser.error("plan requires --inventory")
+        inventory = [json.loads(line) for line in args.inventory.read_text().splitlines() if line]
+        print(json.dumps(Journal(args.state).plan(inventory, args.version), indent=2))
+    elif args.action == "record":
+        if args.row is None:
+            parser.error("record requires --row")
+        Journal(args.state).record(read_json(args.row), args.outcome, args.owner, args.detail)
+    else:
+        if args.plan is None:
+            parser.error("operation requires --plan")
+        plan = read_json(args.plan)
+        if args.expected_plan and plan["plan_id"] != args.expected_plan:
+            raise ValueError("Upgrade plan changed; refresh and review it before applying")
+        if args.action == "select":
+            selected = select(plan, args.target, args.domain, args.force, args.retry, args.explicit)
+            print("\n".join(row["id"] for row in selected))
+        elif args.format == "text":
+            print(f"getBible upgrade plan: {plan['version']} — {plan['pending']} target(s) pending")
+            for row in plan["targets"]:
+                print(f"{row['id']:<55} {row['status']:<10} {row['serving']:<12} {row['reason']}")
+            print(plan["note"])
+        elif args.format == "checklist":
+            for row in plan["targets"]:
+                if row["status"] not in {"blocked", "updating"}:
+                    for value in (row["id"], row["reason"], "on" if row["eligible"] else "off"):
+                        print(value)
+        elif args.format == "ids":
+            print("\n".join(row["id"] for row in plan["targets"] if row["eligible"]))
+        else:
+            print(json.dumps(plan, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        print("Upgrade planning error: " + str(exc), file=sys.stderr)
+        raise SystemExit(1)

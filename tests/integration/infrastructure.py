@@ -215,8 +215,10 @@ def dashboard_checks():
               "running dashboard confirms its installed release")
         image_version = Path("/usr/share/getbible/api/VERSION")
         if image_version.is_file():
-            check(installed["version"] == image_version.read_text().strip(),
-                  "dashboard serves the current container image release")
+            desired = json.loads(run("/usr/bin/python3", "/usr/share/getbible/api/src/bin/getbible-management-release",
+                                     "manifest", "--source", "/usr/share/getbible/api"))
+            check(installed["fingerprint"] == desired["fingerprint"],
+                  "dashboard serves the current image implementation; unchanged code retains its release identity")
         check(pid("getbible-dashboard.service") > 0, "dashboard has a live systemd process")
         status = Path(f"/proc/{pid('getbible-dashboard.service')}/status").read_text()
         uid = next(line.split()[1] for line in status.splitlines() if line.startswith("Uid:"))
@@ -350,6 +352,57 @@ def native_recovery(manager):
     run("systemctl", "start", "getbible-logrotate.timer", "getbible-adapt.timer", "getbible-storage.timer")
 
 
+def upgrade_deployments():
+    selected = {}
+    for link in sorted(Path("/opt/getbible").glob("*/*/active")):
+        if not link.is_symlink():
+            continue
+        generation = link.resolve(strict=True)
+        if (generation / ".unit").is_file():
+            unit = (generation / ".unit").read_text().strip() + ".service"
+        else:
+            kind, label = link.parts[-3:-1]
+            unit = f"getbible-{kind}-{label}-{generation.name}.service"
+        selected[str(link)] = (str(generation), pid(unit))
+    return selected
+
+
+def upgrade_checks(manager):
+    """Exercise the public planner and real selected generation lifecycle."""
+    plan = json.loads(run(manager, "update", "--plan", "--json", "--yes", timeout=180))
+    again = json.loads(run(manager, "update", "--plan", "--json", "--yes", timeout=180))
+    check(plan["plan_id"] == again["plan_id"], "read-only upgrade plan is stable without state changes")
+    journal = VAR / "state/upgrades.json"
+    before_journal = journal.read_bytes() if journal.exists() else None
+    before = upgrade_deployments()
+    master = pid("nginx.service")
+    run(manager, "update", "--targets", "", "--json", "--yes", timeout=180)
+    check(before_journal == (journal.read_bytes() if journal.exists() else None),
+          "empty upgrade selection does not mutate upgrade state")
+    check(upgrade_deployments() == before and pid("nginx.service") == master,
+          "empty selection leaves every generation and nginx master unchanged")
+    runtime = next(row for row in plan["targets"] if row["kind"] == "runtime")
+    run(manager, "update", "--target", runtime["id"], "--force", "--yes", timeout=900)
+    after = upgrade_deployments()
+    changed = [name for name in before if before[name] != after.get(name)]
+    expected = next(name for name, value in before.items() if value[0] == runtime["generation"])
+    check(changed == [expected],
+          "forced endpoint selection changes one generation, not its neighbours")
+    check(pid("nginx.service") == master, "selected upgrade reloads rather than restarts nginx")
+    run(manager, "update", "--all", "--yes", timeout=900)
+    current = json.loads(run(manager, "update", "--plan", "--json", "--yes", timeout=180))
+    check(current["pending"] == 0, "completed upgrades leave no required targets pending")
+    before = upgrade_deployments()
+    collector = pid("getbible-telemetry.service")
+    run(manager, "update", "--all", "--yes", timeout=900)
+    check(before == upgrade_deployments() and pid("nginx.service") == master,
+          "unchanged full upgrade preserves runtime generations and nginx master")
+    check(pid("getbible-telemetry.service") == collector, "unchanged full upgrade does not restart the collector")
+    capacity = json.loads(run(manager, "capacity", "--json", timeout=15))
+    check(isinstance(capacity.get("limits"), list) and "collection" in capacity,
+          "installed capacity command reports observations independently of upgrade status")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("native", "docker"))
@@ -376,6 +429,7 @@ def main():
     dashboard_checks()
     if args.mode == "native":
         native_recovery(args.manager)
+    upgrade_checks(args.manager or "/usr/local/bin/getbible")
     print("Installed infrastructure acceptance passed.", flush=True)
 
 

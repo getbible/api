@@ -227,6 +227,10 @@ def capacity_report(store, *, now: float | None = None) -> dict[str, Any]:
         return {"state": "insufficient_data", "limits": [], "collection": {"state": "unknown"},
                 "note": "Capacity observations will appear after the collector samples this release."}
     result = json.loads(row[0])
+    incidents = store.db.execute("SELECT value FROM metadata WHERE key='health_alerts'").fetchone()
+    incident_state = json.loads(incidents[0]) if incidents else {}
+    result["incidents"] = [{"id": key, **value} for key, value in incident_state.items()
+                           if isinstance(value, dict) and value.get("active")]
     result["age_seconds"] = max(0, now - result["sampled_at"])
     result["stale"] = result["age_seconds"] > 60
     result["state"] = "stale" if result["stale"] else "observed"

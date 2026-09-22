@@ -47,6 +47,7 @@ PATTERNS = {
     "key": r"[A-Z][A-Z0-9_]*", "translation": r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}",
     "translations": r"[A-Za-z0-9][A-Za-z0-9_, -]{0,4095}",
     "date": r"[0-9]{4}-[0-9]{2}-[0-9]{2}", "id": r"[A-Za-z0-9_-]{1,128}",
+    "plan_id": r"[a-f0-9]{64}",
     "integer": r"[0-9]{1,12}", "path": r"(?:/|[A-Za-z0-9])[A-Za-z0-9_./ -]{0,4095}",
 }
 
@@ -151,7 +152,10 @@ operation("system.doctor", "Check this host", ["doctor"], category="System", mut
 operation("system.selftest", "Run manager tests", ["selftest"], category="System")
 operation("system.install_deps", "Install native host dependencies", ["install-deps"], category="System", destructive=True)
 operation("system.self_update", "Update native manager checkout", ["self-update"], category="System", destructive=True)
-operation("system.update", "Apply all configured domains", ["update"], category="System")
+operation("system.update", "Upgrade selected targets", ["update", ("--targets", "targets"), ("--expected-plan", "plan_id"), ("--force", "force"), ("--retry", "retry")],
+          [field("targets", "upgrade_targets"), field("plan_id", "plan_id"),
+           field("force", "boolean", default=False), field("retry", "boolean", default=False)], category="System",
+          description="Apply the reviewed target selection. Changed targets are eligible by default; an empty selection changes nothing. Static corpus synchronization is separate.")
 operation("dashboard.status", "Dashboard status", ["dashboard", "status"], category="Dashboard", mutates=False)
 operation("dashboard.enable", "Configure dashboard domain", ["dashboard", "enable", "{domain}"], [D], category="Dashboard", destructive=True)
 operation("dashboard.disable", "Disable dashboard access", ["dashboard", "disable"], category="Dashboard", destructive=True)
@@ -172,6 +176,14 @@ def validate_arguments(spec, supplied):
     result = {}
     for name, definition in fields.items():
         value = supplied.get(name, definition.get("default", ""))
+        if definition["type"] == "upgrade_targets":
+            pattern = rf"(?:management|(?:mcp|static)/{DOMAIN}|runtime/{DOMAIN}/(?:v[1-9][0-9]*|root))"
+            if (not isinstance(value, list) or len(value) > 256 or
+                    any(not isinstance(item, str) or len(item) > 320 or not re.fullmatch(pattern, item) for item in value) or
+                    len(set(value)) != len(value)):
+                raise ValueError("targets must be a unique list of upgrade target identifiers")
+            result[name] = list(value)
+            continue
         if value in ("", None) and not definition["required"]:
             continue
         if definition["type"] == "boolean":
@@ -205,7 +217,10 @@ def command_arguments(spec, values):
         if isinstance(part, tuple):
             flag, key = part
             value = values.get(key)
-            if value is True:
+            if isinstance(value, list):
+                # Empty selections remain explicit; they must never mean all.
+                command.extend((flag, ",".join(value)))
+            elif value is True:
                 command.append(flag)
             elif value not in (None, False, ""):
                 command.extend((flag, str(value)))
@@ -841,6 +856,19 @@ class Broker:
             self.inventory_cache[key] = rows
             return rows
 
+    def upgrades(self):
+        # Read-only inspection is independent of reporting history and never
+        # acquires the writer's management lock or executes an upgrade.
+        result = subprocess.run([self.manager, "update", "--plan", "--json", "--yes"],
+                                capture_output=True, text=True, timeout=45,
+                                env={**os.environ, "GB_PREFIX": self.prefix, "GB_UI": "none"})
+        if result.returncode != 0 or len(result.stdout) > 4 * 1024 * 1024:
+            raise ValueError("Upgrade planning is unavailable; inspect the manager journal")
+        plan = json.loads(result.stdout)
+        if not isinstance(plan, dict) or plan.get("format") != 1 or not isinstance(plan.get("targets"), list):
+            raise ValueError("The manager returned an invalid upgrade plan")
+        return plan
+
     def capacity(self):
         result = subprocess.run([self.manager, "capacity", "--json"],
                                 capture_output=True, text=True, timeout=5,
@@ -865,8 +893,10 @@ class Broker:
         if any(not isinstance(v, str) or len(v) > 128 or any(ord(c) < 32 for c in v) for v in actor_data.values()):
             raise ValueError("Invalid actor")
         actor = json.dumps({"uid": uid, **actor_data}, sort_keys=True)
-        if method == "capacity":
-            return self.capacity()
+        if method in {"capacity", "upgrades"}:
+            if params.keys() - {"actor"}:
+                raise ValueError("Unsupported inspection arguments")
+            return self.capacity() if method == "capacity" else self.upgrades()
         if method == "state":
             return self.state()
         if method == "operations":

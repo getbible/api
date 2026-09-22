@@ -39,8 +39,13 @@ fetch or scan Bible source data, issue certificates or change public DNS.
 
 `getbible status` reports the image release, last applied release and update state.
 The persistent `/var/lib/getbible/state/image-update.conf` records `APPLIED_VERSION`
-only after success. Restarting that applied image skips the refresh. If an update
-fails, inspect its reported error and retry from the root container shell:
+only when every required target is current. The per-target journal at
+`/var/lib/getbible/state/upgrades.json` records desired/applied fingerprints,
+serving generations and failed or interrupted attempts. Restarting an applied
+image checks eligibility without redeploying unchanged targets. A successful
+selected subset may leave the image `partial`; this is not an outage or a claim
+that skipped changes were installed. Inspect the plan and retry from the root
+container shell:
 
 ```sh
 getbible update
@@ -49,7 +54,8 @@ getbible status
 
 `getbible doctor` remains diagnostic; it does not apply updates. A replacement
 image and manual Docker updates adopt the newest bundled patch of each runtime
-endpoint's selected Python family without fetching packages. Native ordinary
+endpoint's selected Python family, including MCP, without fetching packages.
+The compatible offline bundle is checked before changing saved selections. Native ordinary
 `update` retains the selected exact patch. Retained generations keep their exact
 interpreter for rollback in both modes. Docker's `self-update` directs the
 operator to the host image workflow instead of changing image code through Git.
@@ -133,10 +139,74 @@ before restarting; issued credentials remain available until collected or their
 existing one-use window expires. Saved settings and state stay outside the
 checkout under `/etc/getbible` and `/var/lib/getbible`. Updating source never
 replaces those values with the example configuration.
-An unavailable telemetry collector is reported as an update failure, but does
-not prevent independent API domain updates from proceeding. Use `dashboard
+An unavailable telemetry collector or a reporting-specific backup/migration
+failure is recorded as an incomplete management target, but does not prevent
+independent selected API targets from proceeding. Unknown history is never reset. Use `dashboard
 update` to refresh the dashboard and reporting services without redeploying
 API domains, then `dashboard status` to verify the running release.
+
+## Select targets and verify completion
+
+```sh
+getbible update --plan
+getbible update --plan --json
+getbible update --select
+getbible update --target runtime/query.example.com/v2 --target mcp/mcp.example.com --yes
+getbible update --target management --yes
+getbible update --targets '' --yes
+getbible update --all --yes
+getbible update --retry --yes
+```
+
+Use the exact IDs reported by your plan: `management`,
+`runtime/DOMAIN/vN` (or `root`), `mcp/DOMAIN`, and `static/DOMAIN`.
+The menu and dashboard's **Upgrade targets** use this same controller. Changed
+eligible targets are selected by default; clear the selection to perform no
+work. A displayed plan is rechecked under the management writer lock before
+activation, and stale plans must be reviewed again.
+
+A static target means its nginx/sync software, generated documentation and
+configuration, not a Bible data synchronization. Use `sync` explicitly for data.
+Software/image application neither downloads corpus data nor changes public DNS,
+requests certificates or modifies Cloudflare rules. Explicit access-policy and
+go-live actions remain the way to change those settings. Missing saved TLS
+material blocks that target while its prior routing is retained.
+
+Each selected target completes independently. Skipped required targets stay
+pending; failed targets preserve diagnostics and can be retried. A successful
+explicit subset returns success even when unrelated changes remain pending.
+A failed selected target returns failure, and a full `--all` application returns
+failure if any required target remains unresolved. Serving health is reported
+separately: a healthy retained generation does not make a rejected upgrade
+successful. Unselected runtime siblings retain their generation. A domain shares
+one nginx route, so applying one version may refresh the shared vhost/docs, but
+it does not redeploy another version. Resource admission can refuse a selected
+upgrade that cannot safely overlap live/draining workers; it does not silently
+redeploy unselected neighbours to obtain capacity.
+
+## Management release recovery
+
+Management code, launchers, service templates and frontend assets are staged
+under `/opt/getbible/management/releases`. Validation checks syntax/imports,
+asset references, identity and service-readable permissions before selection.
+The `current` link selects a complete generation; running processes resolve their
+own release rather than importing a mixture of old and newly copied files.
+The private activation journal and retained service definitions allow compatible
+recovery after copy, startup, health-check or interrupted activation failures.
+Unknown journal formats remain intact for inspection.
+
+The database version is inspected before stopping the collector. A current
+schema needs no stop or backup; supported migrations retain a durable snapshot.
+Dashboard reads remain available while reporting migrates, though reports may
+show temporary preparation/unavailability. A failed migration is rolled back by
+SQLite and does not reset history. If a newer schema already committed, old code
+that cannot read it is not restored: the status requires compatible forward
+recovery instead. Reapplying the desired management target retries safely.
+
+An unchanged management release keeps its original version/revision identity.
+`running_latest` compares implementation fingerprints, not just the global image
+number. There is no promise of zero interruption for a whole system-container
+replacement; its shutdown/startup is distinct from a graceful runtime handoff.
 
 ## Choose the operation
 
@@ -146,8 +216,13 @@ API domains, then `dashboard status` to verify the running release.
 | `status` | Shows service state and, in Docker, image release, applied release and image-update state. |
 | `doctor` | Diagnoses the installation without applying an update. |
 | `self-update` | Native: fetches the current branch's upstream and fast-forwards the clean manager checkout. The next invocation loads the updated code; hosted domains are not applied. Docker: directs the operator to host image replacement. |
-| `dashboard update` | Installs the current manager's dashboard and reporting code, restarts the dashboard backend, and verifies its running release. API runtimes are not redeployed. |
-| `update [DOMAIN]` | Applies current templates, helpers, configuration, documentation and runtime changes. Docker `update` retries/reapplies the installed image; native retains the selected exact Python patch while Docker adopts the newest bundled patch of the selected family. |
+| `dashboard update` | Stages and validates management code/assets together, activates changed code and verifies the backend; unchanged code is not restarted. Compatible prior code/units are retained for recovery. API runtimes are not redeployed. |
+| `update [DOMAIN]` | Uses the shared target planner. Without a domain, selects eligible changed targets; an interactive invocation presents a checklist. A domain restricts the scope to its targets and does not implicitly select management. Native retains the selected exact Python patch; Docker adopts the newest bundled patch of the selected family. |
+| `update --plan [--json]` | Inspects relevant implementation/configuration, selected generation and serving readiness without changing services or upgrade state. |
+| `update --target ID` | Applies only that target; repeat the option for multiple targets. `--targets ID,ID` is equivalent; `--targets ''` applies nothing. |
+| `update --retry` | Retries failed/interrupted targets. A currently blocked retry reports failure rather than silently succeeding. |
+| `update --force` | Explicitly allows fresh generations for selected unchanged targets. It is not needed for ordinary upgrades. |
+| `capacity [--json]` | Reports measured usage, saturation, collector backlog/throughput and advisory limits without changing any setting. |
 | `runtime DOMAIN update` | Rebuilds application dependencies and adopts the latest reviewed patch of each endpoint's selected Python family. `runtime DOMAIN v3 update` does it for one endpoint. |
 | `runtime DOMAIN [vN] update --python 3.14` | Explicitly selects the catalog's current 3.14 patch and creates a new runtime release. An exact catalog patch is also accepted. |
 | `runtime DOMAIN redeploy` | Starts a fresh deployment of every endpoint's current release and settings, rebuilding code only if its inputs changed. |

@@ -124,17 +124,17 @@ sync_pin_host() {
     ssh-keygen -l -f "$known" 2>/dev/null | grep -F "$host" || true
 }
 
-# Render and enable the service + timer for one version.
-sync_install_version() {
-    local domain="$1" label="$2" schedule unit user home stage_service stage_timer extras
+# Render only: upgrade planning reuses the exact installation templates.
+sync_render_version() {
+    local domain="$1" label="$2" directory="$3" schedule unit user home stage_service stage_timer extras
     ep_load "$domain"
     ep_version_load "$domain" "$label"
     user="$(sync_user "$domain")"
     home="$(sync_home "$domain")"
     unit="$(sync_unit "$domain" "$label")"
     schedule="${EP_SYNC_SCHEDULE:-$(gb_global DEFAULT_SYNC_SCHEDULE weekly)}"
-    stage_service="$(gb_tmpdir)/$unit.service"
-    stage_timer="$(gb_tmpdir)/$unit.timer"
+    stage_service="$directory/$unit.service"
+    stage_timer="$directory/$unit.timer"
     # A page or OpenAPI document that comes from the repository is exported
     # by path, whatever file types the endpoint otherwise serves.
     extras=""
@@ -150,6 +150,15 @@ sync_install_version() {
         "LIBEXEC=$GB_LIBEXEC" "RUN=$GB_RUN" "TELEGRAM_CONF=$GB_TELEGRAM_CONF" "GETBIBLE=${GB_SELF:-$GB_REPO_DIR/getbible.sh}" || return 1
     gb_render "$GB_TYPES/static/templates/sync.timer.tmpl" "$stage_timer" \
         "DOMAIN=$domain" "LABEL=$label" "REPO_URL=$EV_REPO_URL" "SCHEDULE=$schedule" || return 1
+}
+
+# Render and enable the service + timer for one version.
+sync_install_version() {
+    local domain="$1" label="$2" unit stage_service stage_timer
+    unit="$(sync_unit "$domain" "$label")"
+    stage_service="$(gb_tmpdir)/$unit.service"
+    stage_timer="$(gb_tmpdir)/$unit.timer"
+    sync_render_version "$domain" "$label" "$(gb_tmpdir)" || return 1
     sd_install_unit "$stage_service" "$unit.service" || return 1
     sd_install_unit "$stage_timer" "$unit.timer" || return 1
     sd_daemon_reload || return 1
