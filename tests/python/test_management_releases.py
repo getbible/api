@@ -85,6 +85,24 @@ class ManagementReleasesTest(unittest.TestCase):
         state = json.loads(self.releases.state_file.read_text())
         self.assertEqual(Path(state['unit_backup']).stat().st_mode & 0o777, 0o700)
 
+    def test_validation_imports_do_not_write_private_bytecode(self):
+        helper = self.source / 'src/bin/getbible-telemetry'
+        helper.write_text("import sys\nfrom pathlib import Path\n"
+                          "sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'apps/telemetry'))\n"
+                          "import getbible_telemetry.store\n")
+        previous = os.umask(0o077)
+        try:
+            candidate = self.stage()
+            self.select(candidate)
+        finally:
+            os.umask(previous)
+        self.assertFalse(list(candidate.rglob('__pycache__')))
+        # Older installed roots may have interpreter caches. They are not
+        # release inputs and cannot make intact source code look corrupted.
+        cache = candidate / 'apps/telemetry/getbible_telemetry/__pycache__'
+        cache.mkdir(mode=0o700)
+        self.assertEqual(self.stage(), candidate)
+
     def test_unreadable_retained_code_is_replaced_without_mutating_it(self):
         old = self.stage()
         self.select(old)
