@@ -70,6 +70,9 @@ update_image() {
                 return 1
             fi
             if rt_image_update "$domain"; then continue; fi
+        elif [[ "$(ep_get "$domain" TYPE)" == mcp ]]; then
+            endpoint_source_type mcp || return 1
+            if mcp_image_update "$domain"; then continue; fi
         elif endpoint_apply "$domain"; then
             continue
         fi

@@ -33,6 +33,7 @@ py_resolve_version() {
         *) return 1 ;;
     esac
 }
+py_bundle_validate() { :; }
 endpoint_apply() {
     [[ "$GB_LOCAL_APPLY" == true && "$RT_FORCE_BUILD" == false && "$RT_FORCE_DEPLOY" == false ]]
     [[ "$(ep_version_get "$1" v2 PYTHON_VERSION)" == 3.12.14 ]]

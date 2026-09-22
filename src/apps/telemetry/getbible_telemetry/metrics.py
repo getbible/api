@@ -160,6 +160,8 @@ class MetricsSampler:
             "memory": {"current_bytes": memory, "limit_bytes": memory_limit,
                        "measurement": "cgroup_memory_current" if scoped else "host_memtotal_minus_memavailable",
                        "used_fraction": memory / memory_limit if memory is not None and memory_limit else None,
+                       "host_available_bytes": host_memory.get("MemAvailable"),
+                       "host_total_bytes": host_memory.get("MemTotal"),
                        "swap_bytes": swap,
                        "events": _pairs(self.cgroup / "memory.events") if scoped else {},
                        "stat": _pairs(self.cgroup / "memory.stat") if scoped else {}},

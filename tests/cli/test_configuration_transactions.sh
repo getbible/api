@@ -9,6 +9,7 @@ for lib in core config registry transactions; do
 done
 trap 'gb_cleanup; rm -rf -- "$GB_PREFIX"' EXIT
 mkdir -p "$GB_LOG"
+tg_notify() { :; }
 domain=service.example.test
 ep_create "$domain" runtime query
 for label in v2 v3; do
@@ -48,10 +49,12 @@ configuration_transaction_begin "$domain"
 ep_version_set "$domain" v2 PYTHON_VERSION 3.12.14
 configuration_transaction_recover "$domain"
 check test "$(cat "$(ep_version_conf "$domain" v2)")" = "$before"
-# An ambiguous traffic switch must retain complete intent, not guess rollback.
+# An ambiguous traffic switch reconciles complete intent, never guessing rollback.
 configuration_transaction_begin "$domain"
 ep_version_set "$domain" v2 PYTHON_VERSION 3.12.14
 GB_CONFIGURATION_TRANSACTION="$(configuration_transaction_dir "$domain")" configuration_transaction_applying
+configuration_transaction_phase "$domain" switching
+endpoint_apply() { EP_ORIGIN_COMMITTED=true; ep_state_set "$1" LAST_ERROR 'Recovered interrupted deployment'; }
 configuration_transaction_recover "$domain"
 check test "$(ep_version_get "$domain" v2 PYTHON_VERSION)" = 3.12.14
 check test -n "$(ep_state_get "$domain" LAST_ERROR)"

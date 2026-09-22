@@ -856,7 +856,7 @@ class TelemetryStore:
         return {"bytes": sum(sizes.values()), "files": sizes, "active_bytes": (pages-free)*page_size,
                 "reusable_bytes": free*page_size, "first_request": bounds[0], "last_request": bounds[1],
                 "retention_events": gaps,
-                "metadata": {row[0]: json.loads(row[1]) for row in self.db.execute("SELECT key,value FROM metadata")}}
+                "metadata": {row[0]: json.loads(row[1]) for row in self.db.execute("SELECT key,value FROM metadata WHERE key NOT LIKE 'source_eof:%' AND key NOT LIKE 'capacity_internal:%'")}}
 
     @staticmethod
     def _size(path: str) -> int:

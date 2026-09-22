@@ -17,6 +17,8 @@ import signal
 import shlex
 import sqlite3
 import subprocess
+import sys
+import uuid
 import time
 from pathlib import Path
 from typing import Any
@@ -25,6 +27,7 @@ from .metrics import MetricsSampler
 from .health import HealthInspector
 from .store import TelemetryStore
 from .settings import SETTING_NAMES, numeric_setting
+from .capacity import CapacityTracker, incident_update
 
 
 def read_settings(path: str) -> dict[str, int]:
@@ -60,11 +63,20 @@ class Collector:
         self.notify = notify
         self.running = True
         self._alert_processes: list[subprocess.Popen] = []
-        self._last_cleanup: dict[str, tuple[int, float]] = {}
+        self._last_cleanup: dict[str, tuple[int, int, float]] = {}
+        self._cleanup_cursor = 0
+        self._ingest_cursors = [0, 0]
+        self._batch_pending = False
+        self._pass_pending = False
+        self._committed_bytes = 0
+        self._committed_records = 0
+        self._instance = uuid.uuid4().hex
+        self._capacity = CapacityTracker(store)
+        self._history_max_bytes = 10 * 1024**3
         self._lock = None
         self._storage_alert_at = 0.0
         self.alert_settings = {
-            "ALERT_COOLDOWN_SECONDS": 900, "ALERT_HOLD_SECONDS": 60,
+            "ALERT_COOLDOWN_SECONDS": 900, "ALERT_REMINDER_SECONDS": 86400, "ALERT_HOLD_SECONDS": 60,
             "ALERT_CPU_PERCENT": 95, "ALERT_MEMORY_PERCENT": 90,
             "ALERT_DISK_PERCENT": 90, "ALERT_MEMORY_PRESSURE_PERCENT": 10,
             "ALERT_SYNC_GRACE_SECONDS": 3600,
@@ -111,6 +123,11 @@ class Collector:
         try:
             stat = path.stat()
             identity = f"{stat.st_dev}:{stat.st_ino}"
+            self._batch_pending = False
+            signature = [stat.st_size, stat.st_mtime_ns, endpoint, source]
+            complete = self.store.db.execute("SELECT value FROM metadata WHERE key=?", ("source_eof:" + identity,)).fetchone()
+            if complete and json.loads(complete[0]) == signature:
+                return 0
             opener = gzip.open if path.suffix == ".gz" else open
             with opener(path, "rb") as handle:
                 row = self.store.db.execute("SELECT * FROM sources WHERE identity=?", (identity,)).fetchone()
@@ -130,11 +147,15 @@ class Collector:
                 handle.seek(offset)
                 records = []
                 size = 0
+                committed_start = offset
                 blocked = False
+                eof = False
+                partial = False
                 while len(records) < self.batch_size and size < 8 * 1024 * 1024:
                     start = handle.tell()
                     line = handle.readline(self.max_line_bytes + 1)
                     if not line:
+                        eof = True
                         break
                     if len(line) > self.max_line_bytes:
                         blocked = True
@@ -142,6 +163,7 @@ class Collector:
                     if not line.endswith(b"\n"):
                         # Producers may still be finishing this record. Preserve
                         # the cursor and revisit, even across a collector restart.
+                        partial = True
                         break
                     offset = handle.tell()
                     size += len(line)
@@ -163,6 +185,7 @@ class Collector:
                     record_key = hashlib.sha256(key_data).hexdigest()
                     record_source = "diagnostic" if entry.get("event") == "unstructured_log" else source
                     records.append((entry, record_source, record_key))
+                self._batch_pending = not (eof or blocked or partial)
                 with self.store.db:
                     if truncated:
                         self.store.note_gap("source_replaced_or_truncated", str(path) + ": previous committed offset "
@@ -175,11 +198,20 @@ class Collector:
                         "fingerprint=excluded.fingerprint,fingerprint_bytes=excluded.fingerprint_bytes,generation=excluded.generation,"
                         "updated=excluded.updated,closed=excluded.closed",
                         (identity, str(path), offset, fingerprint, fingerprint_bytes, generation, time.time(), int(rotated)))
+                    after = os.fstat(handle.fileno())
+                    if eof and (after.st_size, after.st_mtime_ns) == (stat.st_size, stat.st_mtime_ns):
+                        self.store.set_metadata("source_eof:" + identity, signature)
+                    else:
+                        self.store.db.execute("DELETE FROM metadata WHERE key=?", ("source_eof:" + identity,))
+                    self.store.db.execute("DELETE FROM metadata WHERE key=?", ("source_error:" + str(path),))
                     if blocked:
                         self.store.set_metadata("blocked_source:" + identity,
                                                 {"path": str(path), "offset": offset, "reason": "line exceeds configured maximum; spool retained"})
                     else:
                         self.store.db.execute("DELETE FROM metadata WHERE key=?", ("blocked_source:" + identity,))
+                if path.suffix != ".gz":
+                    self._committed_bytes += max(0, offset - committed_start)
+                self._committed_records += len(records)
                 return len(records)
         except (FileNotFoundError, PermissionError, gzip.BadGzipFile, EOFError) as exc:
             with self.store.db:
@@ -223,85 +255,163 @@ class Collector:
                     os.close(fd)
                 rotated += 1
                 nginx = nginx or source in {"edge", "diagnostic"}
+                with self.store.db:
+                    self.store.db.execute("DELETE FROM metadata WHERE key=?", ("rotation_error:" + str(path),))
             except OSError as exc:
                 with self.store.db:
                     self.store.set_metadata("rotation_error:" + str(path), {"time": time.time(), "error": str(exc)})
-        if nginx and not self._nginx_reopen():
+        if nginx:
             with self.store.db:
-                self.store.set_metadata("nginx_reopen_failed", {"time": time.time(), "spools_retained": True})
+                if self._nginx_reopen():
+                    self.store.db.execute("DELETE FROM metadata WHERE key='nginx_reopen_failed'")
+                else:
+                    self.store.set_metadata("nginx_reopen_failed", {"time": time.time(), "spools_retained": True})
         return rotated
 
-    @staticmethod
-    def _open_in_process(path: Path) -> bool:
-        """Conservative Linux check: never unlink a producer's open spool.
+    def ingest_pass(self, *, time_budget: float = .25) -> int:
+        """Alternate live and closed sources, yielding between bounded commits.
 
-        Collector runs with enough process visibility to check nginx/runtime
-        descriptors. Permission failures retain the file instead of guessing.
+        Remember each group's position so a slow backlog cannot starve a hot
+        endpoint, and a hot endpoint cannot starve archived history. The budget
+        applies between atomic batches; no transaction is abandoned mid-commit.
         """
-        target = str(path)
-        for directory in Path("/proc").glob("[0-9]*/fd"):
-            try:
-                for descriptor in directory.iterdir():
-                    try:
-                        if os.readlink(descriptor).removesuffix(" (deleted)") == target:
-                            return True
-                    except FileNotFoundError:
-                        continue
-                    except PermissionError:
-                        return True
-            except FileNotFoundError:
-                continue
-            except PermissionError:
-                return True
-        return False
+        files = self.files()
+        groups = ([row for row in files if not row[3]], [row for row in files if row[3]])
+        done = [0, 0]
+        work = 0
+        self._pass_pending = False
+        deadline = time.monotonic() + time_budget
+        while any(done[i] < len(group) for i, group in enumerate(groups)):
+            for i, group in enumerate(groups):
+                if done[i] >= len(group):
+                    continue
+                index = self._ingest_cursors[i] % len(group)
+                path, endpoint, source, rotated = group[index]
+                self._batch_pending = False
+                work += self.ingest_file(path, endpoint, source, rotated=rotated)
+                self._pass_pending = self._pass_pending or self._batch_pending
+                self._ingest_cursors[i] = (index + 1) % len(group)
+                done[i] += 1
+                if not self.running or time.monotonic() >= deadline:
+                    self._pass_pending |= any(done[j] < len(rows) for j, rows in enumerate(groups))
+                    return work
+        return work
 
     def cleanup(self) -> int:
-        removed = 0
-        for path, _, _, rotated in self.files():
-            # Legacy compressed archives are imported but retained for explicit
-            # operator review. Only our own transport spools are auto-removed.
-            if not rotated or not path.name.endswith(".spool"):
-                continue
+        candidates = []
+        spools = [entry[0] for entry in self.files() if entry[3] and entry[0].name.endswith(".spool")]
+        if spools:
+            start = self._cleanup_cursor % len(spools)
+            spools = spools[start:] + spools[:start]
+        checked = 0
+        live = set()
+        for path in spools:
             try:
                 stat = path.stat()
                 identity = f"{stat.st_dev}:{stat.st_ino}"
+                live.add(identity)
                 row = self.store.db.execute("SELECT offset FROM sources WHERE identity=?", (identity,)).fetchone()
                 if row is None or row[0] != stat.st_size:
                     self._last_cleanup.pop(identity, None)
                     continue
                 previous = self._last_cleanup.get(identity)
-                self._last_cleanup[identity] = stat.st_size, time.monotonic()
-                if previous is None or previous[0] != stat.st_size or time.monotonic() - previous[1] < 5:
+                if previous is None or previous[:2] != (stat.st_size, stat.st_mtime_ns):
+                    self._last_cleanup[identity] = stat.st_size, stat.st_mtime_ns, time.monotonic()
                     continue
-                if self._open_in_process(path):
+                if time.monotonic() - previous[2] < 5:
                     continue
-                # Recheck after descriptor scan. Cursor is already durable.
-                if path.stat().st_size != stat.st_size:
-                    continue
-                path.unlink()
-                self._last_cleanup.pop(identity, None)
-                with self.store.db:
-                    self.store.db.execute("DELETE FROM sources WHERE identity=?", (identity,))
-                removed += 1
+                candidates.append({"path": str(path), "identity": identity, "size": stat.st_size,
+                                   "mtime_ns": stat.st_mtime_ns})
+                checked += 1
+                if checked == 32:
+                    break
             except FileNotFoundError:
                 continue
+        self._cleanup_cursor += max(1, checked)
+        # No /proc visibility assumptions or added Docker capabilities: a read
+        # lease proves that the committed archive has no writable descriptor.
+        if not candidates:
+            return 0
+        try:
+            process = subprocess.run([sys.executable, str(Path(__file__).with_name("spools.py"))],
+                                     input=json.dumps(candidates), capture_output=True, text=True, timeout=5)
+            if process.returncode:
+                raise RuntimeError("spool reclamation helper failed")
+            results = json.loads(process.stdout)
+        except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            with self.store.db:
+                self.store.set_metadata("spool_cleanup", {"time": time.time(), "removed": 0,
+                                                          "retained": len(candidates), "error": str(exc)})
+            return 0
+        removed = 0
+        with self.store.db:
+            for result in results:
+                if not result.get("removed"):
+                    continue
+                identity = result["identity"]
+                self.store.db.execute("DELETE FROM sources WHERE identity=?", (identity,))
+                self.store.db.execute("DELETE FROM metadata WHERE key IN (?,?)",
+                                      ("source_eof:" + identity, "blocked_source:" + identity))
+                self._last_cleanup.pop(identity, None)
+                removed += 1
+            self.store.set_metadata("spool_cleanup", {"time": time.time(), "removed": removed,
+                "retained": len(candidates) - removed,
+                "reasons": sorted({item["reason"] for item in results if item.get("reason")})})
         return removed
 
     def state(self) -> dict[str, Any]:
-        total, unread = 0, 0
-        for path, _, _, _ in self.files():
+        total = unread = active = rotated_bytes = consumed = archives = pending_archives = compressed_pending = 0
+        unread_files = active_files = 0
+        sources = {row["identity"]: row for row in self.store.db.execute("SELECT identity,offset FROM sources")}
+        completed = {row[0].removeprefix("source_eof:"): json.loads(row[1]) for row in
+                     self.store.db.execute("SELECT key,value FROM metadata WHERE key LIKE 'source_eof:%'")}
+        for path, endpoint, source, rotated in self.files():
             try:
                 stat = path.stat()
+                identity = f"{stat.st_dev}:{stat.st_ino}"
                 total += stat.st_size
-                row = self.store.db.execute("SELECT offset FROM sources WHERE identity=?", (f"{stat.st_dev}:{stat.st_ino}",)).fetchone()
-                if path.suffix != ".gz":
-                    unread += max(0, stat.st_size - (row[0] if row else 0))
+                offset = sources[identity]["offset"] if identity in sources else 0
+                complete = completed.get(identity) == [stat.st_size, stat.st_mtime_ns, endpoint, source]
+                if not rotated:
+                    active += stat.st_size
+                    active_files += 1
+                elif path.name.endswith(".spool"):
+                    rotated_bytes += stat.st_size
+                    if offset == stat.st_size:
+                        consumed += stat.st_size
+                else:
+                    archives += stat.st_size
+                    if not complete:
+                        pending_archives += stat.st_size
+                if path.suffix == ".gz":
+                    if not complete:
+                        compressed_pending += stat.st_size
+                        unread_files += 1
+                else:
+                    remaining = max(0, stat.st_size - offset)
+                    unread += remaining
+                    unread_files += bool(remaining)
             except FileNotFoundError:
                 pass
+        budgeted = active + rotated_bytes + pending_archives
+        page = self.store.db.execute("PRAGMA page_size").fetchone()[0]
+        history_active = (self.store.db.execute("PRAGMA page_count").fetchone()[0]
+                          - self.store.db.execute("PRAGMA freelist_count").fetchone()[0]) * page
+        problems = {row[0]: json.loads(row[1]) for row in self.store.db.execute(
+            "SELECT key,value FROM metadata WHERE key LIKE 'blocked_source:%' OR key LIKE 'source_error:%' "
+            "OR key IN ('nginx_reopen_failed','spool_cleanup')")}
         return {"spool_bytes": total, "unread_bytes": unread, "spool_max_bytes": self.spool_max_bytes,
-                "spool_over_budget": total > self.spool_max_bytes, "heartbeat": time.time(),
+                "budgeted_spool_bytes": budgeted, "active_bytes": active, "active_files": active_files,
+                "rotated_spool_bytes": rotated_bytes, "consumed_rotated_bytes": consumed,
+                "retained_archive_bytes": archives, "pending_archive_bytes": pending_archives,
+                "compressed_pending_bytes": compressed_pending, "unread_files": unread_files,
+                "spool_over_budget": budgeted > self.spool_max_bytes, "heartbeat": time.time(),
+                "rotate_bytes": self.rotate_bytes, "collector_instance": self._instance,
+                "committed_bytes": self._committed_bytes, "committed_records": self._committed_records,
+                "history_active_bytes": history_active, "history_max_bytes": self._history_max_bytes,
+                "problems": problems,
                 "durability": "batched FULL SQLite commits after buffered producer writes",
-                "budget_enforcement": "oldest committed history is pruned; unread spools are retained and alerted"}
+                "budget_enforcement": "transport and pending imports count; completed legacy archives are retained separately; unread spools are never deleted"}
 
     def journal(self, executable: str = "/usr/bin/journalctl") -> int:
         """Read bounded getBible service events using a durable journal cursor."""
@@ -391,33 +501,42 @@ class Collector:
         alerts = json.loads(row[0]) if row else {}
         memory = sample.get("memory", {}).get("used_fraction")
         cpu = sample.get("cpu", {}).get("used_fraction")
-        pressure = sample.get("pressure", {}).get("memory") or {}
-        memory_pressure = (pressure.get("full") or {}).get("avg10", 0)
+        pressure = (sample.get("pressure", {}).get("memory") or {}).get("full") or {}
+        disk = max((d.get("used_fraction") or 0 for d in sample.get("disks", [])), default=0)
+        usage = state.get("budgeted_spool_bytes", state.get("spool_bytes", 0))
+        allowance = state.get("spool_max_bytes", self.spool_max_bytes)
+        details = (f"Transport/pending spools {usage / 1024**3:.2f} GiB / {allowance / 1024**3:.2f} GiB; "
+                   f"unread {state.get('unread_bytes', 0) / 1024**2:.1f} MiB, "
+                   f"committed closed spools {state.get('consumed_rotated_bytes', 0) / 1024**2:.1f} MiB. "
+                   "Unread/active files are preserved. Use getbible capacity for collection health and sizing advice.")
         conditions = {
-            "memory": (memory is not None and memory >= self.alert_settings["ALERT_MEMORY_PERCENT"] / 100, "Memory exceeds the configured percentage of its available limit."),
-            "cpu": (cpu is not None and cpu >= self.alert_settings["ALERT_CPU_PERCENT"] / 100, "CPU has sustained demand above the configured percentage of its available limit."),
-            "memory_pressure": (memory_pressure >= self.alert_settings["ALERT_MEMORY_PRESSURE_PERCENT"], "Memory pressure is stalling work; inspect resident caches and concurrency."),
-            "disk": (any(d.get("used_fraction", 0) >= self.alert_settings["ALERT_DISK_PERCENT"] / 100 for d in sample.get("disks", [])), "Data filesystem exceeds the configured usage threshold."),
-            "telemetry_spool": (bool(state.get("spool_over_budget")), "Unread/active telemetry spools exceed their configured budget; they have not been deleted."),
+            "memory": (memory, self.alert_settings["ALERT_MEMORY_PERCENT"] / 100, "Memory exceeds its configured threshold."),
+            "cpu": (cpu, self.alert_settings["ALERT_CPU_PERCENT"] / 100, "CPU demand exceeds its configured threshold."),
+            "memory_pressure": (pressure.get("avg10"), self.alert_settings["ALERT_MEMORY_PRESSURE_PERCENT"], "Memory pressure is stalling work; inspect caches and concurrency."),
+            "disk": (disk if sample.get("disks") else None, self.alert_settings["ALERT_DISK_PERCENT"] / 100, "The data filesystem exceeds its usage threshold."),
+            "telemetry_spool": (usage, allowance, details),
         }
         services = sample.get("services", {})
         if services.get("available"):
             for key in alerts:
                 if key.startswith(("service:", "sync:")):
-                    conditions[key] = (False, "Previously reported service condition cleared.")
+                    conditions[key] = (0, 1, "Previously reported service condition cleared.")
             for key, condition in services.get("conditions", {}).items():
-                conditions[key] = (condition["unhealthy"], condition["message"])
-        for key, (unhealthy, message) in conditions.items():
-            previous = alerts.setdefault(key, {"since": None, "last_sent": 0, "active": False})
-            if unhealthy:
-                previous["since"] = previous["since"] or now
-                if now - previous["since"] >= self.alert_settings["ALERT_HOLD_SECONDS"] and now - previous["last_sent"] >= self.alert_settings["ALERT_COOLDOWN_SECONDS"]:
-                    self._notify("warn", "getBible capacity: " + key, message)
-                    previous["last_sent"], previous["active"] = now, True
-            else:
-                if previous["active"]:
+                conditions[key] = (int(condition["unhealthy"]), 1, condition["message"])
+        for key, (value, threshold, message) in conditions.items():
+            if value is None:
+                continue  # Missing sensors are not evidence of recovery.
+            previous = alerts.setdefault(key, {})
+            event = incident_update(previous, value, threshold, now=now,
+                                    hold=self.alert_settings["ALERT_HOLD_SECONDS"],
+                                    cooldown=self.alert_settings["ALERT_COOLDOWN_SECONDS"],
+                                    reminder=self.alert_settings["ALERT_REMINDER_SECONDS"])
+            if event:
+                if event == "recovered":
                     self._notify("info", "getBible recovered: " + key, "The previously reported condition has cleared.")
-                previous["since"], previous["active"] = None, False
+                else:
+                    self._notify("warn", "getBible capacity: " + key,
+                                 message + (" Persistent incident reminder." if event == "reminder" else ""))
         with self.store.db:
             self.store.set_metadata("health_alerts", alerts)
 
@@ -429,10 +548,11 @@ class Collector:
         metrics_seconds = numeric_setting("TELEMETRY_METRICS_SECONDS", metrics_seconds)
         retention_days = numeric_setting("TELEMETRY_RETENTION_DAYS", retention_days)
         self.lock()
+        self._history_max_bytes = max_bytes
         sampler = MetricsSampler(cgroup_root=cgroup_root, disks=[str(self.root), str(self.store.path.parent)])
         inspector = HealthInspector(systemctl)
         next_metric = next_prune = next_cleanup = next_settings = 0.0
-        next_ingest = 0.0
+        next_ingest = next_rollup = 0.0
         try:
             while self.running:
                 began = time.monotonic()
@@ -446,6 +566,7 @@ class Collector:
                             flush_seconds = current.get("TELEMETRY_FLUSH_SECONDS", flush_seconds)
                             next_ingest = min(next_ingest, began + flush_seconds)
                             metrics_seconds = current.get("TELEMETRY_METRICS_SECONDS", metrics_seconds)
+                            self._history_max_bytes = max_bytes
                             self.batch_size = int(current.get("TELEMETRY_BATCH_SIZE", self.batch_size))
                             self.rotate_bytes = int(current.get("TELEMETRY_SPOOL_ROTATE_MIB", self.rotate_bytes / 1024**2) * 1024**2)
                             self.spool_max_bytes = int(current.get("TELEMETRY_SPOOL_MAX_GIB", self.spool_max_bytes / 1024**3) * 1024**3)
@@ -458,12 +579,11 @@ class Collector:
                                 self.store.set_metadata("settings_error", {"time": time.time(), "error": str(exc)})
                         next_settings = began + 30
                     if began >= next_ingest:
-                        for path, endpoint, source, rotated in self.files():
-                            work += self.ingest_file(path, endpoint, source, rotated=rotated)
+                        work = self.ingest_pass()
                         # A full batch indicates backlog. Drain it promptly in
                         # bounded transactions; otherwise honor the configured
                         # ingestion interval independently of housekeeping.
-                        next_ingest = time.monotonic() + (.01 if work >= self.batch_size else flush_seconds)
+                        next_ingest = time.monotonic() + (.01 if self._pass_pending else flush_seconds)
                     now = time.monotonic()
                     if now >= next_metric:
                         if journal:
@@ -473,6 +593,7 @@ class Collector:
                         with self.store.db:
                             self.store.append_metric({**sample, "telemetry": state})
                             self.store.set_metadata("collector", state)
+                            self._capacity.observe(sample, state)
                         self.health(sample, state)
                         next_metric = now + max(1, metrics_seconds)
                     if now >= next_prune:
@@ -487,7 +608,9 @@ class Collector:
                     # Historical reporting work is resumable and follows each
                     # bounded ingestion pass. It never delays source commits or
                     # makes ordinary request handlers maintain the database.
-                    self.store.refresh_rollups(max_buckets=4, time_budget=0.25)
+                    if now >= next_rollup:
+                        self.store.refresh_rollups(max_buckets=1 if self._pass_pending else 4, time_budget=.1)
+                        next_rollup = time.monotonic() + (2 if self._pass_pending else .25)
                 except (sqlite3.Error, OSError) as exc:
                     self.store.db.rollback()
                     # With a full/unavailable database, durable cursors do not

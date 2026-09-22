@@ -13,6 +13,8 @@
 
 [[ -n "${GB_TYPE_RUNTIME_LOADED:-}" ]] && return 0
 GB_TYPE_RUNTIME_LOADED=1
+# shellcheck source=../../lib/transactions.sh
+source "$GB_LIB/transactions.sh"
 # shellcheck source=../../lib/resources.sh
 source "$GB_LIB/resources.sh"
 
@@ -439,6 +441,10 @@ type_runtime_prepare() {
     while read -r label; do
         [[ -n "$label" ]] || continue
         [[ "$(ep_version_get "$domain" "$label" ENABLED true)" == true ]] || continue
+        if [[ -n "${RT_APPLY_LABELS:-}" && "$RT_APPLY_LABELS" != *" $label "* ]]; then
+            [[ -n "$(rt_active_generation "$domain" "$label")" ]] || { gb_warn "Unselected endpoint $domain $label has no serving generation; select it for deployment."; return 1; }
+            continue
+        fi
         RT_LABELS+=("$label")
         rt_prepare_endpoint "$domain" "$label" || return 1
     done < <(ep_versions "$domain")
@@ -1318,78 +1324,68 @@ rt_restart() { rt_redeploy "$1"; }
 # release of one endpoint, or of every endpoint. Ordinary apply retains the
 # selected exact interpreter version.
 rt_update() {
-    local domain="$1" label="" selector="" configured resolved backup status=0
-    local -a labels=()
+    local domain="$1" label="" selector=""
     shift
     if [[ -n "${1:-}" ]] && gb_valid_endpoint_label "$1"; then label="$1"; shift; fi
-    if [[ $# -gt 0 ]]; then
-        [[ $# -eq 2 && "$1" == --python ]] || { gb_warn "runtime update accepts [ENDPOINT] [--python VERSION]"; return 1; }
+    if (( $# )); then
+        [[ $# == 2 && "$1" == --python ]] || { gb_warn 'runtime update accepts [ENDPOINT] [--python VERSION]'; return 1; }
         selector="$2"
     fi
-    if [[ -n "$label" ]]; then
-        ep_version_exists "$domain" "$label" || { gb_warn "$domain has no endpoint $label"; return 1; }
-        labels=("$label")
-    else
-        mapfile -t labels < <(type_runtime_endpoints "$domain")
-    fi
-    backup="$(mktemp -d "$(gb_tmpdir)/runtime-update.XXXXXX")" || return 1
-    cp -a -- "$(ep_versions_dir "$domain")/." "$backup/" || return 1
-    for label in "${labels[@]}"; do
-        configured="$(ep_version_get "$domain" "$label" PYTHON_VERSION)"
-        if [[ -n "$selector" ]]; then resolved="$selector"
-        elif [[ "$configured" == *.*.* ]]; then resolved="${configured%.*}"
-        else resolved="$configured"; fi
-        resolved="$(py_resolve_version "$resolved")" || return 1
-        ep_version_set "$domain" "$label" PYTHON_VERSION "$resolved" || return 1
-    done
-    local RT_FORCE_BUILD=true RT_FORCE_DEPLOY=true RT_ONLY_LABEL=""
-    [[ ${#labels[@]} -ne 1 ]] || RT_ONLY_LABEL="${labels[0]}"
-    endpoint_apply "$domain" || status=$?
-    if (( status != 0 )); then
-        for label in "${labels[@]}"; do gb_install_file "$backup/$label.conf" "$(ep_version_conf "$domain" "$label")" 0640 || return 1; done
-    fi
-    rm -rf -- "$backup"
-    return "$status"
+    local RT_FORCE_BUILD=true RT_FORCE_DEPLOY=true RT_ONLY_LABEL="$label"
+    rt_update_transaction "$domain" "$selector" ${label:+"$label"}
 }
 
-# Apply an installed image to saved runtime endpoints without forcing unchanged
-# releases to rebuild. Resolve every selected Python family before changing the
-# registry; failed candidates restore those settings and retain live generations.
-rt_image_update() {
-    local domain="$1" label configured resolved backup index status=0
-    local -a labels=() versions=()
-    # shellcheck disable=SC2034 # Read by the shared endpoint_apply transaction.
-    local GB_LOCAL_APPLY=true
-    local RT_FORCE_BUILD=false RT_FORCE_DEPLOY=false RT_ONLY_LABEL=""
-    gb_is_docker || { gb_warn 'Image runtime updates require Docker mode.'; return 1; }
+# All entry points use this transaction. Callers choose the force/local policy,
+# not an alternative mutation/rollback implementation. Labels may be a subset.
+rt_update_transaction() {
+    local domain="$1" selector="$2" label configured resolved index status=0
+    local GB_CONFIGURATION_TRANSACTION=""
+    local -a labels=() versions=() paths=()
+    shift 2
     [[ "$(ep_get "$domain" TYPE)" == runtime ]] || { gb_warn "$domain is not a runtime domain."; return 1; }
     [[ "$(ep_get "$domain" ENABLED true)" == true ]] || return 0
-    while IFS= read -r label; do
-        [[ -n "$label" && "$(ep_version_get "$domain" "$label" ENABLED true)" == true ]] || continue
-        configured="$(ep_version_get "$domain" "$label" PYTHON_VERSION)"
-        [[ "$configured" != *.*.* ]] || configured="${configured%.*}"
-        resolved="$(py_resolve_version "$configured")" || return 1
-        labels+=("$label"); versions+=("$resolved")
-    done < <(type_runtime_endpoints "$domain")
-    (( ${#labels[@]} > 0 )) || return 0
-    backup="$(mktemp -d "$(gb_tmpdir)/runtime-image-update.XXXXXX")" || return 1
+    configuration_transaction_recover "$domain" || return 1
+    if (( $# )); then
+        for label in "$@"; do
+            ep_version_exists "$domain" "$label" || { gb_warn "$domain has no endpoint $label"; return 1; }
+            [[ "$(ep_version_get "$domain" "$label" ENABLED true)" == true ]] || { gb_warn "$domain $label is disabled."; return 1; }
+            labels+=("$label")
+        done
+    else
+        while IFS= read -r label; do
+            [[ -n "$label" && "$(ep_version_get "$domain" "$label" ENABLED true)" == true ]] && labels+=("$label")
+        done < <(type_runtime_endpoints "$domain")
+    fi
+    (( ${#labels[@]} )) || return 0
+    # Every selection and image wheel set must resolve before the first write.
     for label in "${labels[@]}"; do
-        if ! cp -p -- "$(ep_version_conf "$domain" "$label")" "$backup/$label.conf"; then
-            rm -rf -- "$backup"
-            return 1
-        fi
+        configured="${selector:-$(ep_version_get "$domain" "$label" PYTHON_VERSION)}"
+        if [[ -z "$selector" && "$configured" == *.*.* ]]; then configured="${configured%.*}"; fi
+        resolved="$(py_resolve_version "$configured")" || return 1
+        py_bundle_validate "$(rt_implementation "$(ep_get "$domain" KIND)" "$(rt_app_version "$domain" "$label")")" "$resolved" || return 1
+        versions+=("$resolved"); paths+=("$(ep_version_conf "$domain" "$label")")
     done
+    [[ "$GB_DRY_RUN" != true ]] || { gb_log "Would update $domain endpoints: ${labels[*]}; Python: ${versions[*]}."; return 0; }
+    configuration_transaction_begin "$domain" "${paths[@]}" || return 1
+    EP_ORIGIN_COMMITTED=false; EP_APPLY_EDGE_FAILED=false; EP_APPLY_RECOVERY_SAFE=true
     for index in "${!labels[@]}"; do
         if ! ep_version_set "$domain" "${labels[$index]}" PYTHON_VERSION "${versions[$index]}"; then status=1; break; fi
     done
+    local RT_APPLY_LABELS
+    printf -v RT_APPLY_LABELS ' %s' "${labels[@]}"
+    RT_APPLY_LABELS+=' '
+    if (( status == 0 )); then configuration_transaction_prepared "$domain" || status=$?; fi
     if (( status == 0 )); then endpoint_apply "$domain" || status=$?; fi
-    if (( status != 0 )); then
-        for label in "${labels[@]}"; do
-            gb_install_file "$backup/$label.conf" "$(ep_version_conf "$domain" "$label")" 0640 || return 1
-        done
-    fi
-    rm -rf -- "$backup"
-    return "$status"
+    configuration_transaction_finish "$status"
+}
+
+rt_image_update() {
+    local domain="$1"
+    shift
+    # shellcheck disable=SC2034 # Read by the shared deployment transaction.
+    local GB_LOCAL_APPLY=true RT_FORCE_BUILD=false RT_FORCE_DEPLOY=false RT_ONLY_LABEL=""
+    gb_is_docker || { gb_warn 'Image runtime updates require Docker mode.'; return 1; }
+    rt_update_transaction "$domain" '' "$@"
 }
 
 rt_setting_allowed() {
@@ -1401,44 +1397,42 @@ rt_setting_allowed() {
 
 # rt_set_setting DOMAIN LABEL KEY VALUE
 rt_set_setting() {
-    local domain="$1" label="$2" key="$3" value="$4" backup status=0 conf
+    local domain="$1" label="$2" key="$3" value="$4" status=0
+    local GB_CONFIGURATION_TRANSACTION="" RT_APPLY_LABELS=" $2 "
     rt_setting_allowed "$key" || return 1
     ep_version_exists "$domain" "$label" || { gb_warn "$domain has no endpoint $label"; return 1; }
-    conf="$(ep_version_conf "$domain" "$label")"
-    backup="$(mktemp "$(gb_tmpdir)/runtime-settings.XXXXXX")" || return 1
-    cp -p -- "$conf" "$backup" || return 1
-    ep_version_set "$domain" "$label" "$key" "$value" || return 1
-    if ! rt_validate_settings "$domain" "$label"; then
-        gb_install_file "$backup" "$conf" 0640 || return 1
-        rm -f -- "$backup"; return 1
-    fi
-    endpoint_apply "$domain" || status=$?
-    if (( status != 0 )); then gb_install_file "$backup" "$conf" 0640 || return 1; fi
-    rm -f -- "$backup"
-    return "$status"
+    [[ "$GB_DRY_RUN" != true ]] || { gb_log "Would set $domain $label $key."; return 0; }
+    configuration_transaction_begin "$domain" "$(ep_version_conf "$domain" "$label")" || return 1
+    EP_ORIGIN_COMMITTED=false; EP_APPLY_EDGE_FAILED=false; EP_APPLY_RECOVERY_SAFE=true
+    ep_version_set "$domain" "$label" "$key" "$value" || status=1
+    if (( status == 0 )); then rt_validate_settings "$domain" "$label" || status=$?; fi
+    if (( status == 0 )); then configuration_transaction_prepared "$domain" || status=$?; fi
+    if (( status == 0 )); then endpoint_apply "$domain" || status=$?; fi
+    configuration_transaction_finish "$status"
 }
 
 # rt_rollback DOMAIN LABEL: the previous generation's code and settings,
 # keeping the domain's current authentication, quotas and tokens.
 rt_rollback() {
-    local domain="$1" label="$2" previous backup key value status=0 conf source
+    local domain="$1" label="$2" previous key value status=0 source
+    local GB_CONFIGURATION_TRANSACTION="" RT_APPLY_LABELS=" $2 "
     ep_version_exists "$domain" "$label" || { gb_warn "$domain has no endpoint $label"; return 1; }
+    configuration_transaction_recover "$domain" || return 1
     previous="$(rt_previous_generation "$domain" "$label")"
     [[ -n "$previous" && -f "$previous/version.conf" ]] || { gb_warn "No retained runtime deployment of $domain $label to roll back to"; return 1; }
-    conf="$(ep_version_conf "$domain" "$label")"
-    backup="$(mktemp "$(gb_tmpdir)/runtime-rollback.XXXXXX")" || return 1
-    cp -p -- "$conf" "$backup" || return 1
+    [[ "$GB_DRY_RUN" != true ]] || { gb_log "Would restore the retained generation of $domain $label."; return 0; }
+    configuration_transaction_begin "$domain" "$(ep_version_conf "$domain" "$label")" || return 1
+    EP_ORIGIN_COMMITTED=false; EP_APPLY_EDGE_FAILED=false; EP_APPLY_RECOVERY_SAFE=true
     source="$previous/version.conf"
     for key in "${RT_VERSION_SETTINGS[@]}"; do
         value="$(cfg_get "$source" "$key" __missing__)"
         [[ "$value" != __missing__ ]] || continue
-        ep_version_set "$domain" "$label" "$key" "$value" || return 1
+        if ! ep_version_set "$domain" "$label" "$key" "$value"; then status=1; break; fi
     done
     local RT_ROLLBACK_SOURCE="$previous" RT_FORCE_DEPLOY=true RT_ONLY_LABEL="$label"
-    endpoint_apply "$domain" || status=$?
-    if (( status != 0 )); then gb_install_file "$backup" "$conf" 0640 || return 1; fi
-    rm -f -- "$backup"
-    return "$status"
+    if (( status == 0 )); then configuration_transaction_prepared "$domain" || status=$?; fi
+    if (( status == 0 )); then endpoint_apply "$domain" || status=$?; fi
+    configuration_transaction_finish "$status"
 }
 
 # --- domain menu --------------------------------------------------------------

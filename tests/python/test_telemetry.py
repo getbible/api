@@ -431,9 +431,9 @@ class TelemetryTest(unittest.TestCase):
         self.assertEqual(collector.cleanup(), 0)
         collector.ingest_file(path, "bible.test", "edge", rotated=True)
         collector.cleanup()
-        with patch("getbible_telemetry.collector.time.monotonic", return_value=10**12), patch.object(collector, "_open_in_process", return_value=True):
+        with path.open("ab"), patch("getbible_telemetry.collector.time.monotonic", return_value=10**12):
             self.assertEqual(collector.cleanup(), 0)
-        with patch("getbible_telemetry.collector.time.monotonic", return_value=2*10**12), patch.object(collector, "_open_in_process", return_value=False):
+        with patch("getbible_telemetry.collector.time.monotonic", return_value=2*10**12):
             self.assertEqual(collector.cleanup(), 1)
         self.assertFalse(path.exists())
         self.assertEqual(self.store.summary(0, 200)["calls"], 1)
@@ -460,7 +460,10 @@ class TelemetryTest(unittest.TestCase):
             collector.health(sample, {}, now=1070)
             self.assertEqual(notify.call_count, 1)
             collector.health({}, {}, now=1080)
-            collector.health({}, {}, now=1090)
+            self.assertEqual(notify.call_count, 1)  # missing sensor is not recovery
+            collector.health({"memory": {"used_fraction": .5}}, {}, now=1090)
+            collector.health({"memory": {"used_fraction": .5}}, {}, now=1151)
+            collector.health({"memory": {"used_fraction": .5}}, {}, now=1160)
             self.assertEqual(notify.call_count, 2)
 
     def test_missing_sensors_remain_unavailable(self):

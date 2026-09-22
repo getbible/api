@@ -1,149 +1,173 @@
 #!/usr/bin/env bash
-# Durable configuration transactions. The manager lock serializes writers;
-# public workers never read these journals or wait for configuration changes.
+# Durable configuration transactions shared by runtime and MCP updates.
 [[ -n "${GB_TRANSACTIONS_LOADED:-}" ]] && return 0
 GB_TRANSACTIONS_LOADED=1
 
 configuration_transaction_dir() { printf '%s/configuration-transactions/%s\n' "$GB_STATE" "$(gb_slug "$1")"; }
 
-# An interrupted settings write is rolled back. Once the complete desired
-# configuration reached deployment, preserve it for reconciliation: nginx may
-# already be routing to a candidate, even if the active pointer was not saved.
-# Never guess that this second case is an applied or rolled-back deployment.
-configuration_transaction_recover() {
-    local domain="$1" directory phase file
-    [[ "$GB_DRY_RUN" != true ]] || return 0
-    directory="$(configuration_transaction_dir "$domain")"
-    [[ -d "$directory" ]] || return 0
-    phase="$(cfg_get "$directory/state" PHASE preparing)"
-    if [[ "$phase" == preparing ]]; then
-        while IFS= read -r file; do
-            [[ "$file" == "$(ep_conf "$domain")" || "$file" == "$(ep_versions_dir "$domain")/"*.conf ]] || {
-                gb_warn "Invalid saved configuration transaction for $domain; nothing was restored."
-                return 1
-            }
-            configuration_transaction_restore_file "$file" "$directory/files" || return 1
-        done < "$directory/paths"
-        gb_warn "Restored interrupted configuration preparation for $domain."
-    elif [[ "$phase" == applying || "$phase" == recovery-required ]]; then
-        ep_state_set "$domain" LAST_ERROR 'Interrupted configuration deployment; desired settings retained for reconciliation.' || return 1
-        gb_warn "$domain has an interrupted deployment; its complete desired settings will be reconciled."
-    elif [[ "$phase" != committed ]]; then
-        gb_warn "Unknown configuration transaction phase for $domain; journal retained."
-        return 1
-    fi
-    rm -rf -- "$directory" || return 1
-    configuration_transaction_sync "$directory"
-}
-
-configuration_transaction_begin() {
-    local domain="$1" directory stage file
-    [[ "$GB_DRY_RUN" != true ]] || return 0
-    configuration_transaction_recover "$domain" || return 1
-    directory="$(configuration_transaction_dir "$domain")"
-    gb_ensure_dir "${directory%/*}" 0700 || return 1
-    stage="$(mktemp -d "${directory}.prepare.XXXXXXXX")" || return 1
-    : > "$stage/paths" || return 1
-    for file in "$(ep_conf "$domain")" "$(ep_versions_dir "$domain")/"*.conf; do
-        [[ -f "$file" ]] || continue
-        if ! gb_backup_file "$file" "$stage/files"; then rm -rf -- "$stage"; return 1; fi
-        printf '%s\n' "$file" >> "$stage/paths" || return 1
-    done
-    cfg_set "$stage/state" PHASE preparing || return 1
-    cfg_set "$stage/state" DOMAIN "$domain" || return 1
-    configuration_transaction_sync "$stage" || return 1
-    mv -T -- "$stage" "$directory" || return 1
-    configuration_transaction_sync "$directory"
-}
-
-configuration_transaction_applying() {
-    [[ "$GB_DRY_RUN" != true && -n "${GB_CONFIGURATION_TRANSACTION:-}" ]] || return 0
-    cfg_set "$GB_CONFIGURATION_TRANSACTION/state" PHASE applying && configuration_transaction_sync "$GB_CONFIGURATION_TRANSACTION"
-}
-
-configuration_transaction_committed() {
-    [[ -n "${GB_CONFIGURATION_TRANSACTION:-}" && "$GB_DRY_RUN" != true ]] || return 0
-    cfg_set "$GB_CONFIGURATION_TRANSACTION/state" PHASE committed && configuration_transaction_sync "$GB_CONFIGURATION_TRANSACTION"
-}
-
-configuration_transaction_restore() {
-    local directory="$1" file
-    while IFS= read -r file; do
-        configuration_transaction_restore_file "$file" "$directory/files" || return 1
-    done < "$directory/paths"
-    configuration_transaction_sync "$directory"
-}
-
-# Run a callback which writes settings, marks applying, then uses endpoint_apply.
-# A subshell contains traps/transaction state, not a second implementation of
-# deployment. The callback must check all writes, including under `if`/`!`.
-configuration_transaction() (
-    local domain="$1" status=0
-    shift
-    if [[ "$GB_DRY_RUN" == true ]]; then gb_log "(dry-run) would apply a configuration transaction for $domain"; return 0; fi
-    configuration_transaction_begin "$domain" || return 1
-    local GB_CONFIGURATION_TRANSACTION
-    GB_CONFIGURATION_TRANSACTION="$(configuration_transaction_dir "$domain")"
-    local EP_ORIGIN_COMMITTED=false EP_APPLY_EDGE_FAILED=false EP_RECOVERY_FAILED=false
-    # An unexpected termination deliberately leaves a durable journal. The
-    # next operation restores pre-deployment writes or retries complete intent.
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
-    if "$@"; then status=0; else status=$?; fi
-    if (( status == 0 )) || [[ "$EP_ORIGIN_COMMITTED" == true || "$EP_APPLY_EDGE_FAILED" == true ]]; then
-        configuration_transaction_committed || return 1
-        rm -rf -- "$GB_CONFIGURATION_TRANSACTION" || return 1
-        configuration_transaction_sync "$GB_CONFIGURATION_TRANSACTION" || return 1
-    elif [[ "$EP_RECOVERY_FAILED" == true ]]; then
-        cfg_set "$GB_CONFIGURATION_TRANSACTION/state" PHASE recovery-required || return 1
-        configuration_transaction_sync "$GB_CONFIGURATION_TRANSACTION" || return 1
-        gb_warn "Routing recovery for $domain is incomplete; retaining desired settings and recovery journal."
-    else
-        if ! configuration_transaction_restore "$GB_CONFIGURATION_TRANSACTION"; then
-            gb_warn "Configuration recovery for $domain failed; its journal is retained."
-            return 1
-        fi
-        rm -rf -- "$GB_CONFIGURATION_TRANSACTION" || return 1
-        configuration_transaction_sync "$GB_CONFIGURATION_TRANSACTION" || return 1
-    fi
-    return "$status"
-)
-
-# Persist the small journal (not application data) before entering deployment.
 configuration_transaction_sync() {
-    "$GB_PYTHON" - "$1" <<'PYFSYNC'
+    "$GB_PYTHON" - "$1" <<'PY'
 import os
 from pathlib import Path
 import sys
 root = Path(sys.argv[1])
-paths = list(root.rglob("*"))
-manifest = root / "paths"
+paths = list(root.rglob('*'))
+manifest = root / 'paths'
 if manifest.is_file():
     paths.extend(Path(value) for value in manifest.read_text().splitlines())
-parents = {root / "files", root, root.parent}
 for path in paths:
     if path.is_file() and not path.is_symlink():
-        with path.open("rb") as stream:
+        with path.open('rb') as stream:
             os.fsync(stream.fileno())
-        parents.add(path.parent)
-for path in parents:
-    if path.is_dir():
-        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-PYFSYNC
+for path in [*reversed(sorted((p for p in root.rglob('*') if p.is_dir()), key=lambda p: len(p.parts))), root, root.parent]:
+    if not path.is_dir():
+        continue
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+PY
 }
 
-configuration_transaction_restore_file() {
-    local file="$1" backup="$2" key temporary
-    key="$(printf '%s' "$file" | tr '/' '_')"
-    if [[ -f "$backup/$key.missing" ]]; then rm -f -- "$file"; return; fi
-    [[ -f "$backup/$key" && ! -L "$backup/$key" ]] || return 1
-    temporary="$(mktemp "${file}.restore.XXXXXXXX")" || return 1
-    if ! cp -p -- "$backup/$key" "$temporary" || ! mv -fT -- "$temporary" "$file"; then
-        rm -f -- "$temporary"
+# Journal updates belong only to the outer domain transaction, never to a
+# different domain that resource reconciliation happens to apply first.
+configuration_transaction_phase() {
+    local domain="$1" phase="$2" journal="${GB_CONFIGURATION_TRANSACTION:-}"
+    [[ -n "$journal" && -f "$journal/state" ]] || return 0
+    [[ "$(cfg_get "$journal/state" DOMAIN)" == "$domain" ]] || return 0
+    cfg_set "$journal/state" PHASE "$phase" || return 1
+    configuration_transaction_sync "$journal"
+}
+
+configuration_transaction_restore() {
+    local journal="$1" which="$2" path index=0 failed=0
+    while IFS= read -r path; do
+        [[ -n "$path" ]] || continue
+        if [[ -f "$journal/$which/$index" ]]; then
+            gb_install_file "$journal/$which/$index" "$path" "$(stat -c %a "$journal/$which/$index")" || failed=1
+        else
+            failed=1
+        fi
+        index=$((index + 1))
+    done < "$journal/paths"
+    return "$failed"
+}
+
+configuration_transaction_recover() {
+    local domain="$1" journal phase path status=0
+    journal="$(configuration_transaction_dir "$domain")"
+    [[ -f "$journal/state" ]] || return 0
+    phase="$(cfg_get "$journal/state" PHASE)"
+    while IFS= read -r path; do
+        case "$path" in "$(ep_conf "$domain")"|"$(ep_versions_dir "$domain")/"*.conf) ;; *) gb_warn 'Invalid configuration journal path; retaining evidence.'; return 1 ;; esac
+    done < "$journal/paths"
+    case "$phase" in
+        preparing|applying|restoring)
+            configuration_transaction_restore "$journal" before || { gb_warn "Configuration recovery is incomplete for $domain; retained journal: $journal"; return 1; }
+            gb_warn "Recovered the interrupted pre-switch configuration transaction for $domain."
+            ;;
+        switching)
+            # An interrupted nginx switch is ambiguous. Complete the saved
+            # intended configuration through the normal readiness/drain path,
+            # rather than guessing that none of the new workers received traffic.
+            configuration_transaction_restore "$journal" after || return 1
+            [[ "${GB_CONTAINER_BOOTSTRAP:-false}" != true ]] || return 0
+            local GB_CONFIGURATION_TRANSACTION="$journal" GB_LOCAL_APPLY=true
+            EP_ORIGIN_COMMITTED=false
+            endpoint_apply "$domain" || status=$?
+            if (( status != 0 )) && [[ "${EP_APPLY_RECOVERY_SAFE:-true}" != true ]]; then
+                gb_warn "Routing recovery is pending; retaining the intended configuration and journal: $journal"
+                return 1
+            fi
+            if (( status != 0 )) && [[ "${EP_ORIGIN_COMMITTED:-false}" != true ]]; then
+                gb_warn "Interrupted switch for $domain remains pending; its serving generations are retained. Retry this domain update."
+                return 1
+            fi
+            ;;
+        origin-committed) : ;;
+        *) gb_warn "Unrecognized configuration transaction for $domain; retained journal: $journal"; return 1 ;;
+    esac
+    rm -rf -- "$journal" || return 1
+    tg_notify warn "Configuration recovered: $domain" 'An interrupted configuration transaction was reconciled without resetting data.'
+}
+
+# Resolve and validate the complete desired selection before calling begin.
+# All paths are internal registry records, never arbitrary operator arguments.
+configuration_transaction_begin() {
+    local domain="$1" path journal stage index=0
+    shift
+    if (( $# == 0 )); then set -- "$(ep_conf "$domain")" "$(ep_versions_dir "$domain")/"*.conf; fi
+    [[ "$GB_DRY_RUN" != true ]] || { GB_CONFIGURATION_TRANSACTION=""; return 0; }
+    configuration_transaction_recover "$domain" || return 1
+    journal="$(configuration_transaction_dir "$domain")"
+    gb_ensure_dir "${journal%/*}" 0700 || return 1
+    stage="$(mktemp -d "${journal%/*}/.prepare.XXXXXXXX")" || return 1
+    mkdir "$stage/before" "$stage/after" || { rm -rf -- "$stage"; return 1; }
+    : > "$stage/paths"
+    for path in "$@"; do
+        [[ -f "$path" ]] || continue
+        case "$path" in "$(ep_dir "$domain")"/*) ;; *) rm -rf -- "$stage"; gb_warn 'A configuration transaction received a non-registry path.'; return 1 ;; esac
+        if [[ ! -f "$path" ]] || ! cp -pL -- "$path" "$stage/before/$index"; then rm -rf -- "$stage"; return 1; fi
+        printf '%s\n' "$path" >> "$stage/paths" || { rm -rf -- "$stage"; return 1; }
+        index=$((index + 1))
+    done
+    printf 'DOMAIN=%s\nPHASE=preparing\n' "$domain" > "$stage/state" || { rm -rf -- "$stage"; return 1; }
+    configuration_transaction_sync "$stage" || { rm -rf -- "$stage"; return 1; }
+    mv -T -- "$stage" "$journal" || return 1
+    GB_CONFIGURATION_TRANSACTION="$journal"
+    configuration_transaction_sync "$journal"
+}
+
+configuration_transaction_prepared() {
+    local domain="$1" path index=0 journal="${GB_CONFIGURATION_TRANSACTION:-}"
+    [[ -n "$journal" ]] || return 0
+    while IFS= read -r path; do
+        cp -pL -- "$path" "$journal/after/$index" || return 1
+        index=$((index + 1))
+    done < "$journal/paths"
+    configuration_transaction_phase "$domain" applying
+}
+
+configuration_transaction_finish() {
+    local status="$1" journal="${GB_CONFIGURATION_TRANSACTION:-}"
+    [[ -n "$journal" ]] || return "$status"
+    if (( status != 0 )) && [[ "${EP_APPLY_RECOVERY_SAFE:-true}" != true ]]; then
+        gb_warn "Routing recovery is pending; retaining the intended configuration and journal: $journal"
         return 1
     fi
+    if (( status != 0 )) && [[ "${EP_ORIGIN_COMMITTED:-false}" != true && "${EP_APPLY_EDGE_FAILED:-false}" != true ]]; then
+        cfg_set "$journal/state" PHASE restoring || return 1
+        if ! configuration_transaction_restore "$journal" before; then
+            gb_warn "Saved configuration could not be fully restored; retained transaction: $journal"
+            return 1
+        fi
+    fi
+    rm -rf -- "$journal" || return 1
+    return "$status"
 }
+
+# Callback interface retained for all existing callers. The same journal and
+# recovery implementation is used by explicit and automatic update paths.
+configuration_transaction_applying() {
+    [[ -n "${GB_CONFIGURATION_TRANSACTION:-}" ]] || return 0
+    configuration_transaction_prepared "$(cfg_get "$GB_CONFIGURATION_TRANSACTION/state" DOMAIN)"
+}
+
+configuration_transaction_committed() {
+    [[ -n "${GB_CONFIGURATION_TRANSACTION:-}" ]] || return 0
+    configuration_transaction_phase "$(cfg_get "$GB_CONFIGURATION_TRANSACTION/state" DOMAIN)" origin-committed
+}
+
+configuration_transaction() (
+    local domain="$1" status=0 GB_CONFIGURATION_TRANSACTION=""
+    local EP_ORIGIN_COMMITTED=false EP_APPLY_EDGE_FAILED=false EP_APPLY_RECOVERY_SAFE=true EP_RECOVERY_FAILED=false
+    shift
+    [[ "$GB_DRY_RUN" != true ]] || { gb_log "Would apply a configuration transaction for $domain."; return 0; }
+    configuration_transaction_begin "$domain" || return 1
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    "$@" || status=$?
+    [[ "$EP_RECOVERY_FAILED" != true ]] || EP_APPLY_RECOVERY_SAFE=false
+    configuration_transaction_finish "$status"
+)

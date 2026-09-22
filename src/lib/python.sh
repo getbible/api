@@ -174,6 +174,20 @@ py_inputs_hash() {
     } | sha256sum | cut -c1-16
 }
 
+# Check an image's exact offline bundle before any registry mutation. Native
+# updates retain their reviewed download/build path; this check never fetches.
+py_bundle_validate() {
+    local app="$1" version="$2" inputs wheels
+    gb_is_docker || return 0
+    [[ "$GB_DRY_RUN" != true ]] || return 0
+    inputs="${3:-$(py_inputs_hash "$app" "$version")}" || return 1
+    wheels="$(py_bundle_root)/wheels/$version/$app"
+    [[ -s "$wheels/packages.requirements" && "$(cat "$wheels/.inputs" 2>/dev/null)" == "$inputs" ]] || {
+        gb_warn "The installed image has no matching $app bundle for Python $version; existing configuration is unchanged."
+        return 1
+    }
+}
+
 # py_build_release ROOT DOMAIN [PYTHON_VERSION] [APP] -> new release directory
 # under ROOT (see py_app_root), built from src/apps/APP (default: the root's
 # name). Build in its final path so venv shebangs survive activation; this

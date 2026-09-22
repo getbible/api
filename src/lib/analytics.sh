@@ -29,3 +29,10 @@ analytics_cli() {
         analytics_report "$window" "$domain"
     fi
 }
+
+# Diagnostic only: no installation, database preparation or manager write lock.
+capacity_cli() {
+    [[ $# == 0 || ( $# == 1 && "$1" == --json ) ]] || { gb_warn 'capacity [--json]'; return 1; }
+    "$GB_PYTHON" "$GB_TOOLS/getbible-capacity" --db "$GB_VAR/telemetry/traffic.sqlite3" \
+        --config "$GB_GLOBAL_CONF" --environment "$GB_ENVIRONMENT_CONF" "$@"
+}

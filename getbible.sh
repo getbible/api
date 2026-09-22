@@ -58,6 +58,7 @@ Domains
                                          certificate details; issue one now (a staged
                                          domain stays staged); force a renewal
   apply DOMAIN                           re-render and re-install one domain
+  capacity [--json]                      show effective limits and measured sizing advice
   update [DOMAIN]                        apply reviewed code and configuration
   runtime versions                       list reviewed managed Python versions
   runtime DOMAIN [ENDPOINT] update [--python VERSION]
@@ -594,6 +595,7 @@ main() {
         docs) gb_require_root; pages_cli "${1:?domain}" publish ;;
         logs) cmd_logs "$@" ;;
         analytics) analytics_cli "$@" ;;
+        capacity) capacity_cli "$@" ;;
         telegram)
             gb_system_init
             case "${1:-}" in

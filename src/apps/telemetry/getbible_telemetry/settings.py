@@ -15,6 +15,7 @@ _RULES = {
     "TELEMETRY_FLUSH_SECONDS": (r"[1-9][0-9]{0,7}", 1, 99999999),
     "TELEMETRY_METRICS_SECONDS": (r"[1-9][0-9]{0,7}", 1, 99999999),
     "ALERT_COOLDOWN_SECONDS": (r"[1-9][0-9]{0,5}", 1, 999999),
+    "ALERT_REMINDER_SECONDS": (r"[1-9][0-9]{0,5}", 1, 999999),
     "ALERT_HOLD_SECONDS": (r"[1-9][0-9]{0,5}", 1, 999999),
     "ALERT_SYNC_GRACE_SECONDS": (r"[1-9][0-9]{0,5}", 1, 999999),
     **{name: (r"[0-9]{1,2}", 1, 95) for name in (
