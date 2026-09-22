@@ -8,7 +8,7 @@ OnFailure=getbible-alert@%n.service
 [Service]
 Type=oneshot
 EnvironmentFile={{RUN}}/adaptive.env
-ExecStart={{PYTHON}} {{LIBEXEC}}/getbible-adapt --once --config {{ETC}}/getbible.conf --environment {{RUN}}/environment.conf --state {{VAR}}/adaptive.json --registry {{ETC}}/endpoints --runtime-root {{OPT}} --cache-root {{CACHE}} --systemctl {{SYSTEMCTL}} --manager {{MANAGER}}
+ExecStart={{PYTHON}} {{MANAGEMENT_RELEASE}}/bin/getbible-adapt --once --config {{ETC}}/getbible.conf --environment {{RUN}}/environment.conf --state {{VAR}}/adaptive.json --registry {{ETC}}/endpoints --runtime-root {{OPT}} --cache-root {{CACHE}} --systemctl {{SYSTEMCTL}} --manager {{MANAGER}}
 UMask=0027
 TimeoutStartSec=900
 PrivateTmp=true

@@ -14,7 +14,7 @@ Type=oneshot
 User=root
 Group={{READERS_GROUP}}
 EnvironmentFile={{RUN}}/storage.env
-ExecStart={{PYTHON}} {{LIBEXEC}}/getbible-storage-guard sample --config {{ETC}}/getbible.conf --environment {{RUN}}/storage.env --state {{VAR}}/storage
+ExecStart={{PYTHON}} {{MANAGEMENT_RELEASE}}/bin/getbible-storage-guard sample --config {{ETC}}/getbible.conf --environment {{RUN}}/storage.env --state {{VAR}}/storage
 UMask=0027
 # This sampler is independent of long-running deployment/adaptation jobs.
 # It reads inode metadata only and exits immediately when the budget is off.

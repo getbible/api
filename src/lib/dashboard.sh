@@ -2,6 +2,8 @@
 # Shared infrastructure and the private dashboard's CLI/menu integration.
 [[ -n "${GB_DASHBOARD_LOADED:-}" ]] && return 0
 GB_DASHBOARD_LOADED=1
+# shellcheck source=management-release.sh
+source "$GB_LIB/management-release.sh"
 
 dashboard_config() { printf '%s/dashboard.conf\n' "$GB_RUN"; }
 dashboard_domain() { gb_global DASHBOARD_DOMAIN; }
@@ -9,23 +11,6 @@ dashboard_domain() { gb_global DASHBOARD_DOMAIN; }
 # Identify the reviewed source independently of a running Python process. The
 # service captures this marker at startup, so a configuration reload cannot
 # claim that newly copied application code is already running.
-dashboard_release_manifest() (
-    local version revision fingerprint
-    cd "$GB_REPO_DIR" || return 1
-    version="$(cat VERSION)" || return 1
-    revision="$(git rev-parse HEAD 2>/dev/null || true)"
-    [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
-    [[ "$revision" =~ ^[a-f0-9]{40,64}$ ]] || revision=unknown
-    fingerprint="$(
-        {
-            find src/apps/dashboard/getbible_dashboard src/apps/dashboard/static src/apps/telemetry/getbible_telemetry \
-                -type f ! -name '*.pyc' ! -path '*/__pycache__/*' -print0
-            printf '%s\0' src/bin/getbible-dashboard src/bin/getbible-telemetry \
-                src/systemd/getbible-dashboard.service.tmpl src/systemd/getbible-telemetry.service.tmpl
-        } | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum
-    )" || return 1
-    printf '{"version":"%s","revision":"%s","fingerprint":"%s"}\n' "$version" "$revision" "${fingerprint%% *}"
-)
 
 dashboard_health() {
     curl --silent --show-error --fail --max-time 3 \
@@ -39,7 +24,7 @@ dashboard_wait_current() {
     local response deadline=$((SECONDS + 20))
     response="$(gb_tmpdir)/dashboard-health.json"
     while (( SECONDS < deadline )); do
-        if dashboard_health > "$response" 2>/dev/null && "$GB_PYTHON" - "$GB_LIBEXEC/apps/dashboard/release.json" "$response" <<'PY'
+        if dashboard_health > "$response" 2>/dev/null && "$GB_PYTHON" - "$(management_release_file)" "$response" <<'PY'
 import json
 from pathlib import Path
 import sys
@@ -64,7 +49,7 @@ dashboard_status() {
     dashboard_auth_cli status > "$status" || return 1
     dashboard_release_manifest > "$source" || return 1
     dashboard_health > "$serving" 2>/dev/null || : > "$serving"
-    "$GB_PYTHON" - "$status" "$source" "$GB_LIBEXEC/apps/dashboard/release.json" "$serving" \
+    "$GB_PYTHON" - "$status" "$source" "$(management_release_file)" "$serving" \
         "$(sd_status_line getbible-dashboard.service)" "$(sd_status_line getbible-telemetry.service)" <<'PY'
 import json
 from pathlib import Path
@@ -78,7 +63,7 @@ status, source, installed, health = (read(path) for path in sys.argv[1:5])
 serving = health.get("release") or {}
 status.update(manager_release=source, installed_release=installed or None,
               serving_release=serving or None,
-              running_latest=bool(serving and source == installed == serving),
+              running_latest=bool(serving and source.get("fingerprint") == installed.get("fingerprint") == serving.get("fingerprint")),
               dashboard_service=sys.argv[5], telemetry_service=sys.argv[6])
 print(json.dumps(status, indent=2))
 PY
@@ -146,7 +131,7 @@ infrastructure_environment_write() {
         printf '%s=%s\n' "$key" "$(gb_global "$key" "$default")" >> "$stage"
     done
     printf 'TELEMETRY_DB=%s/telemetry/traffic.sqlite3\nBROKER_SOCKET=%s/run/getbible-admin/broker.sock\nTELEGRAM_CONF=%s/telegram.conf\n' "$GB_VAR" "$GB_PREFIX" "$GB_RUN" >> "$stage"
-    printf 'DASHBOARD_RELEASE_FILE=%s/apps/dashboard/release.json\n' "$GB_LIBEXEC" >> "$stage"
+    printf 'DASHBOARD_RELEASE_FILE=%s\n' "$(management_release_file)" >> "$stage"
     gb_install_file "$stage" "$(dashboard_config)" 0640 root:getbible-dashboard || return 1
     for stage in telemetry adaptive; do
         : > "$(gb_tmpdir)/$stage.env"
@@ -179,122 +164,7 @@ infrastructure_environment_write() {
     gb_install_file "$telegram" "$GB_RUN/telegram.conf" 0640 "root:$GB_NOTIFY_GROUP"
 }
 
-infrastructure_install() {
-    local unit helper package stage python
-    GB_INFRASTRUCTURE_TELEMETRY_FAILED=false
-    GB_TELEMETRY_START_FAILED=false
-    gb_ensure_group getbible-dashboard || return 1
-    gb_ensure_system_user getbible-dashboard "$GB_NGINX_USER" "$GB_VAR/dashboard" "getbible-dashboard,$GB_NOTIFY_GROUP" || return 1
-    gb_ensure_dir "$GB_VAR/dashboard" 0700 getbible-dashboard:getbible-dashboard || return 1
-    gb_ensure_dir "$GB_VAR/admin" 0700 root:root || return 1
-    gb_ensure_dir "$GB_VAR/imports" 0750 root:root || return 1
-    gb_ensure_dir "$GB_VAR/telemetry" 02750 root:getbible-dashboard || return 1
-    infrastructure_reporting_permissions || return 1
-    gb_ensure_dir "$GB_VAR/storage" 02770 "root:$GB_READERS_GROUP" || return 1
-    gb_ensure_dir "$GB_LOG/dashboard" 0750 root:getbible-dashboard || return 1
-    gb_ensure_dir "$GB_LOG/dashboard/app" 0750 getbible-dashboard:getbible-dashboard || return 1
-    gb_ensure_dir "$GB_LOG/management" 0750 root:getbible-dashboard || return 1
-    gb_ensure_dir "$GB_LOG/management/app" 0750 root:getbible-dashboard || return 1
-    gb_ensure_dir "$GB_LIBEXEC/apps" 0755 || return 1
-    for helper in getbible-admin-broker getbible-dashboard getbible-telemetry getbible-runtime-control getbible-adapt getbible-resources getbible-storage-guard; do
-        [[ ! -f "$GB_TOOLS/$helper" ]] || gb_install_file "$GB_TOOLS/$helper" "$GB_LIBEXEC/$helper" 0755 || return 1
-    done
-    for package in dashboard telemetry; do
-        [[ -d "$GB_APPS/$package" ]] || continue
-        [[ "$GB_DRY_RUN" != true ]] || continue
-        # Application sources and prebuilt frontend artifacts belong to this
-        # reviewed manager release. No dependency installation occurs here.
-        gb_ensure_dir "$GB_LIBEXEC/apps/$package" 0755 || return 1
-        cp -a "$GB_APPS/$package/getbible_${package}" "$GB_LIBEXEC/apps/$package/" || return 1
-        if [[ -d "$GB_APPS/$package/static" ]]; then
-            cp -a "$GB_APPS/$package/static" "$GB_LIBEXEC/apps/$package/" || return 1
-        fi
-        if gb_is_root && [[ -z "$GB_PREFIX" ]]; then chown -R root:root "$GB_LIBEXEC/apps/$package" || return 1; fi
-        find "$GB_LIBEXEC/apps/$package" -type d -exec chmod 0755 {} + || return 1
-        find "$GB_LIBEXEC/apps/$package" -type f -exec chmod 0644 {} + || return 1
-    done
-    stage="$(gb_tmpdir)/dashboard-release.json"
-    dashboard_release_manifest > "$stage" || return 1
-    gb_install_file "$stage" "$GB_LIBEXEC/apps/dashboard/release.json" 0644 root:root || return 1
-    infrastructure_environment || return 1
-    stage="$(gb_tmpdir)/infrastructure-units"
-    gb_ensure_dir "$stage" 0755 || return 1
-    python="$(command -v "$GB_PYTHON")"
-    for unit in getbible-prepare.service getbible-admin.service getbible-dashboard.service getbible-telemetry.service getbible-adapt.service getbible-adapt.timer getbible-storage.service getbible-storage.timer getbible-alert@.service; do
-        gb_render "$GB_SRC/systemd/$unit.tmpl" "$stage/$unit" \
-            "PYTHON=$python" "PREFIX=$GB_PREFIX" "ETC=$GB_ETC" "VAR=$GB_VAR" "LOG=$GB_LOG" "RUN=$GB_RUN" \
-            "OPT=$GB_OPT" "SRV=$GB_SRV" "CACHE=$GB_CACHE" "LIBEXEC=$GB_LIBEXEC" "MANAGER=$GB_SELF" \
-            "SYSTEMCTL=$GB_SYSTEMCTL" "NGINX_USER=$GB_NGINX_USER" "NOTIFY_GROUP=$GB_NOTIFY_GROUP" "READERS_GROUP=$GB_READERS_GROUP" || return 1
-        sd_install_unit "$stage/$unit" "$unit" || return 1
-    done
-    if gb_is_docker; then
-        unit=getbible-image-update.service
-        gb_render "$GB_SRC/systemd/$unit.tmpl" "$stage/$unit" "MANAGER=$GB_SELF" || return 1
-        sd_install_unit "$stage/$unit" "$unit" || return 1
-        # The entrypoint restores all saved services before systemd starts.
-        # Only the post-boot job applies a changed image; ordinary restarts
-        # return immediately when its persistent release marker matches.
-        sd_enable "$unit" || return 1
-    fi
-    sd_daemon_reload || return 1
-    infrastructure_storage_initial_sample || return 1
-    infrastructure_reporting_prepare || return 1
-    # A repaired collector must be allowed to start even after exhausting its
-    # previous restart allowance. Its failure must not prevent dashboard repair.
-    if sd_available && [[ "$GB_DRY_RUN" != true ]]; then
-        "$GB_SYSTEMCTL" reset-failed getbible-telemetry.service getbible-dashboard.service getbible-admin.service || return 1
-    fi
-    if ! sd_enable --now getbible-telemetry.service; then
-        GB_TELEMETRY_START_FAILED=true
-        gb_warn 'Telemetry could not start. Existing APIs remain available. Inspect journalctl -u getbible-telemetry.service; the dashboard installation will continue.'
-    fi
-    sd_enable --now getbible-adapt.timer getbible-storage.timer || return 1
-    if [[ "$(gb_global DASHBOARD_ENABLED false)" == true && -n "$(dashboard_domain)" ]]; then
-        sd_enable --now getbible-admin.service getbible-dashboard.service || return 1
-    fi
-}
 
-infrastructure_reporting_prepare() {
-    local unit status=0 output restore
-    local -a active=() stopped=()
-    export GB_REPORTING_PREPARED=false
-    # Start the restored API generations first. Retaining a large old history
-    # belongs to the background image apply job after nginx is available.
-    [[ "${GB_CONTAINER_BOOTSTRAP:-false}" != true ]] || return 0
-    output="$(gb_tmpdir)/telemetry-prepare.json"
-    if sd_available && [[ "$GB_DRY_RUN" != true ]]; then
-        for unit in getbible-logrotate.timer getbible-logrotate.service getbible-telemetry.service getbible-dashboard.service; do
-            [[ -f "$GB_SYSTEMD/$unit" ]] || continue
-            stopped+=("$unit")
-            if [[ "$unit" == getbible-logrotate.timer ]]; then
-                if sd_is_active "$unit"; then active+=("$unit"); fi
-            elif [[ "$unit" != getbible-logrotate.service ]] && { sd_is_active "$unit" || sd_is_enabled "$unit"; }; then
-                active+=("$unit")
-            fi
-        done
-        # The timer can launch a second SQLite writer. Stop it and any in-flight
-        # rotation along with the collector/readers before retaining old state.
-        if (( ${#stopped[@]} > 0 )); then "$GB_SYSTEMCTL" stop "${stopped[@]}" || status=1; fi
-    fi
-    if (( status == 0 )) && [[ "$GB_DRY_RUN" != true ]]; then
-        "$GB_PYTHON" "$GB_LIBEXEC/getbible-telemetry" prepare \
-            --db "$GB_VAR/telemetry/traffic.sqlite3" --backup-dir "$GB_BACKUPS/telemetry" \
-            --backup-seconds "$(gb_global TELEMETRY_BACKUP_SECONDS 900)" \
-            --migration-seconds "$(gb_global TELEMETRY_MIGRATION_SECONDS 900)" > "$output" || status=1
-        infrastructure_reporting_permissions || status=1
-        if (( status == 0 )); then GB_REPORTING_PREPARED=true; fi
-    fi
-    # Restore previously active services even when preparation fails. Failed
-    # preparation leaves the source history intact and must not strand readers.
-    for restore in "${active[@]}"; do
-        "$GB_SYSTEMCTL" reset-failed "$restore" || status=1
-        sd_start "$restore" || status=1
-    done
-    if (( status != 0 )); then
-        gb_warn 'Reporting preparation failed. Existing API generations and retained traffic history remain in place. Check the telemetry journal.'
-    fi
-    return "$status"
-}
 
 infrastructure_reporting_permissions() {
     local file
@@ -344,36 +214,6 @@ infrastructure_ensure() {
 
 # Applying a reviewed manager release refreshes installed code even when its
 # units already exist. Ordinary commands only refresh effective configuration.
-infrastructure_update() {
-    local telemetry_active=false dashboard_active=false admin_active=false status=0
-    GB_INFRASTRUCTURE_TELEMETRY_FAILED=false
-    if sd_is_active getbible-telemetry.service; then telemetry_active=true; fi
-    if sd_is_active getbible-dashboard.service; then dashboard_active=true; fi
-    if sd_is_active getbible-admin.service; then admin_active=true; fi
-    infrastructure_install || return 1
-    [[ "$GB_DRY_RUN" != true ]] || return 0
-    if [[ "$telemetry_active" == true ]] && ! sd_restart getbible-telemetry.service; then
-        GB_TELEMETRY_START_FAILED=true
-    fi
-    if [[ "$dashboard_active" == true ]]; then
-        sd_restart getbible-dashboard.service || status=1
-    fi
-    if [[ "$dashboard_active" == true || "$(gb_global DASHBOARD_ENABLED false)" == true ]]; then
-        dashboard_wait_current || status=1
-    fi
-    # An update can itself be a broker job. Let the broker drain and persist its
-    # results (including unclaimed credentials) before it replaces itself.
-    if [[ "$admin_active" == true ]]; then
-        "$GB_SYSTEMCTL" kill --kill-who=main --signal=SIGUSR1 getbible-admin.service || status=1
-    fi
-    # Callers may continue API deployment only when every installation step
-    # completed and the collector is the sole failed auxiliary service.
-    if (( status == 0 )) && [[ "${GB_TELEMETRY_START_FAILED:-false}" == true && "${1:-}" != --dashboard ]]; then
-        GB_INFRASTRUCTURE_TELEMETRY_FAILED=true
-        status=1
-    fi
-    return "$status"
-}
 
 dashboard_require_telegram() {
     [[ "$(cfg_get "$GB_TELEGRAM_CONF" TELEGRAM_ENABLED false)" == true \
