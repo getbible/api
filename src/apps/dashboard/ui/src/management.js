@@ -3,7 +3,7 @@ export const sections = [
     {id: 'deploy', title: 'Deploy a new domain', detail: 'Prepare a static, runtime or MCP domain'},
     {id: 'go-live', title: 'Go live', detail: 'Activate a staged domain'},
     {id: 'self-update', title: 'Update manager', detail: 'Update the native manager checkout'},
-    {id: 'update', title: 'Apply all domains', detail: 'Apply the current manager to configured domains'},
+    {id: 'update', title: 'Upgrade targets', detail: 'Review changes, select targets and retry incomplete upgrades'},
     {id: 'analytics', title: 'Traffic analytics', detail: 'Run a traffic report'},
     {id: 'dashboard', title: 'Private dashboard', detail: 'Domain, password, sessions and blocked addresses'},
     {id: 'logs', title: 'Logs', detail: 'Domain diagnostics, archives and rotation'},
@@ -23,7 +23,7 @@ export function operationLocations(spec) {
     if (id.startsWith('domain.deploy_')) return [['deploy', 'New domain']];
     if (id === 'domain.go_live') return [['go-live', 'Activation'], ['domains', 'Publication']];
     if (id === 'system.self_update') return [['self-update', 'Manager checkout']];
-    if (id === 'system.update') return [['update', 'Apply configuration']];
+    if (id === 'system.update') return [['update', 'Review eligible targets']];
     if (id === 'analytics') return [['analytics', 'Traffic report']];
     if (id.startsWith('dashboard.')) {
         const group = ['dashboard.sessions', 'dashboard.revoke'].includes(id) ? 'Sessions' : id === 'dashboard.blocks' ? 'Blocked addresses' : 'Dashboard settings';

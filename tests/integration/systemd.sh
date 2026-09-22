@@ -266,7 +266,15 @@ mcp_rpc 5 server/discover '{}' | /usr/bin/python3 -c 'import json,sys; p=json.lo
 check 'MCP restarts through socket activation' active "$(systemctl is-active "$(mcp_unit)")"
 MCP_OLD_GENERATION="$(mcp_deployment)"
 MCP_OLD_UNIT="$(mcp_unit)"
+MCP_OLD_PID="$(mcp_pid)"
 "$GB" mcp update "$M"
+check 'unchanged MCP update keeps its generation' "$MCP_OLD_GENERATION" "$(mcp_deployment)"
+check 'unchanged MCP update keeps its process' "$MCP_OLD_PID" "$(mcp_pid)"
+# Change a real generation input to exercise switching, draining and rollback;
+# a no-op update must not fabricate an unnecessary deployment.
+cp /srv/getbible-ci/mcp.env /srv/getbible-ci/mcp-generation.env
+printf 'GETBIBLE_MCP_TEST_GENERATION=second\n' >> /srv/getbible-ci/mcp-generation.env
+"$GB" mcp configure "$M" --env-file /srv/getbible-ci/mcp-generation.env
 [[ "$(mcp_deployment)" != "$MCP_OLD_GENERATION" ]]
 mcp_rpc 6 tools/call "$MCP_QUERY" | /usr/bin/python3 -c 'import json,sys; p=json.load(sys.stdin); assert not p.get("error") and not p["result"].get("isError"),p'
 MCP_DEADLINE=$((SECONDS + 60))

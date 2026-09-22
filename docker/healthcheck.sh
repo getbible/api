@@ -1,16 +1,78 @@
 #!/usr/bin/env bash
+# Serving availability is independent of desired-release/upgrade completion.
 set -Eeuo pipefail
-[[ -f /run/getbible/container-initialized ]]
-systemctl is-active --quiet nginx.service
-curl --fail --silent --show-error --noproxy '*' --max-time 3 \
-    -H 'Host: _' http://127.0.0.1/__getbible_health >/dev/null
-# Check only the selected generations. Failed upgrade candidates must not
-# mark a healthy, serving previous generation as an unhealthy container.
-shopt -s nullglob
-for environment in /opt/getbible/*/*/active/runtime.env; do
-    # Runtime environment files use systemd's double-quoted assignment form.
-    socket="$(sed -nE 's/^[A-Z_]+_BIND="?unix:([^"[:space:]]*)"?$/\1/p' "$environment")"
-    [[ -n "$socket" ]]
+
+healthcheck_socket() {
+    local socket="$1" path="${2:-/readyz}" domain="${3:-localhost}"
+    [[ "$socket" == /* && "$socket" != *$'\n'* ]] || return 1
     curl --fail --silent --show-error --noproxy '*' --max-time 3 \
-        --unix-socket "$socket" http://localhost/readyz >/dev/null
-done
+        --unix-socket "$socket" --header "Host: $domain" \
+        --header 'X-GetBible-Client-IP: 127.0.0.1' "http://localhost$path" >/dev/null
+}
+
+# An optional filesystem prefix supports the same disposable fixtures as the
+# manager; the image always calls this without a prefix. No discovery mutates
+# settings, release pointers, telemetry history or systemd state.
+healthcheck_value() {
+    local key="$1" file="$2" fallback="${3:-}"
+    if [[ -f "$file" ]]; then
+        awk -v key="$key" -v fallback="$fallback" 'index($0,key "=")==1 {value=substr($0,length(key)+2); found=1} END {print found ? value : fallback}' "$file"
+    else printf '%s\n' "$fallback"; fi
+}
+
+healthcheck_main() {
+    local prefix="${1:-}" environment generation socket enabled domain record type kind endpoint label slug
+    [[ -f "$prefix/run/getbible/container-initialized" ]] || return 1
+    systemctl is-active --quiet nginx.service || return 1
+    curl --fail --silent --show-error --noproxy '*' --max-time 3 \
+        -H 'Host: _' http://127.0.0.1/__getbible_health >/dev/null || return 1
+    # Every enabled registry entry must have its selected generation. Globbing
+    # only existing environment files would hide a missing/broken active link.
+    for record in "$prefix"/etc/getbible/endpoints/*/endpoint.conf; do
+        [[ -f "$record" ]] || continue
+        [[ "$(healthcheck_value ENABLED "$record" true)" == true ]] || continue
+        type="$(healthcheck_value TYPE "$record")"
+        case "$type" in
+            runtime)
+                kind="$(healthcheck_value KIND "$record")"
+                [[ "$kind" =~ ^[a-z][a-z0-9_-]*$ ]] || return 1
+                for endpoint in "${record%/*}/versions/"*.conf; do
+                    [[ -f "$endpoint" ]] || continue
+                    [[ "$(healthcheck_value ENABLED "$endpoint" true)" == true ]] || continue
+                    label="${endpoint##*/}"; label="${label%.conf}"
+                    [[ "$label" =~ ^(root|v[1-9][0-9]*)$ ]] || return 1
+                    [[ -f "$prefix/opt/getbible/$kind/$label/active/runtime.env" ]] || return 1
+                done ;;
+            mcp)
+                domain="${record%/*}"; domain="${domain##*/}"
+                slug="$(printf '%s' "$domain" | tr -c 'a-z0-9' '_')"
+                [[ -f "$prefix/opt/getbible/mcp/$slug/active/.socket" ]] || return 1 ;;
+            static) ;;
+            *) return 1 ;;
+        esac
+    done
+    # Only selected generations matter. A rejected candidate must not make an
+    # otherwise healthy retained serving generation fail container readiness.
+    for environment in "$prefix"/opt/getbible/*/*/active/runtime.env; do
+        [[ -f "$environment" ]] || continue
+        socket="$(sed -nE 's/^[A-Z_]+_BIND="?unix:([^"[:space:]]*)"?$/\1/p' "$environment")" || return 1
+        healthcheck_socket "$socket" || return 1
+    done
+    for generation in "$prefix"/opt/getbible/mcp/*/active; do
+        [[ -e "$generation" || -L "$generation" ]] || continue
+        [[ -d "$generation" ]] || return 1
+        socket="$(cat "$generation/.socket")" || return 1
+        healthcheck_socket "$socket" || return 1
+    done
+    environment="$prefix/run/getbible/dashboard.conf"
+    [[ -f "$environment" ]] || return 1
+    enabled="$(sed -n 's/^DASHBOARD_ENABLED=//p' "$environment")" || return 1
+    if [[ "$enabled" == true ]]; then
+        domain="$(sed -n 's/^DASHBOARD_DOMAIN=//p' "$environment")" || return 1
+        [[ -n "$domain" ]] || return 1
+        healthcheck_socket "$prefix/run/getbible-dashboard/http.sock" /health "$domain" || return 1
+    fi
+    return 0
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then healthcheck_main; fi

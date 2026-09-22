@@ -37,7 +37,7 @@ management_release_prepare() {
     GB_MANAGEMENT_TEMPLATES="$GB_MANAGEMENT_CANDIDATE/templates"
     [[ "$current" == "$GB_MANAGEMENT_CANDIDATE" ]] || GB_MANAGEMENT_CODE_CHANGED=true
     phase="$(management_release status | "$GB_PYTHON" -c 'import json,sys; print(json.load(sys.stdin).get("phase", "pending"))')" || return 1
-    [[ "$phase" == current ]] || GB_MANAGEMENT_CODE_CHANGED=true
+    [[ "$phase" == current && "${GB_MANAGEMENT_FORCE:-false}" != true ]] || GB_MANAGEMENT_CODE_CHANGED=true
 }
 
 management_release_activate() {

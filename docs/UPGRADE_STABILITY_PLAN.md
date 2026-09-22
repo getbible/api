@@ -26,4 +26,4 @@ Telegram repeatedly reports: `getBible capacity: telemetry_spool` / `Unread/acti
 
 ## Validation record
 
-Implementation and validation pending. Record completed work and exact checks in the pull request as commits land.
+Implementation is integrated on the associated branch. The original PR checklist is the authoritative progress record; its final validation items remain open until native, Docker, browser and source checks pass on the exact submitted head. Local verification includes the complete Python suite, selected CLI/fault-injection suites and pinned frontend tests/build; production deployment is not part of this PR.

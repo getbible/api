@@ -59,7 +59,12 @@ Domains
                                          domain stays staged); force a renewal
   apply DOMAIN                           re-render and re-install one domain
   capacity [--json]                      show effective limits and measured sizing advice
-  update [DOMAIN]                        apply reviewed code and configuration
+  update [DOMAIN] [--plan] [--json]       inspect/apply eligible software targets; no corpus sync
+  update --select                       choose targets interactively (changed targets default on)
+  update --target ID [--target ID ...]   apply a subset from update --plan
+  update --targets ID,ID [--force]       CSV subset; an empty list applies nothing
+  update --all [--retry] [--force]       changed targets, retry failures, or explicitly redeploy
+                                         IDs: management, runtime/DOMAIN/vN, mcp/DOMAIN, static/DOMAIN
   runtime versions                       list reviewed managed Python versions
   runtime DOMAIN [ENDPOINT] update [--python VERSION]
                                          update packages and managed Python (every endpoint,
@@ -556,7 +561,7 @@ main() {
         cert) gb_system_init; certs_cli "$@" ;;
         settings) gb_system_init; cmd_settings "$@" ;;
         apply) gb_system_init; endpoint_apply "${1:?domain}" ;;
-        update) gb_system_init || return "$?"; if [[ -n "${1:-}" ]]; then update_domain "$1"; else update_system; fi ;;
+        update) upgrade_cli "$@" ;;
         self-update)
             [[ $# == 0 ]] || gb_die "self-update takes no arguments (use --dry-run to preview)."
             gb_require_root

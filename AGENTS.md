@@ -197,3 +197,27 @@ tests/run.sh --all      # plus nginx, runtime and SSH integration (runs as root)
 # Only on a fresh disposable Ubuntu VM, after install-deps:
 sudo env GB_CI_DISPOSABLE_HOST=1 tests/integration/systemd.sh
 ```
+
+## Upgrade and capacity contracts
+
+`src/lib/upgrades.sh` and `src/bin/getbible-upgrades` own selective whole-system
+planning for CLI, menu, dashboard and automatic image reconciliation. Keep plan
+inspection read-only, fingerprints relative and limited to relevant code/config,
+empty selections empty, stale plan rejection explicit, and skipped required
+changes pending. Per-target failures must not block independent selected APIs.
+Serving readiness and desired-release completion are distinct. Static source sync
+is not software upgrade work. Shared nginx routing may change for a selected
+version, but unselected sibling generations must remain selected and running.
+Do not bypass resource-overlap admission or redeploy unselected neighbours.
+
+Management code/assets use `getbible-management-release`: stage complete code,
+validate permissions/imports without writing bytecode, then select atomically.
+Never overwrite a serving release or restore incompatible old code over a
+committed newer history schema. Retain exact interpreters for generation rollback;
+MCP image application must use its selected family's new offline bundled patch.
+
+Capacity observations and persisted incidents are not automatic configuration
+changes. Preserve unread/active spools; distinguish consumed archives from backlog;
+report collection/reclamation failure honestly. Missing observations must not
+clear an incident. CLI and dashboard recommendations must retain evidence windows,
+units, assumptions, configuration ownership and insufficient/stale-data states.

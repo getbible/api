@@ -193,7 +193,7 @@ class HTTPTests(unittest.TestCase):
 
     def test_private_reports_and_actions_require_authentication(self):
         for path in ("/api/overview", "/api/history", "/api/requests", "/api/events", "/api/endpoints", "/api/mcp",
-                     "/api/management/state", "/api/translations", "/api/storage", "/api/sessions", "/api/jobs", "/api/operations"):
+                     "/api/management/state", "/api/upgrades", "/api/capacity", "/api/translations", "/api/storage", "/api/sessions", "/api/jobs", "/api/operations"):
             status, headers, data = self.request("GET", path)
             self.assertEqual(status, 401, path)
             self.assertEqual(headers["Content-Type"], "application/problem+json")
@@ -210,6 +210,18 @@ class HTTPTests(unittest.TestCase):
         self.assertFalse(data["accepting_jobs"])
         self.assertEqual(self.broker.calls[-1][0], "state")
         self.assertIn("session_id", self.broker.calls[-1][1]["actor"])
+
+    def test_capacity_and_upgrade_inspections_do_not_require_reporting_storage(self):
+        self.login()
+        for name in ("capacity", "upgrades"):
+            with self.subTest(name=name):
+                with patch.object(self.app.lifecycle, "report", side_effect=AssertionError("Reporting must stay idle")):
+                    status, headers, data = self.request("GET", "/api/" + name)
+                self.assertEqual(status, 200)
+                self.assertEqual(headers["Cache-Control"], "no-store")
+                self.assertEqual(self.broker.calls[-1][0], name)
+                self.assertIn("session_id", self.broker.calls[-1][1]["actor"])
+                self.assertEqual(self.request("GET", "/api/" + name + "?force=true")[0], 400)
 
     def test_refresh_pause_is_a_retryable_problem_response(self):
         from getbible_dashboard.broker import BrokerError

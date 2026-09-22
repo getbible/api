@@ -52,8 +52,9 @@ domain empty to manage them from the menu; the saved/default enabled state start
 as false. An explicit environment value of false prevents the CLI from enabling
 the dashboard until that override is changed. Settings changes reload the
 dashboard configuration with SIGHUP. `dashboard apply` and `dashboard update`
-install the current manager's dashboard files, restart its backend, and verify
-the running release. Saved authentication sessions are preserved.
+stage a complete management release and verify changed backend code before
+considering the update complete. Unchanged code is not restarted; compatible
+prior code and service definitions are retained for failure recovery. Saved authentication sessions are preserved.
 
 Native installations use the same built-in settings without requiring Compose
 or an environment file. Run these commands as root through `./getbible.sh` from
@@ -70,7 +71,8 @@ To update only the dashboard and its reporting services, run
 `getbible dashboard update`, then `getbible dashboard status` from the root shell
 (use `./getbible.sh` in the native manager checkout).
 The status includes `manager_release`, `installed_release`, `serving_release`
-and `running_latest`. The last value is true only when all three match; it
+and `running_latest`. The last value compares the three implementation
+fingerprints; an unchanged release may retain an older version/revision label. It
 compares against the local manager, so fetch native source with `self-update`
 or replace the Docker image first. The dashboard-only update command does not
 redeploy public runtimes.
@@ -274,3 +276,32 @@ sign-in, charts, filters, management forms, themes and responsive layout.
 Disposable Ubuntu and Docker acceptance tests exercise installed services,
 nginx routing, external TLS forwarding and persistent state restoration; see
 [DEPLOYMENT_DECISIONS.md](DEPLOYMENT_DECISIONS.md).
+
+## Upgrade targets and capacity
+
+**Manage → Upgrade targets** lists management/dashboard, each enabled query/search
+version, MCP and static-domain software/configuration. It shows why a target is
+eligible, desired/applied fingerprints, its last result and serving readiness.
+Changed targets default to selected. Clear selection performs no operation;
+forced redeployment and failed/interrupted retries are explicit controls. The
+confirmation identifies the exact selected IDs and plan identity. Stale plans
+are rejected by the manager rather than applied after settings have changed.
+Skipped required changes remain pending and are never reported as installed.
+
+**Resources → Capacity and sizing advice** displays effective/configured limits,
+current/high-water usage, saturation episodes, observation windows and known
+configuration ownership. Collector diagnostics separate unread transport backlog
+from consumed retained archives and show ingestion, growth and reclamation data.
+An advisory value includes its assumptions and headroom constraints; insufficient
+or stale observations never pretend to establish an ideal value. Suggestions do
+not change configuration automatically. Eligible saved telemetry limits have a
+review action using the normal confirmation flow. Environment/host-owned values
+must be changed at their source and cannot be edited through that action.
+
+These views use authenticated `/api/upgrades` and `/api/capacity` inspection
+routes, independent of historical report queries. Unavailable reporting does not
+prevent viewing a valid upgrade plan; unavailable capacity history is shown as
+unknown, not healthy. Persistent incidents identify ongoing saturation without
+repeating an identical warning every ordinary notification cooldown.
+
+See [UPDATING.md](UPDATING.md) for the equivalent CLI, recovery and exit semantics.

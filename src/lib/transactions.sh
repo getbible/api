@@ -88,6 +88,9 @@ configuration_transaction_recover() {
         origin-committed) : ;;
         *) gb_warn "Unrecognized configuration transaction for $domain; retained journal: $journal"; return 1 ;;
     esac
+    # Persist restored/committed registry bytes before forgetting recovery
+    # evidence. A power failure may not turn a successful rollback into drift.
+    configuration_transaction_sync "$journal" || return 1
     rm -rf -- "$journal" || return 1
     tg_notify warn "Configuration recovered: $domain" 'An interrupted configuration transaction was reconciled without resetting data.'
 }
@@ -143,6 +146,9 @@ configuration_transaction_finish() {
             return 1
         fi
     fi
+    # Persist restored/committed registry bytes before forgetting recovery
+    # evidence. A power failure may not turn a successful rollback into drift.
+    configuration_transaction_sync "$journal" || return 1
     rm -rf -- "$journal" || return 1
     return "$status"
 }

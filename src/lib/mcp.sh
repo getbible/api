@@ -70,8 +70,8 @@ mcp_deployment_inputs() {
     {
         printf '%s\n' "$domain" "$release" "$(ep_get "$domain" MCP_ORIGIN "$(mcp_default_origin)")"
         [[ -z "$extra" ]] || sha256sum < "$extra" || return 1
-        sha256sum "$GB_SRC/systemd/getbible-mcp.service.tmpl" "$GB_TYPES/runtime/templates/socket.tmpl" \
-            "$GB_SRC/apps/mcp/gunicorn.conf.py.tmpl" || return 1
+        (cd "$GB_SRC" && sha256sum systemd/getbible-mcp.service.tmpl types/runtime/templates/socket.tmpl \
+            apps/mcp/gunicorn.conf.py.tmpl) || return 1
     } | sha256sum | cut -d' ' -f1
 }
 

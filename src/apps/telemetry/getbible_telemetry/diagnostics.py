@@ -7,6 +7,7 @@ bounded metadata row and never migrates, creates or resets a database.
 from __future__ import annotations
 
 import json
+from contextlib import closing
 import os
 from pathlib import Path
 import shlex
@@ -43,7 +44,7 @@ def read_capacity(path: str | os.PathLike[str], config: str | os.PathLike[str],
     result: dict[str, Any]
     try:
         # A corrupt/locked database is not allowed to block management.
-        with sqlite3.connect(Path(path).absolute().as_uri() + "?mode=ro", uri=True, timeout=1) as db:
+        with closing(sqlite3.connect(Path(path).absolute().as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
             db.execute("PRAGMA query_only=ON")
             result = capacity_report(SimpleNamespace(db=db), now=now)
     except (sqlite3.Error, ValueError, TypeError, KeyError, OSError):
@@ -71,7 +72,7 @@ def format_capacity(report: dict[str, Any]) -> str:
     collection = report.get("collection", {})
     lines.append("Collection: " + collection.get("state", "unknown"))
     for key in ("unread_bytes", "unread_files", "budgeted_spool_bytes", "retained_archive_bytes", "consumed_rotated_bytes",
-                "producer_bytes_per_second", "collector_bytes_per_second", "backlog_growth_bytes_per_second", "backlog_age_seconds"):
+                "producer_bytes_per_second", "collector_bytes_per_second", "backlog_growth_bytes_per_second", "backlog_observed_seconds"):
         if collection.get(key) is not None:
             lines.append(f"  {key}: {collection[key]}")
     lines.append("")
