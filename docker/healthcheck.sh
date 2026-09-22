@@ -21,11 +21,14 @@ healthcheck_value() {
 }
 
 healthcheck_main() {
-    local prefix="${1:-}" environment generation socket enabled domain record type kind endpoint label slug
+    local prefix="${1:-}" environment generation socket enabled domain record type kind endpoint label slug port
     [[ -f "$prefix/run/getbible/container-initialized" ]] || return 1
     systemctl is-active --quiet nginx.service || return 1
+    port="${GETBIBLE_ORIGIN_HTTP_PORT:-$(healthcheck_value ORIGIN_HTTP_PORT "$prefix/run/getbible/environment.conf" \
+        "$(healthcheck_value ORIGIN_HTTP_PORT "$prefix/etc/getbible/getbible.conf" 80)")}"
+    [[ "$port" =~ ^[0-9]{1,5}$ ]] && (( 10#$port >= 1 && 10#$port <= 65535 )) || return 1
     curl --fail --silent --show-error --noproxy '*' --max-time 3 \
-        -H 'Host: _' http://127.0.0.1/__getbible_health >/dev/null || return 1
+        -H 'Host: _' "http://127.0.0.1:$port/__getbible_health" >/dev/null || return 1
     # Every enabled registry entry must have its selected generation. Globbing
     # only existing environment files would hide a missing/broken active link.
     for record in "$prefix"/etc/getbible/endpoints/*/endpoint.conf; do
@@ -41,29 +44,24 @@ healthcheck_main() {
                     [[ "$(healthcheck_value ENABLED "$endpoint" true)" == true ]] || continue
                     label="${endpoint##*/}"; label="${label%.conf}"
                     [[ "$label" =~ ^(root|v[1-9][0-9]*)$ ]] || return 1
-                    [[ -f "$prefix/opt/getbible/$kind/$label/active/runtime.env" ]] || return 1
+                    environment="$prefix/opt/getbible/$kind/$label/active/runtime.env"
+                    [[ -f "$environment" ]] || return 1
+                    socket="$(sed -nE 's/^[A-Z_]+_BIND="?unix:([^"[:space:]]*)"?$/\1/p' "$environment")" || return 1
+                    healthcheck_socket "$socket" || return 1
                 done ;;
             mcp)
                 domain="${record%/*}"; domain="${domain##*/}"
                 slug="$(printf '%s' "$domain" | tr -c 'a-z0-9' '_')"
-                [[ -f "$prefix/opt/getbible/mcp/$slug/active/.socket" ]] || return 1 ;;
+                generation="$prefix/opt/getbible/mcp/$slug/active"
+                [[ -f "$generation/.socket" ]] || return 1
+                socket="$(cat "$generation/.socket")" || return 1
+                healthcheck_socket "$socket" || return 1 ;;
             static) ;;
             *) return 1 ;;
         esac
     done
-    # Only selected generations matter. A rejected candidate must not make an
-    # otherwise healthy retained serving generation fail container readiness.
-    for environment in "$prefix"/opt/getbible/*/*/active/runtime.env; do
-        [[ -f "$environment" ]] || continue
-        socket="$(sed -nE 's/^[A-Z_]+_BIND="?unix:([^"[:space:]]*)"?$/\1/p' "$environment")" || return 1
-        healthcheck_socket "$socket" || return 1
-    done
-    for generation in "$prefix"/opt/getbible/mcp/*/active; do
-        [[ -e "$generation" || -L "$generation" ]] || continue
-        [[ -d "$generation" ]] || return 1
-        socket="$(cat "$generation/.socket")" || return 1
-        healthcheck_socket "$socket" || return 1
-    done
+    # Disabled domains/endpoints and unregistered retained generations are not
+    # serving obligations. All probes above come from enabled registry entries.
     environment="$prefix/run/getbible/dashboard.conf"
     [[ -f "$environment" ]] || return 1
     enabled="$(sed -n 's/^DASHBOARD_ENABLED=//p' "$environment")" || return 1
