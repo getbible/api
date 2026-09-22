@@ -38,7 +38,10 @@ jobs:
               compressed.extend(value)
           patch = lzma.decompress(compressed)
           assert hashlib.sha256(patch).hexdigest() == '4693a8c5a2694cec1b0e3a5393cb7a5fa03f5f591172d05c139dfd5456ff48ce'
-          subprocess.run(['git', 'apply', '--3way', '--index', '-'], input=patch, check=True)
+          # The old dashboard hunk only installed the capacity CLI launcher.
+          # Its installer has since moved into immutable management releases;
+          # retain that implementation. Capacity CLI resolves from the manager.
+          subprocess.run(['git', 'apply', '--3way', '--index', '--exclude=src/lib/dashboard.sh', '-'], input=patch, check=True)
           pathlib.Path('.github/workflows/upgrade-foundation-checkpoint.yml').unlink()
           subprocess.run(['git', 'add', '-A'], check=True)
           PY
@@ -76,8 +79,7 @@ jobs:
               if not index:
                   entries.append({'path': path, 'mode': '100644', 'type': 'blob', 'sha': None})
                   continue
-              record = index.split(b'\t', 1)[0].decode().split()
-              mode, sha, stage = record
+              mode, sha, stage = index.split(b'\t', 1)[0].decode().split()
               assert stage == '0'
               result = post('/git/blobs', {'content': base64.b64encode(git('cat-file', 'blob', sha)).decode(), 'encoding': 'base64'})
               assert result['sha'] == sha
@@ -86,10 +88,11 @@ jobs:
           assert tree == git('write-tree').decode().strip()
           result = {'parent': git('rev-parse', 'HEAD').decode().strip(), 'tree': tree, 'files': [item['path'] for item in entries], 'validation': 'focused telemetry, capacity, broker and runtime/MCP transaction/lifecycle checks passed'}
           pathlib.Path(os.environ['RUNNER_TEMP'], 'assembly.json').write_text(json.dumps(result, indent=2) + '\n')
-          with pathlib.Path(os.environ['RUNNER_TEMP'], 'source.tar.gz').open('wb') as output:
-              subprocess.run(['git', 'archive', '--format=tar.gz', tree], stdout=output, check=True)
           print(json.dumps(result, indent=2))
           PY
+      - name: Preserve assembled source for verification
+        if: always() && steps.assemble.outcome == 'success'
+        run: git archive --format=tar.gz "$(git write-tree)" > "$RUNNER_TEMP/source.tar.gz"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
