@@ -36,6 +36,23 @@ FAIL=getbible-dashboard/http.sock
 printf 'DASHBOARD_ENABLED=false\n' > "$T/run/getbible/dashboard.conf"
 healthcheck_main "$T"
 FAIL=''
+# Disabled endpoints and domains may retain failed or missing generations.
+mkdir -p "$T/opt/getbible/query/v3/active"
+printf 'QUERY_BIND="unix:/run/disabled.sock"\n' > "$T/opt/getbible/query/v3/active/runtime.env"
+printf 'ENABLED=false\n' > "$T/etc/getbible/endpoints/query.example.test/versions/v3.conf"
+FAIL=disabled.sock
+healthcheck_main "$T"
+printf 'TYPE=runtime\nKIND=query\nENABLED=false\n' > "$T/etc/getbible/endpoints/query.example.test/endpoint.conf"
+FAIL=query.sock
+healthcheck_main "$T"
+printf 'TYPE=runtime\nKIND=query\nENABLED=true\n' > "$T/etc/getbible/endpoints/query.example.test/endpoint.conf"
+FAIL=''
+# Custom origin ports follow deployment overrides and reject invalid values.
+: > "$T/calls"
+GETBIBLE_ORIGIN_HTTP_PORT=8081 healthcheck_main "$T"
+grep -qF 'http://127.0.0.1:8081/__getbible_health' "$T/calls"
+if GETBIBLE_ORIGIN_HTTP_PORT=65536 healthcheck_main "$T"; then echo 'Invalid origin port accepted' >&2; exit 1; fi
+FAIL=''
 mv "$T/opt/getbible/query/v2/active/runtime.env" "$T/runtime-saved.env"
 if healthcheck_main "$T"; then echo 'Missing selected runtime accepted' >&2; exit 1; fi
 mv "$T/runtime-saved.env" "$T/opt/getbible/query/v2/active/runtime.env"
