@@ -5,6 +5,8 @@
 
 [[ -n "${GB_ENDPOINT_LOADED:-}" ]] && return 0
 GB_ENDPOINT_LOADED=1
+# shellcheck source=transactions.sh
+source "$GB_LIB/transactions.sh"
 
 endpoint_source_type() {
     local type="$1"
@@ -32,6 +34,7 @@ endpoint_apply_abort() {
             gb_warn "Routing recovery failed; retaining runtime processes to avoid interrupting traffic."
         fi
     fi
+    [[ "$recovery" == true ]] || _EP_RECOVERY_SAFE=false
     ep_state_set "$domain" LAST_ERROR "$reason" || true
     tg_notify fail "Domain update failed: $domain" "$reason. Routing recovery: $recovery."
     return 1
@@ -45,10 +48,24 @@ endpoint_apply_abort() {
 # and no Cloudflare DNS or rules. It renders TLS with a placeholder
 # certificate so the complete vhost can be tested before go-live.
 endpoint_apply() {
+    local status=0 _EP_ORIGIN_COMMITTED=false _EP_EDGE_FAILED=false _EP_RECOVERY_SAFE=true
+    endpoint_apply_transaction "$@" || status=$?
+    # Nested resource reconciliation must not export another domain's commit
+    # outcome as this transaction's result.
+    EP_ORIGIN_COMMITTED="$_EP_ORIGIN_COMMITTED"
+    EP_APPLY_EDGE_FAILED="$_EP_EDGE_FAILED"
+    EP_APPLY_RECOVERY_SAFE="$_EP_RECOVERY_SAFE"
+    EP_RECOVERY_FAILED=false
+    [[ "$_EP_RECOVERY_SAFE" == true ]] || EP_RECOVERY_FAILED=true
+    return "$status"
+}
+
+endpoint_apply_transaction() {
     local domain="$1" stage live=true local_apply="${GB_LOCAL_APPLY:-false}"
     # Go-live uses this marker to distinguish a committed, healthy origin
     # from an activation failure when the optional edge update fails later.
-    EP_APPLY_EDGE_FAILED=false
+    _EP_EDGE_FAILED=false
+    _EP_ORIGIN_COMMITTED=false
     ep_load "$domain" || return 1
     endpoint_source_type "$EP_TYPE" || return 1
     nginx_validate_proxy_settings || return 1
@@ -91,6 +108,7 @@ endpoint_apply() {
     if declare -F "type_${EP_TYPE}_before_switch" >/dev/null; then
         "type_${EP_TYPE}_before_switch" "$domain" || { endpoint_apply_abort "$domain" "Could not prepare the traffic switch"; return 1; }
     fi
+    configuration_transaction_phase "$domain" switching || { endpoint_apply_abort "$domain" "Could not retain the traffic-switch journal"; return 1; }
     nginx_apply_stage "$stage" "$EP_SLUG" || { endpoint_apply_abort "$domain" "nginx rejected the endpoint configuration"; return 1; }
 
     if [[ "$local_apply" != true && "$live" == true ]] && ! nginx_external_tls && ! nginx_cert_exists "$domain"; then
@@ -108,6 +126,8 @@ endpoint_apply() {
     fi
     "type_${EP_TYPE}_finish" "$domain" || { endpoint_apply_abort "$domain" "Activating the domain failed"; return 1; }
     nginx_transaction_commit "$domain" || return 1
+    _EP_ORIGIN_COMMITTED=true
+    configuration_transaction_phase "$domain" origin-committed || { gb_warn "The origin is committed; its configuration journal needs reconciliation."; return 1; }
     EP_ENABLE_BACKUP=""
     # Go-live verifies this origin before changing public DNS. The committed
     # runtime stays active if this check fails; the caller records the failure.
@@ -118,7 +138,7 @@ endpoint_apply() {
         if cloudflare_apply "$domain"; then
             ep_state_set "$domain" CLOUDFLARE_ERROR ""
         else
-            EP_APPLY_EDGE_FAILED=true
+            _EP_EDGE_FAILED=true
             gb_warn "Cloudflare update failed for $domain; nginx is unaffected."
             ep_state_set "$domain" CLOUDFLARE_ERROR "Cloudflare update failed at $(gb_timestamp)"
         fi
@@ -132,7 +152,7 @@ endpoint_apply() {
     fi
     ep_state_set "$domain" LAST_APPLY "$(gb_timestamp)"
     ep_state_set "$domain" LAST_APPLY_COMMIT "$(git -C "$GB_REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
-    if [[ "$EP_APPLY_EDGE_FAILED" == true ]]; then
+    if [[ "$_EP_EDGE_FAILED" == true ]]; then
         ep_state_set "$domain" LAST_ERROR "Cloudflare update incomplete; the origin remains active."
         tg_notify warn "Domain update incomplete: $domain" "The origin remains active, but Cloudflare was not fully applied. Fix the reported error and apply the domain again."
         return 1

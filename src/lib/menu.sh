@@ -20,6 +20,7 @@ menu_main() {
             self-update "$manager_label" \
             update "$update_label" \
             analytics "Traffic analytics: calls and unique callers" \
+            capacity "Capacity: effective limits, collection health and sizing advice" \
             dashboard "Private dashboard: domain, password, sessions, blocked addresses" \
             mcp "MCP domains: configure, update or roll back" \
             logs "Logs: view, archives, rotate" \
@@ -42,6 +43,7 @@ menu_main() {
                 fi ;;
             update) menu_update ;;
             analytics) menu_analytics ;;
+            capacity) ui_run "Capacity diagnostics" capacity_cli ;;
             dashboard) menu_dashboard ;;
             mcp) mcp_menu ;;
             logs) menu_logs ;;

@@ -315,6 +315,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         name = path.removeprefix("/api/")
         if name == "dashboard/state":
             return self._json(200, self.app.lifecycle.state())
+        if name == "capacity":
+            return self._json(200, self.app.broker.call("capacity"))
         if name == "management/state":
             return self._json(200, self.app.broker.call("state", {"actor": {"session_id": session["id"]}}))
         if name == "sessions":

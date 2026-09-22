@@ -1,79 +1,80 @@
 #!/usr/bin/env bash
-# Isolated MCP upgrade transactions; no services, network, or production paths.
+# Bundled families, no-op generations and immutable upstream environment.
+# shellcheck disable=SC2329 # Lifecycle stand-ins are called by the sourced driver.
 set -Eeuo pipefail
-ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-T="$(mktemp -d)"
-trap 'rm -rf -- "$T"' EXIT
-# shellcheck source=../../src/lib/mcp.sh
-source "$ROOT/src/lib/mcp.sh"
-GB_OPT="$T/opt"; GB_RUN="$T/run"; GB_DRY_RUN=false
+ROOT="$(cd -- "$(dirname -- "$0")/../.." && pwd -P)"
+export GB_PREFIX="$(mktemp -d)" GB_REPO_DIR="$ROOT" GB_UI=none GB_YES=true
+for lib in core config registry python pages users systemd mcp; do
+    # shellcheck source=/dev/null
+    source "$ROOT/src/lib/$lib.sh"
+done
+trap 'gb_cleanup; rm -rf -- "$GB_PREFIX"' EXIT
+trap 'printf "MCP upgrade check failed at line %s\n" "$LINENO" >&2' ERR
+mkdir -p "$GB_LOG"
 MODE=docker
-calls="$T/calls"
-: > "$calls"
-gb_warn() { printf '%s\n' "$*" >&2; }
+calls="$GB_PREFIX/calls"; : > "$calls"
 gb_is_docker() { [[ "$MODE" == docker ]]; }
-gb_slug() { printf '%s\n' "$1"; }
-py_bundle_root() { printf '%s\n' "$T/bundle"; }
+py_bundle_root() { printf '%s/bundle\n' "$GB_PREFIX"; }
 py_inputs_hash() { printf 'reviewed\n'; }
 py_resolve_version() {
     case "$1" in 3.12|3.12.14) printf '3.12.14\n' ;; 3.13|3.13.11) printf '3.13.11\n' ;; *) return 1 ;; esac
 }
 [[ "$(mcp_update_python 3.12.1)" == 3.12.14 ]]
 [[ "$(mcp_update_python 3.13.1)" == 3.13.11 ]]
-if mcp_update_python 3.14.1; then echo 'missing family accepted' >&2; exit 1; fi
-if mcp_bundle_preflight 3.12.14 reviewed; then echo 'missing bundle accepted' >&2; exit 1; fi
-mkdir -p "$T/bundle/wheels/3.12.14/mcp"
-printf 'package==1\n' > "$T/bundle/wheels/3.12.14/mcp/packages.requirements"
-printf 'stale\n' > "$T/bundle/wheels/3.12.14/mcp/.inputs"
-if mcp_bundle_preflight 3.12.14 reviewed; then echo 'stale bundle accepted' >&2; exit 1; fi
-printf 'reviewed\n' > "$T/bundle/wheels/3.12.14/mcp/.inputs"
+if mcp_update_python 3.14.1; then exit 1; fi
+if mcp_bundle_preflight 3.12.14 reviewed; then exit 1; fi
+mkdir -p "$GB_PREFIX/bundle/wheels/3.12.14/mcp"
+printf 'package==1\n' > "$GB_PREFIX/bundle/wheels/3.12.14/mcp/packages.requirements"
+printf 'stale\n' > "$GB_PREFIX/bundle/wheels/3.12.14/mcp/.inputs"
+if mcp_bundle_preflight 3.12.14 reviewed; then exit 1; fi
+printf 'reviewed\n' > "$GB_PREFIX/bundle/wheels/3.12.14/mcp/.inputs"
 mcp_bundle_preflight 3.12.14 reviewed
 MODE=native
 mcp_bundle_preflight 3.13.11 reviewed
-MODE=docker
-
-# Unchanged apply must never retire the current backend.
-mcp_active() { printf '%s\n' "$T/old"; }
+nginx_external_tls() { return 0; }
+nginx_origin_http_port() { printf '80\n'; }
+nginx_master_pid() { printf '0\n'; }
+sd_available() { return 0; }
+sd_is_active() { return 0; }
+sd_snapshot_nginx_workers() { : > "$1"; }
 sd_retire_after() { printf 'retire %s\n' "$1" >> "$calls"; }
-mcp_reap_unselected() { :; }
+sd_start() { printf 'start %s\n' "$1" >> "$calls"; }
+sd_enable() { :; }
+sd_daemon_reload() { :; }
+sd_wait_ready() { return 0; }
+gb_ensure_base_groups() { :; }
+gb_ensure_system_user() { :; }
 tg_notify() { :; }
-MCP_DOMAIN=mcp.example.test; MCP_OLD="$T/old"; MCP_CANDIDATE=""; MCP_SNAPSHOT="$T/snapshot"
-mcp_finish "$MCP_DOMAIN"
-[[ ! -s "$calls" ]]
-MCP_CANDIDATE="$T/new"
-mcp_finish "$MCP_DOMAIN"
-[[ "$(grep -c '^retire ' "$calls")" == 1 ]]
-
-# Configuration must recover even when failure preceded generation creation.
-ep_conf() { printf '%s/config\n' "$T"; }
-gb_restore_file() { cp "$2/config" "$1"; }
-mkdir "$T/backup"
-printf 'MCP_PYTHON_VERSION=3.12.1\n' > "$T/backup/config"
-printf 'MCP_PYTHON_VERSION=3.12.14\n' > "$T/config"
-MCP_CONFIG_BACKUP="$T/backup"; MCP_COMMITTED=false; MCP_CANDIDATE=""
-mcp_abort "$MCP_DOMAIN"
-cmp "$T/config" "$T/backup/config"
-
-# Preflight occurs before configuration mutation. Rejected origins restore
-# saved settings; post-commit edge failures retain the deployed settings.
-ep_exists() { return 0; }
-ep_get() {
-    case "$2" in TYPE) printf 'mcp\n' ;; MCP_PYTHON_VERSION) cut -d= -f2 "$T/config" ;; *) printf '%s\n' "${3:-}" ;; esac
-}
-ep_set() { printf '%s=%s\n' "$2" "$3" > "$T/config"; }
-gb_new_backup_set() { printf '%s/backup\n' "$T"; }
-gb_backup_file() { cp "$1" "$2/config"; }
-MODE=native
-EDGE=false
-endpoint_apply() { EP_APPLY_EDGE_FAILED="$EDGE"; return 1; }
-printf 'MCP_PYTHON_VERSION=3.12.1\n' > "$T/config"
-if mcp_cli update "$MCP_DOMAIN"; then echo 'failed deployment accepted' >&2; exit 1; fi
-grep -qx 'MCP_PYTHON_VERSION=3.12.1' "$T/config"
-EDGE=true
-if mcp_cli update "$MCP_DOMAIN"; then echo 'edge failure accepted' >&2; exit 1; fi
-grep -qx 'MCP_PYTHON_VERSION=3.12.14' "$T/config"
-printf 'MCP_PYTHON_VERSION=3.13.1\n' > "$T/config"
-MODE=docker
-if mcp_cli update "$MCP_DOMAIN"; then echo 'missing bundle accepted' >&2; exit 1; fi
-grep -qx 'MCP_PYTHON_VERSION=3.13.1' "$T/config"
-printf 'MCP upgrade transaction checks passed\n'
+domain=mcp.example.test
+ep_create "$domain" mcp mcp
+ep_set "$domain" MCP_PYTHON_VERSION 3.12.14
+ep_set "$domain" MCP_ORIGIN http://127.0.0.1:80
+release="$(mcp_root "$domain")/releases/one"
+old="$(mcp_root "$domain")/deployments/one"
+mkdir -p "$release/.venv/bin" "$old"
+printf '#!/bin/sh\nexit 0\n' > "$release/.venv/bin/python"
+chmod +x "$release/.venv/bin/python"
+printf 'reviewed\n' > "$release/.inputs"
+printf '%s\n' "$release" > "$old/.release"
+printf '%s\n' "$GB_PREFIX/old.sock" > "$old/.socket"
+gb_switch_link "$release" "$(mcp_root "$domain")/current"
+gb_switch_link "$old" "$(mcp_root "$domain")/active"
+mcp_deployment_inputs "$domain" "$release" > "$old/.inputs"
+mcp_prepare "$domain"
+[[ -z "$MCP_CANDIDATE" ]]
+mcp_before_switch "$domain"
+mcp_commit "$domain"
+mcp_finish "$domain"
+[[ ! -s "$calls" && "$(mcp_active "$domain")" == "$old" ]]
+# A changed environment is snapshotted; future changes to the external file
+# cannot alter the selected generation on an unrelated service restart.
+printf 'EXAMPLE_SETTING=old\n' > "$GB_PREFIX/upstreams.env"
+ep_set "$domain" MCP_ENV_FILE "$GB_PREFIX/upstreams.env"
+mcp_prepare "$domain"
+[[ -n "$MCP_CANDIDATE" ]]
+grep -q '^EXAMPLE_SETTING=old$' "$MCP_CANDIDATE/mcp.env"
+grep -q "^EnvironmentFile=$MCP_CANDIDATE/mcp.env$" "$MCP_CANDIDATE/service.unit"
+printf 'EXAMPLE_SETTING=new\n' > "$GB_PREFIX/upstreams.env"
+grep -q '^EXAMPLE_SETTING=old$' "$MCP_CANDIDATE/mcp.env"
+[[ "$(stat -c %a "$MCP_CANDIDATE/mcp.env")" == 600 ]]
+printf 'MCP bundle, no-op and immutable environment checks passed\n'

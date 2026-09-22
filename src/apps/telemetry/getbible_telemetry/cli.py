@@ -34,7 +34,7 @@ def _seconds(value: str) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("collect", "summary", "series", "requests", "events",
-                                          "metrics", "storage", "endpoints", "export", "rotate", "reset", "prepare"))
+                                          "metrics", "storage", "endpoints", "export", "rotate", "reset", "prepare", "capacity"))
     parser.add_argument("--db", default=_env("DB", "/var/lib/getbible/telemetry/traffic.sqlite3"))
     parser.add_argument("--log-root", default=_env("LOG_ROOT", "/var/log/getbible"))
     parser.add_argument("--registry", default=_env("REGISTRY", "/etc/getbible/endpoints"))
@@ -129,6 +129,9 @@ def main(argv: list[str] | None = None) -> int:
             result = store.events(start, end, limit=args.limit, cursor=args.cursor, endpoint=args.endpoint)
         elif args.action == "metrics":
             result = store.metrics(start, end, args.bucket)
+        elif args.action == "capacity":
+            from .capacity import capacity_report
+            result = capacity_report(store)
         elif args.action == "storage":
             result = store.storage()
         elif args.action == "endpoints":

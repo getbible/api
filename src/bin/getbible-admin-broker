@@ -841,6 +841,14 @@ class Broker:
             self.inventory_cache[key] = rows
             return rows
 
+    def capacity(self):
+        result = subprocess.run([self.manager, "capacity", "--json"],
+                                capture_output=True, text=True, timeout=5,
+                                env={**os.environ, "GB_PREFIX": self.prefix, "GB_UI": "none"})
+        if result.returncode != 0 or len(result.stdout) > 1024 * 1024:
+            raise ValueError("Capacity diagnostics are unavailable")
+        return json.loads(result.stdout)
+
     def dispatch(self, request, uid):
         with self.mutex:
             for job_id, (expires, _) in list(self.output_secrets.items()):
@@ -857,6 +865,8 @@ class Broker:
         if any(not isinstance(v, str) or len(v) > 128 or any(ord(c) < 32 for c in v) for v in actor_data.values()):
             raise ValueError("Invalid actor")
         actor = json.dumps({"uid": uid, **actor_data}, sort_keys=True)
+        if method == "capacity":
+            return self.capacity()
         if method == "state":
             return self.state()
         if method == "operations":

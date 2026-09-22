@@ -99,7 +99,7 @@ gb_setting_validate() {
             [[ "$value" =~ ^[1-9][0-9]{0,7}$ ]] ;;
         TELEMETRY_RETENTION_DAYS) [[ "$value" =~ ^[0-9]{1,6}$ ]] ;;
         DASHBOARD_IDLE_SECONDS) [[ "$value" =~ ^[0-9]{1,4}$ ]] && (( 10#$value >= 10 && 10#$value <= 3600 )) ;;
-        TELEMETRY_MAX_GIB|TELEMETRY_SPOOL_MAX_GIB|TELEMETRY_SPOOL_ROTATE_MIB|ALERT_COOLDOWN_SECONDS|ALERT_HOLD_SECONDS|ALERT_SYNC_GRACE_SECONDS) [[ "$value" =~ ^[1-9][0-9]{0,5}$ ]] ;;
+        TELEMETRY_MAX_GIB|TELEMETRY_SPOOL_MAX_GIB|TELEMETRY_SPOOL_ROTATE_MIB|ALERT_COOLDOWN_SECONDS|ALERT_REMINDER_SECONDS|ALERT_HOLD_SECONDS|ALERT_SYNC_GRACE_SECONDS) [[ "$value" =~ ^[1-9][0-9]{0,5}$ ]] ;;
         STORAGE_MAX_GIB) [[ "$value" =~ ^[0-9]{1,6}$ ]] ;;
         DASHBOARD_SESSION_DAYS) [[ "$value" =~ ^[0-9]{1,2}$ ]] && (( 10#$value >= 1 && 10#$value <= 30 )) ;;
         DASHBOARD_TOKEN_SECONDS) [[ "$value" =~ ^[0-9]{1,2}$ ]] && (( 10#$value >= 10 && 10#$value <= 60 )) ;;
