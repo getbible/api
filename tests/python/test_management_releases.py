@@ -2,6 +2,7 @@
 from contextlib import closing
 from pathlib import Path
 import json
+import os
 import runpy
 import shutil
 import sqlite3
@@ -65,6 +66,34 @@ class ManagementReleasesTest(unittest.TestCase):
         self.assertFalse(self.select(candidate))
         self.assertEqual(self.releases.current(), candidate)
         self.assertEqual(json.loads((candidate / 'apps/dashboard/release.json').read_text())['version'], '3.2.0')
+
+    def test_restrictive_umask_does_not_make_published_code_private(self):
+        previous = os.umask(0o077)
+        try:
+            candidate = self.stage()
+            self.select(candidate)
+        finally:
+            os.umask(previous)
+        for directory in (self.releases.root, self.releases.releases, candidate,
+                          *(p for p in candidate.rglob('*') if p.is_dir())):
+            self.assertEqual(directory.stat().st_mode & 0o777, 0o755, str(directory))
+        for member in candidate.rglob('*'):
+            if member.is_file():
+                self.assertEqual(member.stat().st_mode & 0o444, 0o444, str(member))
+                self.assertEqual(member.stat().st_mode & 0o022, 0, str(member))
+        self.assertEqual(self.releases.state_file.stat().st_mode & 0o777, 0o600)
+        state = json.loads(self.releases.state_file.read_text())
+        self.assertEqual(Path(state['unit_backup']).stat().st_mode & 0o777, 0o700)
+
+    def test_unreadable_retained_code_is_replaced_without_mutating_it(self):
+        old = self.stage()
+        self.select(old)
+        (old / 'bin').chmod(0o700)
+        candidate = self.stage()
+        self.assertNotEqual(candidate, old)
+        self.assertEqual((candidate / 'bin').stat().st_mode & 0o777, 0o755)
+        self.assertEqual((old / 'bin').stat().st_mode & 0o777, 0o700)
+        self.assertEqual(self.releases.current(), old)
 
     def test_missing_assets_and_invalid_python_fail_before_activation(self):
         current = self.stage()

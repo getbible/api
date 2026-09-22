@@ -3,7 +3,8 @@
 # shellcheck disable=SC2329 # Injected lifecycle implementations are called indirectly.
 set -Eeuo pipefail
 ROOT="$(cd -- "$(dirname -- "$0")/../.." && pwd -P)"
-export GB_PREFIX="$(mktemp -d)" GB_REPO_DIR="$ROOT" GB_UI=none GB_YES=true
+GB_PREFIX="$(mktemp -d)"
+export GB_PREFIX GB_REPO_DIR="$ROOT" GB_UI=none GB_YES=true
 for lib in core config registry python pages endpoint mcp; do
     # shellcheck source=/dev/null
     source "$ROOT/src/lib/$lib.sh"
