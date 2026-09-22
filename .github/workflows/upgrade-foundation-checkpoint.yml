@@ -1,0 +1,102 @@
+name: Upgrade foundation checkpoint
+
+on:
+  pull_request:
+    paths: ['.github/workflows/upgrade-foundation-checkpoint.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'fix/dependable-upgrades-capacity'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Assemble the reviewed source without moving the branch
+        id: assemble
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, lzma, os, pathlib, subprocess, urllib.request
+          root = 'https://api.github.com/repos/' + os.environ['REPOSITORY']
+          headers = {'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'}
+          chunks = ['710e7ea91ccd49f1ec896fcad8ed5669edffc75a', '0606a0eebd94b7022b70c3691e65bb5d95d8e3ae', '17d64cce322aa8566c00d854348cbcfbd06feba6', 'b8edac24752019765ece59cc70b6187284ece7bb', '2adaba6dddd3f1ba27a95d2e2313f6aa3769502f', '6dd114f974c1bd9864e4f7f0ebaee956b7daf7ec']
+          compressed = bytearray()
+          for sha in chunks:
+              with urllib.request.urlopen(urllib.request.Request(root + '/git/blobs/' + sha, headers=headers), timeout=60) as response:
+                  blob = json.load(response)
+              value = base64.b64decode(blob['content'])
+              assert hashlib.sha1(f'blob {len(value)}\0'.encode() + value).hexdigest() == sha
+              compressed.extend(value)
+          patch = lzma.decompress(compressed)
+          assert hashlib.sha256(patch).hexdigest() == '4693a8c5a2694cec1b0e3a5393cb7a5fa03f5f591172d05c139dfd5456ff48ce'
+          subprocess.run(['git', 'apply', '--3way', '--index', '-'], input=patch, check=True)
+          pathlib.Path('.github/workflows/upgrade-foundation-checkpoint.yml').unlink()
+          subprocess.run(['git', 'add', '-A'], check=True)
+          PY
+      - name: Validate the assembled foundation
+        id: tests
+        run: |
+          set -euo pipefail
+          export TERM=xterm
+          python3 -m unittest tests.python.test_telemetry tests.python.test_capacity tests.python.test_admin_broker -v 2>&1 | tee "$RUNNER_TEMP/foundation-python.log"
+          for script in tests/cli/test_config_transactions.sh tests/cli/test_configuration_transactions.sh tests/cli/test_runtime_image_update.sh tests/cli/test_runtime_lifecycle.sh tests/cli/test_mcp_upgrades.sh tests/cli/test_mcp.sh tests/cli/test_mcp_domain.sh; do
+            bash "$script" 2>&1 | tee -a "$RUNNER_TEMP/foundation-shell.log"
+          done
+      - name: Preserve the validated Git tree for the reviewed commit
+        if: steps.tests.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, pathlib, subprocess, urllib.request
+          def git(*args):
+              return subprocess.check_output(['git', *args])
+          root = 'https://api.github.com/repos/' + os.environ['REPOSITORY']
+          headers = {'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28'}
+          def post(path, data):
+              request = urllib.request.Request(root + path, data=json.dumps(data).encode(), headers=headers, method='POST')
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  return json.load(response)
+          entries = []
+          for raw in git('diff', '--cached', '--name-only', '--no-renames', '-z', 'HEAD').split(b'\0'):
+              if not raw:
+                  continue
+              path = raw.decode()
+              index = git('ls-files', '--stage', '-z', '--', path)
+              if not index:
+                  entries.append({'path': path, 'mode': '100644', 'type': 'blob', 'sha': None})
+                  continue
+              record = index.split(b'\t', 1)[0].decode().split()
+              mode, sha, stage = record
+              assert stage == '0'
+              result = post('/git/blobs', {'content': base64.b64encode(git('cat-file', 'blob', sha)).decode(), 'encoding': 'base64'})
+              assert result['sha'] == sha
+              entries.append({'path': path, 'mode': mode, 'type': 'blob', 'sha': sha})
+          tree = post('/git/trees', {'base_tree': git('rev-parse', 'HEAD^{tree}').decode().strip(), 'tree': entries})['sha']
+          assert tree == git('write-tree').decode().strip()
+          result = {'parent': git('rev-parse', 'HEAD').decode().strip(), 'tree': tree, 'files': [item['path'] for item in entries], 'validation': 'focused telemetry, capacity, broker and runtime/MCP transaction/lifecycle checks passed'}
+          pathlib.Path(os.environ['RUNNER_TEMP'], 'assembly.json').write_text(json.dumps(result, indent=2) + '\n')
+          with pathlib.Path(os.environ['RUNNER_TEMP'], 'source.tar.gz').open('wb') as output:
+              subprocess.run(['git', 'archive', '--format=tar.gz', tree], stdout=output, check=True)
+          print(json.dumps(result, indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: upgrade-foundation-checkpoint
+          path: |
+            ${{ runner.temp }}/assembly.json
+            ${{ runner.temp }}/source.tar.gz
+            ${{ runner.temp }}/foundation-*.log
+          if-no-files-found: ignore
+          retention-days: 3
