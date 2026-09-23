@@ -42,6 +42,19 @@ class UpgradePlansTest(unittest.TestCase):
         self.assertEqual(plan["pending"], 1)
         self.assertEqual(select(plan, [], "", False, False, False), [plan["targets"][1]])
 
+    def test_preparation_reason_is_actionable_without_blocking_other_targets(self):
+        row = self.inventory[0]
+        row.update(matches=False, serving='unavailable',
+                   pending_reason='Traffic history schema 1 requires preparation for schema 3')
+        plan = self.journal.plan(self.inventory, '3.2.0')
+        self.assertEqual(plan['targets'][0]['reason'], row['pending_reason'])
+        self.assertEqual([r['id'] for r in select(plan, [], '', False, False, False)], ['management'])
+        # Explicit endpoint-only scope does not silently expand to management.
+        self.assertEqual([r['id'] for r in select(plan, ['runtime/query.example.test/v2'], '', True, False, True)],
+                         ['runtime/query.example.test/v2'])
+        row.update(matches=True, serving='ready')
+        self.assertEqual(self.journal.plan(self.inventory, '3.2.0')['pending'], 0)
+
     def test_explicit_empty_subset_and_unknown_targets_never_select_other_work(self):
         for row in self.inventory:
             row["matches"] = False
