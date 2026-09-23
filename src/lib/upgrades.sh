@@ -103,6 +103,7 @@ upgrade_socket_ready() {
 # One subprocess isolates the registry/manifest globals used by each driver.
 upgrade_describe() (
     local id="$1" kind domain='' label='' selected='' app='' app_hash='' generation='' release='' expected='' fingerprint='' serving=unknown matches=false value extra phase resource_values variable key
+    local history_schema incoming_schema installed_schema=0 pending_reason=''
     local -a args=() sources=() row_args=()
     kind="${id%%/*}"
     if [[ "$kind" != management ]]; then
@@ -119,16 +120,27 @@ upgrade_describe() (
         management)
             value="$(dashboard_release_manifest)" || return 1
             app_hash="$(printf '%s' "$value" | "$GB_PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["fingerprint"])')" || return 1
+            history_schema="$(management_release schema --db "$GB_VAR/telemetry/traffic.sqlite3")" || return 1
+            incoming_schema="$(management_release schema --source "$GB_REPO_DIR")" || return 1
             generation="$(management_release current)" || return 1
             if [[ -n "$generation" ]]; then
                 expected="$(management_release status)" || return 1
+                installed_schema="$(printf '%s' "$expected" | "$GB_PYTHON" -c 'import json,sys; print(json.load(sys.stdin).get("telemetry_schema") or 0)')" || return 1
                 phase="$(printf '%s' "$expected" | "$GB_PYTHON" -c 'import json,sys; p=json.load(sys.stdin); print(p.get("phase", "pending") if p.get("integrity")=="valid" else "invalid")')" || return 1
                 expected="$(printf '%s' "$expected" | "$GB_PYTHON" -c 'import json,sys; print((json.load(sys.stdin).get("release") or {}).get("fingerprint", ""))')" || return 1
                 if [[ "$phase" == current && "$expected" == "$app_hash" ]]; then matches=true; fi
                 if [[ "$matches" == true && "$(gb_global DASHBOARD_ENABLED false)" == true ]] && ! dashboard_route_matches; then matches=false; fi
             fi
+            # Type=exec acknowledges execution, not a successful database open.
+            # A restarting collector can briefly be active with unusable history.
+            # Schema preparation is required even when code and settings match;
+            # never hash the mutable stored schema into the desired fingerprint.
+            if [[ "$history_schema" != "$incoming_schema" ]]; then
+                matches=false
+                pending_reason="Traffic history schema $history_schema requires preparation for schema $incoming_schema"
+            fi
             if ! sd_available; then serving=offline
-            elif sd_is_active getbible-telemetry.service; then
+            elif [[ "$installed_schema" != 0 && "$history_schema" == "$installed_schema" ]] && sd_is_active getbible-telemetry.service; then
                 serving=ready
                 if [[ "$(gb_global DASHBOARD_ENABLED false)" == true ]] && ! dashboard_health >/dev/null 2>&1; then serving=unavailable; fi
             else serving=unavailable; fi
@@ -208,6 +220,7 @@ upgrade_describe() (
     args+=(--value "application=$app_hash" --value "mode=$(gb_execution_mode)")
     fingerprint="$(upgrade_helper fingerprint --root "$GB_REPO_DIR" "${args[@]}")" || return 1
     row_args=(--target "$id" --kind "$kind" --domain "$domain" --label "$label" --fingerprint "$fingerprint" --generation "$generation" --serving "$serving")
+    [[ -z "$pending_reason" ]] || row_args+=(--reason "$pending_reason")
     [[ "$matches" != true ]] || row_args+=(--matches)
     upgrade_helper row "${row_args[@]}"
 )

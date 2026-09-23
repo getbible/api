@@ -186,6 +186,7 @@ class Journal:
                 reason = ("Implementation and selected generation are current" if current else
                           "Retry interrupted upgrade" if outcome == "interrupted" else
                           "Retry failed upgrade" if outcome == "failed" else
+                          row["pending_reason"] if row.get("pending_reason") else
                           "Serving readiness needs recovery" if row.get("serving") not in {"ready", "offline"} else
                           "Implementation, dependencies or effective settings changed")
                 row.update(status="current" if current else "pending", eligible=not current,
@@ -246,6 +247,7 @@ def main(argv=None) -> int:
     parser.add_argument("--serving", choices=("ready", "unavailable", "unknown", "offline"), default="unknown")
     parser.add_argument("--matches", action="store_true")
     parser.add_argument("--error", default="")
+    parser.add_argument("--reason", default="")
     parser.add_argument("--outcome", choices=sorted(OUTCOMES), default="failed")
     parser.add_argument("--detail", default="")
     parser.add_argument("--owner", type=int, default=os.getppid())
@@ -262,7 +264,8 @@ def main(argv=None) -> int:
             raise ValueError("row requires one valid target")
         print(json.dumps({"id": args.target[0], "kind": args.kind, "domain": args.domain, "label": args.label,
                           "desired_fingerprint": args.fingerprint or None, "generation": args.generation,
-                          "serving": args.serving, "matches": args.matches, "error": args.error or None}))
+                          "serving": args.serving, "matches": args.matches, "error": args.error or None,
+                          "pending_reason": args.reason or None}))
     elif args.action == "plan":
         if args.inventory is None:
             parser.error("plan requires --inventory")

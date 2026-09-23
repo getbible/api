@@ -1,6 +1,7 @@
 """Local release preparation and compatibility-aware recovery, without systemd."""
-from contextlib import closing
+from contextlib import closing, redirect_stdout
 from pathlib import Path
+import io
 import json
 import os
 import runpy
@@ -66,6 +67,34 @@ class ManagementReleasesTest(unittest.TestCase):
         self.assertFalse(self.select(candidate))
         self.assertEqual(self.releases.current(), candidate)
         self.assertEqual(json.loads((candidate / 'apps/dashboard/release.json').read_text())['version'], '3.2.0')
+
+    def test_schema_inspection_separates_incoming_code_from_selected_code_and_history(self):
+        self.make_source(2)
+        candidate = self.stage()
+        self.select(candidate)
+        self.releases.finish('current')
+        self.make_source(3)
+        with closing(sqlite3.connect(self.db)) as db, db:
+            db.execute('PRAGMA user_version=2')
+            db.execute('CREATE TABLE retained(value)')
+            db.execute('INSERT INTO retained VALUES (42)')
+        before = self.db.read_bytes(), self.releases.state_file.read_bytes()
+
+        def inspect(*arguments):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                MODULE['main']([*arguments, '--root', str(self.releases.root)])
+            return json.loads(output.getvalue())
+
+        self.assertEqual(inspect('schema', '--source', str(self.source)), 3)
+        self.assertEqual(inspect('schema', '--db', str(self.db)), 2)
+        status = inspect('status')
+        self.assertEqual(status['telemetry_schema'], 2)
+        self.assertEqual(status['phase'], 'current')
+        self.assertEqual(before, (self.db.read_bytes(), self.releases.state_file.read_bytes()))
+        missing = self.root / 'missing.sqlite3'
+        self.assertEqual(inspect('schema', '--db', str(missing)), 0)
+        self.assertFalse(missing.exists())
 
     def test_restrictive_umask_does_not_make_published_code_private(self):
         previous = os.umask(0o077)

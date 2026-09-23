@@ -464,7 +464,9 @@ def main(argv=None) -> int:
             parser.error("manifest requires --source")
         print(json.dumps(manifest_for(args.source)[0]["release"], sort_keys=True))
     elif args.action == "schema":
-        print(database_schema(args.db))
+        # Inspection stays read-only: --source asks for the incoming code's
+        # schema; without it, inspect durable history without opening a writer.
+        print(schema_version(args.source / "src/apps/telemetry") if args.source else database_schema(args.db))
     elif args.action == "current":
         current = releases.current()
         print(str(current) if current else "")
@@ -473,7 +475,9 @@ def main(argv=None) -> int:
         state = read_json(releases.state_file)
         state["current"] = str(current) if current else None
         try:
-            state["release"] = validate_release(current)["release"] if current else None
+            manifest = validate_release(current) if current else {}
+            state["release"] = manifest.get("release")
+            state["telemetry_schema"] = manifest.get("telemetry_schema")
             state["integrity"] = "valid" if current else "unmanaged"
         except (ValueError, OSError, SyntaxError) as exc:
             state["integrity"] = "invalid"
