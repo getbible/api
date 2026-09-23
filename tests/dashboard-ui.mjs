@@ -415,7 +415,7 @@ try {
   assert.equal(reportRequestCount(), overviewRequestsBeforeNavigation, 'Traffic, audience, MCP, translations and resources do not load hidden overview reports');
   await page.getByRole('button', {name: 'Events', exact: true}).click();
   await page.getByText('Fixture sync completed', {exact: true}).waitFor();
-  await page.getByRole('button', {name: 'Manage', exact: true}).click();
+  await page.getByRole('navigation', {name: 'Main navigation'}).getByRole('button', {name: 'Manage', exact: true}).click();
   await page.getByRole('button', {name: /Upgrade targets Review changes/}).click();
   await page.getByLabel('Upgrade management', {exact: true}).waitFor();
   assert.equal(await page.getByLabel('Upgrade management', {exact: true}).isChecked(), true);
@@ -429,7 +429,7 @@ try {
   await page.getByRole('dialog').getByText('succeeded', {exact: true}).waitFor();
   assert.deepEqual(actions.at(-1), {operation: 'system.update', arguments: {targets: ['runtime/query.example.test/v2'], plan_id: upgradePlan.plan_id, force: false, retry: false}, confirm: true});
   await page.getByRole('button', {name: 'Close details'}).click();
-  await page.getByRole('button', {name: 'Manage', exact: true}).click();
+  await page.getByRole('navigation', {name: 'Main navigation'}).getByRole('button', {name: 'Manage', exact: true}).click();
   await page.getByRole('button', {name: /Domains Status, endpoints/}).click();
   await page.getByRole('button', {name: /mcp.example.test.*MCP at \//}).click();
   assert.equal(await page.getByRole('button', {name: /Runtime settings|Pages and OpenAPI|Endpoints and repositories/}).count(), 0, 'MCP domains expose no Bible endpoint or generated-page controls');

@@ -73,4 +73,4 @@ healthcheck_main() {
     return 0
 }
 
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then healthcheck_main; fi
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then healthcheck_main "$@"; fi

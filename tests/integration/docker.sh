@@ -46,25 +46,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Docker health measures serving APIs. The image apply job has its own durable
-# result, so acceptance must also wait for it before asserting upgrade state.
+# Serving readiness and successful reconciliation are separate. Require the
+# oneshot from this systemd instance to finish before reading its durable result.
 wait_image_update() {
-    # shellcheck disable=SC2016 # Read the persisted state inside the container.
-    container bash -Eeuo pipefail -c '
-        desired=$1 expected=$2 deadline=$((SECONDS + 600))
-        state=/var/lib/getbible/state/image-update.conf
-        while (( SECONDS < deadline )); do
-            if [[ -f "$state" ]] && [[ "$(sed -n "s/^DESIRED_VERSION=//p" "$state")" == "$desired" ]]; then
-                status=$(sed -n "s/^STATUS=//p" "$state")
-                if [[ "$status" == "$expected" ]]; then cat "$state"; exit 0; fi
-                if [[ "$status" == failed && "$expected" != failed ]]; then cat "$state"; exit 1; fi
-            fi
-            sleep 1
-        done
-        cat "$state" 2>/dev/null || true
-        journalctl -u getbible-image-update.service --no-pager -n 80
-        exit 1
-    ' -- "$1" "${2:-current}"
+    container bash -s -- "$1" "${2:-current}" < "$ROOT/tests/integration/wait-image-update.sh"
 }
 
 runtime_generations() {
@@ -366,8 +351,8 @@ stat -Lc "%u:%g" /srv/getbible/static.example.test/v2/test/1/1.json /var/log/get
 container bash -Eeuo pipefail -c 'find /var/lib/getbible -name "*.pub" -type f -exec sha256sum {} +' > "$TEST_ROOT/keys-before"
 test -s "$TEST_ROOT/keys-before"
 container touch /var/log/getbible/recreation-sentinel
-# Preserve both the active configuration generation and immutable application
-# release. Resource refresh at image startup must not redeploy either one.
+# Changed capacity may require new configuration generations. It must reuse
+# immutable application releases and leave unchanged MCP configuration alone.
 runtime_generations > "$TEST_ROOT/generations-before"
 
 # Recreate, do not merely restart: account databases and image root are fresh.
@@ -388,7 +373,12 @@ cmp "$TEST_ROOT/identities-before.json" "$TEST_ROOT/identities-after.json"
 cmp "$TEST_ROOT/owners-before" "$TEST_ROOT/owners-after"
 cmp "$TEST_ROOT/keys-before" "$TEST_ROOT/keys-after"
 runtime_generations > "$TEST_ROOT/generations-after"
-cmp "$TEST_ROOT/generations-before" "$TEST_ROOT/generations-after"
+awk 'NR % 2 == 0' "$TEST_ROOT/generations-before" > "$TEST_ROOT/releases-before"
+awk 'NR % 2 == 0' "$TEST_ROOT/generations-after" > "$TEST_ROOT/releases-after"
+cmp "$TEST_ROOT/releases-before" "$TEST_ROOT/releases-after"
+tail -n 2 "$TEST_ROOT/generations-before" > "$TEST_ROOT/mcp-before"
+tail -n 2 "$TEST_ROOT/generations-after" > "$TEST_ROOT/mcp-after"
+cmp "$TEST_ROOT/mcp-before" "$TEST_ROOT/mcp-after"
 mcp_protocol > /dev/null
 mcp_service_checks
 container test -f /var/log/getbible/recreation-sentinel
@@ -401,6 +391,16 @@ request static.example.test /v2/test/1/1.json --fail >/dev/null
 container sh -c 'cat > /run/getbible/infrastructure-ci.py' < "$ROOT/tests/integration/infrastructure.py"
 container env GB_CI_DISPOSABLE_HOST=1 "GB_TEST_QUERY_TOKEN=$TOKEN" /usr/bin/python3 /run/getbible/infrastructure-ci.py \
     --mode docker --collector-only --recreated-resources
+container /usr/share/getbible/api/docker/healthcheck.sh
+
+# Repeat with identical effective settings. This is a true no-op, including
+# another same-version boot whose persisted current status predates systemd.
+compose down --timeout 120
+compose up -d --wait --wait-timeout 240
+CONTAINER="$(compose ps -q getbible)"
+wait_image_update "$BASE_VERSION"
+runtime_generations > "$TEST_ROOT/generations-unchanged"
+cmp "$TEST_ROOT/generations-after" "$TEST_ROOT/generations-unchanged"
 container /usr/share/getbible/api/docker/healthcheck.sh
 
 # The selected image must deploy both supported API versions using local data.
