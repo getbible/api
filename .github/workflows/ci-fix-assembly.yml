@@ -1,0 +1,104 @@
+name: Verify dashboard navigation correction
+on:
+  pull_request:
+    paths: ['.github/workflows/ci-fix-assembly.yml']
+permissions:
+  contents: read
+jobs:
+  assemble:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.number == 44
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - name: Apply the reviewed navigation correction
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+          subprocess.run(['git', 'read-tree', '--reset', '-u', 'ffbf4caa26993c2dd311b57bf45f76b094562cad'], check=True)
+          p = Path('src/apps/dashboard/ui/src/main.jsx')
+          source = p.read_text()
+          changes = [
+              ("    const [managementSection, setManagementSection] = useState('');", "    const [managementSection, setManagementSection] = useState('');\n    const [managementVisit, setManagementVisit] = useState(0);"),
+              ("if (label === 'Manage') setManagementSection('');", "if (label === 'Manage') { setManagementSection(''); setManagementVisit(visit => visit + 1); }"),
+              ("<Management key={managementSection || 'manage'}", "<Management key={`${managementSection || 'manage'}:${managementVisit}`}"),
+          ]
+          for old, new in changes:
+              assert source.count(old) == 1, old
+              source = source.replace(old, new)
+          p.write_text(source)
+          PY
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: src/apps/dashboard/ui/package-lock.json
+      - name: Build and test the pinned frontend
+        working-directory: src/apps/dashboard/ui
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build
+          npm test
+      - name: Verify complete source and generated asset identity
+        run: |
+          git add -A
+          test "$(git write-tree)" = e09333092e1da74f1adc882afe0c3069156dc0a7
+      - name: Install browser tooling
+        run: |
+          for list in /etc/apt/sources.list.d/*; do
+            if sudo grep -qsE 'dl\.google\.com|packages\.microsoft\.com' "$list"; then sudo rm -f -- "$list"; fi
+          done
+          npm install --prefix "$RUNNER_TEMP/dashboard-browser" --no-save --no-audit --no-fund playwright@1.62.1
+          "$RUNNER_TEMP/dashboard-browser/node_modules/.bin/playwright" install --with-deps chromium
+      - name: Exercise navigation and management workflows in Chromium
+        run: PLAYWRIGHT_MODULE="$RUNNER_TEMP/dashboard-browser/node_modules/playwright/index.mjs" node tests/dashboard-ui.mjs
+      - name: Store verified Git objects without updating any branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, subprocess, urllib.request
+          from pathlib import Path
+          base = 'ffbf4caa26993c2dd311b57bf45f76b094562cad'
+          expected = 'e09333092e1da74f1adc882afe0c3069156dc0a7'
+          def post(kind, payload):
+              request = urllib.request.Request('https://api.github.com/repos/' + os.environ['GITHUB_REPOSITORY'] + '/git/' + kind,
+                  data=json.dumps(payload).encode(), method='POST', headers={
+                  'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json',
+                  'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28'})
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  return json.load(response)
+          entries = []
+          paths = subprocess.check_output(['git', 'diff', '--cached', '--name-only', '-z', base]).decode().split('\0')
+          for path in filter(None, paths):
+              indexed = subprocess.check_output(['git', 'ls-files', '--stage', '--', path], text=True).strip()
+              if not indexed:
+                  entries.append({'path': path, 'mode': '100644', 'type': 'blob', 'sha': None})
+                  continue
+              mode, sha, _ = indexed.split(None, 2)
+              blob = post('blobs', {'content': base64.b64encode(subprocess.check_output(['git', 'show', ':' + path])).decode(), 'encoding': 'base64'})
+              assert blob['sha'] == sha, path
+              entries.append({'path': path, 'mode': mode, 'type': 'blob', 'sha': sha})
+          tree = post('trees', {'base_tree': base, 'tree': entries})
+          assert tree['sha'] == expected
+          Path(os.environ['RUNNER_TEMP'], 'ci-fix-tree.json').write_text(json.dumps({'tree': tree['sha'], 'files': entries}, indent=2))
+          print('Verified implementation tree:', tree['sha'])
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ci-fix-tree
+          path: ${{ runner.temp }}/ci-fix-tree.json
+          retention-days: 3
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: navigation-browser-checks
+          path: test-artifacts/dashboard-*.png
+          if-no-files-found: ignore
