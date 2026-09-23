@@ -10,6 +10,7 @@ on:
       - 'compose.yaml'
       - 'tests/**'
       - '.github/workflows/upgrade-acceptance.yml'
+      - '.github/workflows/docker.yml'
   workflow_dispatch:
 
 permissions:
@@ -40,8 +41,16 @@ jobs:
           compression-level: 0
 
   docker:
-    name: Disposable Docker upgrade
-    runs-on: ubuntu-24.04
+    name: Disposable Docker upgrade / ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -52,10 +61,13 @@ jobs:
           context: .
           load: true
           tags: getbible-api-test:ci
-          platforms: linux/amd64
+          platforms: linux/${{ matrix.arch }}
           provenance: false
-          cache-from: type=gha,scope=getbible-upgrade-amd64
-          cache-to: type=gha,mode=max,scope=getbible-upgrade-amd64
+          # Dockerfile's version default is checked against VERSION by the
+          # release gate. Exercise the same revision metadata as main images.
+          build-args: GETBIBLE_REVISION=${{ github.sha }}
+          cache-from: type=gha,scope=getbible-upgrade-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=getbible-upgrade-${{ matrix.arch }}
       - name: Install acceptance prerequisites
         run: |
           for list in /etc/apt/sources.list.d/*; do
@@ -71,7 +83,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: upgrade-acceptance-log
+          name: upgrade-acceptance-log-${{ matrix.arch }}
           path: ${{ runner.temp }}/upgrade-acceptance.log
           if-no-files-found: ignore
           retention-days: 7

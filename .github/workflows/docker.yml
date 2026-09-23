@@ -101,7 +101,15 @@ jobs:
           shellcheck -x -s bash docker/*.sh tests/integration/docker.sh
           python3 -m unittest tests.python.test_identities tests.python.test_docker_release -v
       - name: Real systemd, offline deployment, HAProxy, token access and recreation
-        run: tests/integration/docker.sh
+        shell: bash
+        run: tests/integration/docker.sh 2>&1 | tee "$RUNNER_TEMP/image-acceptance.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: image-acceptance-log-${{ matrix.arch }}
+          path: ${{ runner.temp }}/image-acceptance.log
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Preserve the exact tested image for publication
         run: docker image save getbible-api-test:ci | gzip -1 > /tmp/getbible-image.tar.gz
       - uses: actions/upload-artifact@v4
