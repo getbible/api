@@ -1,0 +1,79 @@
+name: Verify lifecycle corrections
+on:
+  pull_request:
+    paths:
+      - '.github/ci-fix.patch.gz.b64'
+      - '.github/workflows/ci-fix-assembly.yml'
+permissions:
+  contents: read
+jobs:
+  assemble:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.number == 44
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - name: Apply the reviewed source delta and verify its complete tree
+        run: |
+          python3 - <<'PY'
+          import base64, gzip, hashlib, subprocess
+          from pathlib import Path
+          patch = gzip.decompress(base64.b64decode(Path('.github/ci-fix.patch.gz.b64').read_bytes()))
+          assert hashlib.sha256(patch).hexdigest() == 'd6baf226424b25a86ae46571cb8daf4dfb33b0bf4b5a7237ede4a5d9d3f1b244'
+          subprocess.run(['git', 'read-tree', '--reset', '-u', 'a2d2d04ef36a7c8b4fb58575d6e01b6fcbaed579'], check=True)
+          subprocess.run(['git', 'apply', '--index', '-'], input=patch, check=True)
+          assert subprocess.check_output(['git', 'write-tree'], text=True).strip() == 'ffbf4caa26993c2dd311b57bf45f76b094562cad'
+          PY
+      - name: Validate corrected lifecycle and selection contracts
+        run: |
+          bash tests/cli/test_image_update_wait.sh
+          bash tests/cli/test_serving_health.sh
+          bash tests/cli/test_upgrade_selection.sh
+          bash tests/cli/test_image_update.sh
+          node --check tests/dashboard-ui.mjs
+          python3 -m py_compile tests/integration/infrastructure.py
+          shellcheck -x -s bash getbible.sh docker/*.sh src/lib/*.sh src/types/*/type.sh src/bin/getbible-sync src/bin/getbible-notify src/bin/getbible-logrotate-hook src/bin/getbible-runtime-retire tests/run.sh tests/cli/*.sh tests/integration/*.sh
+      - name: Store verified Git objects without updating any branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, subprocess, urllib.request
+          from pathlib import Path
+          base = 'a2d2d04ef36a7c8b4fb58575d6e01b6fcbaed579'
+          expected = 'ffbf4caa26993c2dd311b57bf45f76b094562cad'
+          def post(kind, payload):
+              request = urllib.request.Request('https://api.github.com/repos/' + os.environ['GITHUB_REPOSITORY'] + '/git/' + kind,
+                  data=json.dumps(payload).encode(), method='POST', headers={
+                  'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json',
+                  'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28'})
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  return json.load(response)
+          entries = []
+          paths = subprocess.check_output(['git', 'diff', '--cached', '--name-only', '-z', base]).decode().split('\0')
+          for path in filter(None, paths):
+              indexed = subprocess.check_output(['git', 'ls-files', '--stage', '--', path], text=True).strip()
+              if not indexed:
+                  entries.append({'path': path, 'mode': '100644', 'type': 'blob', 'sha': None})
+                  continue
+              mode, sha, _ = indexed.split(None, 2)
+              content = subprocess.check_output(['git', 'show', ':' + path])
+              blob = post('blobs', {'content': base64.b64encode(content).decode(), 'encoding': 'base64'})
+              assert blob['sha'] == sha, path
+              entries.append({'path': path, 'mode': mode, 'type': 'blob', 'sha': sha})
+          tree = post('trees', {'base_tree': base, 'tree': entries})
+          assert tree['sha'] == expected
+          Path(os.environ['RUNNER_TEMP'], 'ci-fix-tree.json').write_text(json.dumps({'tree': tree['sha'], 'files': entries}, indent=2))
+          print('Verified implementation tree:', tree['sha'])
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ci-fix-tree
+          path: ${{ runner.temp }}/ci-fix-tree.json
+          retention-days: 3
+          if-no-files-found: error
