@@ -103,7 +103,7 @@ upgrade_socket_ready() {
 # One subprocess isolates the registry/manifest globals used by each driver.
 upgrade_describe() (
     local id="$1" kind domain='' label='' selected='' app='' app_hash='' generation='' release='' expected='' fingerprint='' serving=unknown matches=false value extra phase resource_values variable key
-    local -a args=() sources=() result=()
+    local -a args=() sources=() row_args=()
     kind="${id%%/*}"
     if [[ "$kind" != management ]]; then
         domain="${id#*/}"; domain="${domain%%/*}"
@@ -207,9 +207,9 @@ upgrade_describe() (
     while IFS= read -r value; do [[ -z "$value" ]] || args+=(--value "$value"); done <<< "$extra"
     args+=(--value "application=$app_hash" --value "mode=$(gb_execution_mode)")
     fingerprint="$(upgrade_helper fingerprint --root "$GB_REPO_DIR" "${args[@]}")" || return 1
-    result=(--target "$id" --kind "$kind" --domain "$domain" --label "$label" --fingerprint "$fingerprint" --generation "$generation" --serving "$serving")
-    [[ "$matches" != true ]] || result+=(--matches)
-    upgrade_helper row "${result[@]}"
+    row_args=(--target "$id" --kind "$kind" --domain "$domain" --label "$label" --fingerprint "$fingerprint" --generation "$generation" --serving "$serving")
+    [[ "$matches" != true ]] || row_args+=(--matches)
+    upgrade_helper row "${row_args[@]}"
 )
 
 upgrade_inventory() {

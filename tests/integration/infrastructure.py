@@ -319,7 +319,10 @@ def native_recovery(manager):
         cursor = db.execute("SELECT value FROM metadata WHERE key='journal_cursor'").fetchone()
         cutoff = db.execute("SELECT value FROM metadata WHERE key='collection_started'").fetchone()
         db.execute("PRAGMA user_version=1")
-    run(manager, "update", "query.ci.example.test", "--yes", timeout=900)
+    # This fixture migrates management history as well as updating the query.
+    # A domain-only selection must not implicitly update management services.
+    run(manager, "update", "--targets", "management,runtime/query.ci.example.test/v2",
+        "--yes", timeout=900)
     check(helper.read_bytes() == source.read_bytes(), "explicit update replaces existing installed infrastructure sources")
     check(pid("getbible-telemetry.service") not in (0, old_pid), "explicit update restarts the collector with new sources")
     check(persistent_state() == saved, "explicit update preserves saved configuration, authentication and identities")
