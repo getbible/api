@@ -321,3 +321,14 @@ service users, upgrades, failure recovery and a request-load smoke test. These
 checks do not establish an enterprise SLA. The source repositories remain authoritative; production
 updates do not run corpus validation or introduce additional monitoring/load
 tests. Maintain the host independently of the application.
+
+### Reporting-schema eligibility
+
+An unchanged management release can still require history preparation. Upgrade
+plans inspect the stored telemetry schema independently of the collector's
+process state: `Type=exec` may briefly report an active process before its
+schema check fails. Required preparation therefore remains selected even when
+code fingerprints match. This inspection is read-only; the normal management
+transaction retains protective backups, runs supported migrations and restarts
+the collector. Unsupported or unreadable history remains intact and the update
+stays incomplete; independent selected APIs can still proceed.
