@@ -26,12 +26,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Preserve the exact source used by acceptance
         run: |
           git rev-parse HEAD > "$RUNNER_TEMP/revision.txt"
           git archive --format=tar HEAD | gzip -1 > "$RUNNER_TEMP/source.tar.gz"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: upgrade-source
           path: |
@@ -53,10 +53,10 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
       - name: Build complete offline runtime image without publishing
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -80,7 +80,7 @@ jobs:
       - name: Exercise actual systemd, offline deployment and container recreation
         shell: bash
         run: tests/integration/docker.sh 2>&1 | tee "$RUNNER_TEMP/upgrade-acceptance.log"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: upgrade-acceptance-log-${{ matrix.arch }}
