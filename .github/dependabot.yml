@@ -8,10 +8,15 @@ updates:
       - /src/apps/common
       - /src/apps/query
       - /src/apps/search
+      - /src/apps/mcp
       - /src/python
     schedule:
       interval: daily
     open-pull-requests-limit: 10
+    # Librarian 3 supports filelock 3; allow its patch/minor releases.
+    ignore:
+      - dependency-name: filelock
+        versions: [">=4"]
     groups:
       python-security:
         applies-to: security-updates
