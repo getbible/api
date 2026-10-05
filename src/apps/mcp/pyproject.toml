@@ -10,9 +10,9 @@ requires-python = ">=3.11"
 license = "Apache-2.0"
 dependencies = [
   "getbible-api-common",
-  "getbible-mcp==2.1.0",
+  "getbible-mcp==2.1.2",
   "httpx==0.28.1",
-  "starlette==1.6.0",
+  "starlette==1.7.0",
   "gunicorn==26.2.0",
   "uvicorn-worker==0.4.0",
 ]
