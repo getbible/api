@@ -27,6 +27,9 @@ sha1sum "$REL/kjv/1/1.json" | cut -d' ' -f1 > "$REL/kjv/1/1.sha"
 printf 'hello\n' > "$REL/kjv/readme.txt"
 printf '<script>alert(1)</script>\n' > "$REL/kjv/evil.html"
 printf 'secret\n' > "$REL/.hidden"
+printf '{"kjv":"translation-checksum"}\n' > "$REL/checksum.json"
+printf '{"1":"book-checksum"}\n' > "$REL/kjv/checksum.json"
+printf '{"1":"chapter-checksum"}\n' > "$REL/kjv/1/checksum.json"
 # The repository ships the endpoint's OpenAPI document (the static default).
 printf '{"openapi":"3.1.0","info":{"title":"static fixture","version":"v2"},"paths":{}}\n' > "$REL/openapi.json"
 ln -sfn "releases/v2/20260101T000000Z-abcdef1" "$IT_SB/srv/getbible/$DOMAIN/v2"
@@ -74,6 +77,26 @@ it_check "unchanged date gives 304" "304" "$(it_status "$DOMAIN" /v2/kjv/1/1.jso
 it_check "304 carries cache lifetime" "max-age=2592000" "$(it_headers "$DOMAIN" /v2/kjv/1/1.json -H "If-None-Match: $CHAPTER_ETAG" | grep -i '^cache-control')"
 it_check "304 carries validator" "$CHAPTER_ETAG" "$(it_headers "$DOMAIN" /v2/kjv/1/1.json -H "If-None-Match: $CHAPTER_ETAG" | grep -i '^etag')"
 it_check "HEAD carries validator" "$CHAPTER_ETAG" "$(it_headers "$DOMAIN" /v2/kjv/1/1.json -I | grep -i '^etag')"
+
+echo "-- optional browser cache identifier --"
+printf -v CACHE_MAX '%0128d' 0
+for resource in /v2/checksum.json /v2/kjv/checksum.json /v2/kjv/1/checksum.json /v2/kjv/1/1.json /v2/kjv/1/1.sha; do
+    it_check "cache identifier accepted: $resource" "200" "$(it_status "$DOMAIN" "$resource?_=1791489600000")"
+    it_check "cache identifier preserves content: $resource" "$(it_body "$DOMAIN" "$resource")" "$(it_body "$DOMAIN" "$resource?_=aB9_-checksum")"
+done
+for value in a 0 "$CACHE_MAX"; do
+    it_check "cache identifier length ${#value}" "200" "$(it_status "$DOMAIN" "/v2/kjv/1/1.json?_=$value")"
+done
+it_check "cache identifier preserves etag" "$CHAPTER_ETAG" "$(it_header "$DOMAIN" '/v2/kjv/1/1.json?_=chapter-checksum' etag)"
+it_check "cache identifier preserves lifetime" "$(it_header "$DOMAIN" /v2/kjv/1/1.json cache-control)" "$(it_header "$DOMAIN" '/v2/kjv/1/1.json?_=chapter-checksum' cache-control)"
+it_check "cache identifier HEAD" "200" "$(it_status "$DOMAIN" '/v2/kjv/1/1.json?_=chapter-checksum' -I)"
+it_check "cache identifier conditional request" "304" "$(it_status "$DOMAIN" '/v2/kjv/1/1.json?_=chapter-checksum' -H "If-None-Match: $CHAPTER_ETAG")"
+for query in '_=' '_' "_=${CACHE_MAX}0" '_=a&_=b' '_=a&x=1' 'x=1&_=a' 'v=a' '1791489600000' '%5F=a' '_=%61' '_=a%0A' '_=a+b' '_=a/b' '_=a=b' '_=a;' '_=a&'; do
+    it_check "invalid query rejected: $query" "400" "$(it_status "$DOMAIN" "/v2/kjv/1/1.json?$query")"
+done
+it_check "invalid identifier is not cached" "no-store" "$(it_header "$DOMAIN" '/v2/kjv/1/1.json?_=' cache-control)"
+it_check "identifier cannot expose dotfiles" "404" "$(it_status "$DOMAIN" '/v2/.hidden?_=a')"
+it_check "identifier cannot expose disallowed files" "404" "$(it_status "$DOMAIN" '/v2/kjv/evil.html?_=a')"
 
 echo "-- pages, OpenAPI documents, favicon --"
 it_check "endpoint page 200"         "200"              "$(it_status "$DOMAIN" /v2/)"
@@ -139,6 +162,9 @@ echo "-- token-only access --"
 "$IT_ROOT/getbible.sh" access "$DOMAIN" token >/dev/null 2>&1
 it_nginx_reload
 it_check "no token -> 401"           "401"              "$(it_status "$DOMAIN" /v2/kjv/1/1.json)"
+it_check "cache identifier still needs token" "401" "$(it_status "$DOMAIN" '/v2/kjv/1/1.json?_=a')"
+it_check "authorized cache identifier" "200" "$(it_status "$DOMAIN" '/v2/kjv/1/1.json?_=a' -H "Authorization: Bearer $TOKEN")"
+it_check "protected identifier response stays private" "private, no-store" "$(it_headers "$DOMAIN" '/v2/kjv/1/1.json?_=a' -H "Authorization: Bearer $TOKEN" | grep -i '^cache-control')"
 it_check "401 www-authenticate"      "bearer"           "$(it_header "$DOMAIN" /v2/kjv/1/1.json www-authenticate)"
 it_check "401 problem body"          '"code":"unauthorized"' "$(it_body "$DOMAIN" /v2/kjv/1/1.json)"
 it_check "unauthorized response not cacheable" "no-store" "$(it_header "$DOMAIN" /v2/kjv/1/1.json cache-control)"
@@ -248,6 +274,19 @@ it_check "root unknown folder"       "404"              "$(it_status "$ROOTDOM" 
 it_check "root dotfile hidden"       "404"              "$(it_status "$ROOTDOM" /.hidden)"
 it_check "root health"               '{"status":"ok"}'  "$(it_body "$ROOTDOM" /healthz)"
 it_check "root query string rejected" "400"             "$(it_status "$ROOTDOM" '/kjv/1/1.json?x=1')"
+it_check "root cache identifier accepted" "200" "$(it_status "$ROOTDOM" '/kjv/1/1.json?_=a')"
+
+echo "-- cache identifier on another version --"
+"$IT_ROOT/getbible.sh" version add "$DOMAIN" v3 --repo "file:///nonexistent/repo.git" >/dev/null 2>&1
+V3_REL="$IT_SB/srv/getbible/$DOMAIN/releases/v3/20260101T000000Z-abcdef1"
+mkdir -p "$V3_REL/kjv/1"
+cp "$REL/kjv/1/1.json" "$V3_REL/kjv/1/1.json"
+ln -sfn "releases/v3/20260101T000000Z-abcdef1" "$IT_SB/srv/getbible/$DOMAIN/v3"
+chgrp -R "$IT_NGINX_USER" "$IT_SB/srv/getbible/$DOMAIN"
+chmod -R g+rX "$IT_SB/srv/getbible/$DOMAIN"
+it_nginx_reload
+it_check "v3 cache identifier accepted" "200" "$(it_status "$DOMAIN" '/v3/kjv/1/1.json?_=a')"
+it_check "v3 rejects unsupported parameters" "400" "$(it_status "$DOMAIN" '/v3/kjv/1/1.json?v=a')"
 
 echo "-- disabled specification stays disabled --"
 "$IT_ROOT/getbible.sh" pages "$ROOTDOM" openapi root none >/dev/null 2>&1
