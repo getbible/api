@@ -141,12 +141,15 @@ is ready, use the normal go-live workflow to publish its shared hostname.
 
 - Only the allowed extensions are served (`json`, `sha`, `txt` by default,
   `html` on request); anything else, dotfiles and directories answer a JSON
-  404. Query strings answer 400: nothing here takes parameters.
+  404. The only accepted query string is one optional `_` parameter, as
+  described below; other query strings answer 400.
 - `GET`, `HEAD`, `OPTIONS` only; `OPTIONS` answers 204 with the CORS headers.
 - CORS is open on every response. Security headers: `nosniff`, a locked CSP,
   `no-referrer`, `Cross-Origin-Resource-Policy: cross-origin`, HSTS.
-- `Cache-Control: public, max-age=3600` (documents) and `300` (checksums),
-  both with stale-while-revalidate in open/metered mode. Token-only documents,
+- New domains default to `Cache-Control: public, max-age=2592000` (30 days)
+  for JSON/text data, including `checksum.json`, and `max-age=300` for `.sha`
+  change-token files, both with stale-while-revalidate in open/metered mode.
+  Saved domain settings determine the actual lifetimes. Token-only documents,
   checksums and HTML use `private, no-store` with `Vary: Authorization`.
   ETags and Last-Modified support conditional requests (`If-None-Match` or
   `If-Modified-Since`): unchanged files return `304`, changed files return
@@ -158,6 +161,30 @@ is ready, use the normal go-live workflow to publish its shared hostname.
   and the favicon are public in every access mode, served by exact locations
   independent of the allowed file types; `/vN` redirects to `/vN/`;
   `/healthz` answers for monitors.
+
+### Optional URL change token
+
+Every static endpoint, including v2, v3, other version labels and root
+endpoints, accepts one optional `_` query parameter for browser cache busting:
+
+```text
+/v2/checksum.json?_=1791489600000
+/v3/kjv/1/1.json?_=9f4c2a17
+```
+
+The complete query string must match `_=[A-Za-z0-9_-]{1,128}`: a single `_`
+key and 1–128 ASCII letters, digits, underscores or hyphens. Timestamps and
+checksums are supported. Empty values, repeated keys, additional parameters,
+bare tokens, `v` and percent-encoded names or values are rejected with `400`
+and `Cache-Control: no-store`. Requests without a query string work as before.
+
+The origin validates the query string, then serves the same file by its path.
+It does not use the value to select content, compare hashes or maintain cache
+state. File validators, cache lifetimes, authentication and public budgets
+are unchanged. Reusing a value keeps the URL stable; changing it gives the
+browser a different cache key. It does not purge previously cached URLs or
+make a response immutable. Keep the full query string in any CDN cache key
+so the CDN also distinguishes changed URLs; see `CLOUDFLARE.md`.
 
 ## Access
 

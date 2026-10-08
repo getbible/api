@@ -100,10 +100,12 @@ mutation. A restart restores the local installation; it does not take over DNS.
 
 `respect` explicitly makes public GET/HEAD URLs cache eligible, including JSON
 and **complete query-string URLs**. The default Cloudflare key retains the
-hostname, path and query parameters, so different searches and references stay
-separate. No Enterprise custom key is needed. The complementary bypass rule
-covers any Authorization or Cookie header, even one with an empty value,
-non-GET/HEAD methods, truncated request headers, and health/origin-identity
+hostname, path and query parameters, so different searches, references and
+static `_` URL change tokens stay separate. Static origins validate and
+otherwise ignore `_`, but dropping it from the edge key could serve an older
+cached response under a new token. No Enterprise custom key is needed. The
+complementary bypass rule covers any Authorization or Cookie header, even one
+with an empty value, non-GET/HEAD methods, truncated request headers, and health/origin-identity
 probes. Token-only domains use host-wide bypass regardless of the saved choice.
 
 The rules use `edge_ttl.mode=bypass_by_default` and browser TTL `respect_origin`.
@@ -116,13 +118,17 @@ requires explicit paid selection and sends its entitled
 `origin_cache_control=true` setting.
 
 Set the desired lifetime at the origin: static domains use `CACHE_TTL` and
-`SHA_CACHE_TTL` (new-domain defaults `DEFAULT_CACHE_TTL=3600` and
+`SHA_CACHE_TTL` (new-domain defaults `DEFAULT_CACHE_TTL=2592000` and
 `DEFAULT_SHA_CACHE_TTL=300`); runtime endpoint settings expose `CACHE_TTL`
-(query default 300 seconds, search 60 seconds). New runtime endpoints use
-`DEFAULT_QUERY_CACHE_TTL` and `DEFAULT_SEARCH_CACHE_TTL`, exposed in Docker as
+(query and search default to 2,592,000 seconds, or 30 days). New runtime
+endpoints use `DEFAULT_QUERY_CACHE_TTL` and `DEFAULT_SEARCH_CACHE_TTL`, exposed in Docker as
 `GETBIBLE_DEFAULT_QUERY_CACHE_TTL` and `GETBIBLE_DEFAULT_SEARCH_CACHE_TTL`.
-Increasing these lifetimes
-increases the period during which a published data change may remain cached.
+These defaults seed new deployments and do not replace saved domain/endpoint
+settings. Static `checksum.json` files follow the JSON data lifetime; only
+`.sha` files use `SHA_CACHE_TTL`.
+
+Increasing these lifetimes increases the period during which a published
+data change may remain cached.
 The existing `stale-while-revalidate` directives can serve public stale content
 while it refreshes. Cloudflare may evict an object before its TTL expires.
 Authenticated requests still reach nginx and retain appropriate origin caching.

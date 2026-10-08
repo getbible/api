@@ -60,8 +60,9 @@ server {
     }
 
 {{#IF REJECT_ARGS}}
-    # Nothing on this domain accepts parameters.
-    if ($args != "") {
+    # Static requests may carry one opaque browser cache identifier. Validate
+    # the entire raw query; file lookup and cache headers never use its value.
+    if ($args !~ "^(_=[A-Za-z0-9_-]{1,128})?$") {
         return 400;
     }
 {{/IF}}

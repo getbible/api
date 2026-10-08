@@ -44,6 +44,11 @@ matches the configuration. A runtime endpoint generates its OpenAPI document;
 a static endpoint cannot (the tool does not know the repository's contents),
 so its default document source is the repository.
 
+Generated static pages describe the optional `_` URL change token documented
+in `STATIC_ENDPOINTS.md`. Repository and custom pages/OpenAPI documents remain
+unchanged; their owners should include this optional query parameter and its
+validation rules when maintaining those contracts.
+
 **custom** is yours. The file lives under `/var/www/getbible/<domain>/`
 (`index.html` for the domain page, `<label>/index.html` and
 `<label>/openapi.json` for an endpoint; for a root endpoint directly in the
