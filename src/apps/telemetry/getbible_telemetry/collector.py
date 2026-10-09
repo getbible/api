@@ -65,6 +65,7 @@ class Collector:
         self._alert_processes: list[subprocess.Popen] = []
         self._last_cleanup: dict[str, tuple[int, int, float]] = {}
         self._cleanup_cursor = 0
+        self._cleanup_pending = False
         self._ingest_cursors = [0, 0]
         self._batch_pending = False
         self._pass_pending = False
@@ -126,10 +127,17 @@ class Collector:
             self._batch_pending = False
             signature = [stat.st_size, stat.st_mtime_ns, endpoint, source]
             complete = self.store.db.execute("SELECT value FROM metadata WHERE key=?", ("source_eof:" + identity,)).fetchone()
-            if complete and json.loads(complete[0]) == signature:
+            completed_signature = json.loads(complete[0]) if complete else None
+            if completed_signature == signature:
                 return 0
             opener = gzip.open if path.suffix == ".gz" else open
             with opener(path, "rb") as handle:
+                opened = os.fstat(handle.fileno())
+                if (opened.st_dev, opened.st_ino) != (stat.st_dev, stat.st_ino):
+                    # Rotation/replacement raced the open. Do not commit data
+                    # under the identity of the pathname's previous inode.
+                    self._batch_pending = True
+                    return 0
                 row = self.store.db.execute("SELECT * FROM sources WHERE identity=?", (identity,)).fetchone()
                 offset = row["offset"] if row else 0
                 generation = row["generation"] if row else 0
@@ -141,7 +149,13 @@ class Collector:
                 else:
                     unchanged = True
                 truncated = (path.suffix != ".gz" and stat.st_size < offset) or not unchanged
-                if truncated:
+                rewritten = (row is not None and completed_signature is not None
+                             and completed_signature[0] == stat.st_size
+                             and completed_signature[1] != stat.st_mtime_ns)
+                if truncated or rewritten:
+                    # A matching short prefix cannot rule out a tail overwrite.
+                    # Replay changed same-size completed inputs in bounded
+                    # batches; stable content record keys deduplicate old lines.
                     offset, fingerprint_bytes, fingerprint = 0, 0, ""
                     generation += 1
                 handle.seek(offset)
@@ -199,7 +213,8 @@ class Collector:
                         "updated=excluded.updated,closed=excluded.closed",
                         (identity, str(path), offset, fingerprint, fingerprint_bytes, generation, time.time(), int(rotated)))
                     after = os.fstat(handle.fileno())
-                    if eof and (after.st_size, after.st_mtime_ns) == (stat.st_size, stat.st_mtime_ns):
+                    if eof and (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) == (
+                            stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns):
                         self.store.set_metadata("source_eof:" + identity, signature)
                     else:
                         self.store.db.execute("DELETE FROM metadata WHERE key=?", ("source_eof:" + identity,))
@@ -298,55 +313,95 @@ class Collector:
         return work
 
     def cleanup(self) -> int:
+        """Reclaim a bounded batch with committed EOF and kernel closure proof."""
         candidates = []
-        spools = [entry[0] for entry in self.files() if entry[3] and entry[0].name.endswith(".spool")]
+        spools = [entry for entry in self.files() if entry[3] and entry[0].name.endswith(".spool")]
+        self._cleanup_pending = False
         if spools:
             start = self._cleanup_cursor % len(spools)
             spools = spools[start:] + spools[:start]
-        checked = 0
+        scanned = 0
         live = set()
-        for path in spools:
+        awaiting_stability = 0
+        now = time.monotonic()
+        for path, endpoint, source, _rotated in spools:
+            scanned += 1
             try:
                 stat = path.stat()
                 identity = f"{stat.st_dev}:{stat.st_ino}"
                 live.add(identity)
                 row = self.store.db.execute("SELECT offset FROM sources WHERE identity=?", (identity,)).fetchone()
-                if row is None or row[0] != stat.st_size:
+                eof = self.store.db.execute("SELECT value FROM metadata WHERE key=?",
+                                            ("source_eof:" + identity,)).fetchone()
+                signature = [stat.st_size, stat.st_mtime_ns, endpoint, source]
+                # An offset alone is not proof: a writer can replace contents
+                # in place without changing file length. Only the observation
+                # committed with the complete input may authorize reclamation.
+                if row is None or row[0] != stat.st_size or eof is None or json.loads(eof[0]) != signature:
                     self._last_cleanup.pop(identity, None)
                     continue
                 previous = self._last_cleanup.get(identity)
                 if previous is None or previous[:2] != (stat.st_size, stat.st_mtime_ns):
-                    self._last_cleanup[identity] = stat.st_size, stat.st_mtime_ns, time.monotonic()
+                    self._last_cleanup[identity] = stat.st_size, stat.st_mtime_ns, now
+                    awaiting_stability += 1
                     continue
-                if time.monotonic() - previous[2] < 5:
+                if now - previous[2] < 5:
+                    awaiting_stability += 1
                     continue
                 candidates.append({"path": str(path), "identity": identity, "size": stat.st_size,
                                    "mtime_ns": stat.st_mtime_ns})
-                checked += 1
-                if checked == 32:
+                if len(candidates) == 32:
                     break
             except FileNotFoundError:
                 continue
-        self._cleanup_cursor += max(1, checked)
+        # Move past everything inspected, including unread and settling files,
+        # so a blocked prefix cannot starve ready archives later in the list.
+        self._cleanup_cursor += max(1, scanned)
+        if scanned == len(spools):
+            self._last_cleanup = {identity: value for identity, value in self._last_cleanup.items()
+                                  if identity in live}
+        summary = {"time": time.time(), "attempted": len(candidates), "removed": 0,
+                   "retained": len(candidates), "awaiting_stability": awaiting_stability,
+                   "attempted_bytes": sum(item["size"] for item in candidates), "removed_bytes": 0,
+                   "retained_bytes": sum(item["size"] for item in candidates),
+                   "reasons": [], "reason_counts": {}, "failures": []}
         # No /proc visibility assumptions or added Docker capabilities: a read
         # lease proves that the committed archive has no writable descriptor.
         if not candidates:
+            with self.store.db:
+                self.store.set_metadata("spool_cleanup", summary)
             return 0
         try:
             process = subprocess.run([sys.executable, str(Path(__file__).with_name("spools.py"))],
                                      input=json.dumps(candidates), capture_output=True, text=True, timeout=5)
             if process.returncode:
-                raise RuntimeError("spool reclamation helper failed")
+                raise RuntimeError("spool reclamation helper failed (exit " + str(process.returncode)
+                                   + "): " + process.stderr.strip()[:512])
             results = json.loads(process.stdout)
+            if not isinstance(results, list) or len(results) != len(candidates) or any(
+                    not isinstance(result, dict) or result.get("path") != item["path"]
+                    or result.get("identity") != item["identity"]
+                    for result, item in zip(results, candidates)):
+                raise ValueError("spool reclamation helper returned inconsistent results")
         except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
             with self.store.db:
-                self.store.set_metadata("spool_cleanup", {"time": time.time(), "removed": 0,
-                                                          "retained": len(candidates), "error": str(exc)})
+                self.store.set_metadata("spool_cleanup", {**summary, "error": str(exc)[:1024],
+                    "reasons": ["helper_failed"], "reason_counts": {"helper_failed": len(candidates)}})
             return 0
         removed = 0
+        reopen = False
         with self.store.db:
-            for result in results:
+            for result, item in zip(results, candidates):
                 if not result.get("removed"):
+                    reason = result.get("reason", "unknown")
+                    summary["reason_counts"][reason] = summary["reason_counts"].get(reason, 0) + 1
+                    if len(summary["failures"]) < 8:
+                        summary["failures"].append({key: result[key] for key in
+                            ("path", "reason", "errno", "operation", "error") if key in result})
+                    # A failed earlier reopen otherwise waits indefinitely for
+                    # another rotation. Signal only nginx's held archives.
+                    reopen |= reason == "writer_open" and Path(item["path"]).name.startswith(
+                        ("access.log-", "error.log-"))
                     continue
                 identity = result["identity"]
                 self.store.db.execute("DELETE FROM sources WHERE identity=?", (identity,))
@@ -354,9 +409,20 @@ class Collector:
                                       ("source_eof:" + identity, "blocked_source:" + identity))
                 self._last_cleanup.pop(identity, None)
                 removed += 1
-            self.store.set_metadata("spool_cleanup", {"time": time.time(), "removed": removed,
-                "retained": len(candidates) - removed,
-                "reasons": sorted({item["reason"] for item in results if item.get("reason")})})
+                summary["removed_bytes"] += item["size"]
+            summary.update(removed=removed, retained=len(candidates) - removed,
+                           retained_bytes=summary["attempted_bytes"] - summary["removed_bytes"],
+                           reasons=sorted(summary["reason_counts"]))
+            if reopen:
+                summary["nginx_reopen_requested"] = self._nginx_reopen()
+                if summary["nginx_reopen_requested"]:
+                    self.store.db.execute("DELETE FROM metadata WHERE key='nginx_reopen_failed'")
+                else:
+                    self.store.set_metadata("nginx_reopen_failed", {"time": time.time(), "spools_retained": True})
+            self.store.set_metadata("spool_cleanup", summary)
+        # Successful reclamation can drain accumulated committed archives at
+        # one bounded batch per second, without speeding up blocked retries.
+        self._cleanup_pending = len(candidates) == 32 and removed > 0
         return removed
 
     def state(self) -> dict[str, Any]:
@@ -377,7 +443,7 @@ class Collector:
                     active_files += 1
                 elif path.name.endswith(".spool"):
                     rotated_bytes += stat.st_size
-                    if offset == stat.st_size:
+                    if offset == stat.st_size and complete:
                         consumed += stat.st_size
                 else:
                     archives += stat.st_size
@@ -389,6 +455,10 @@ class Collector:
                         unread_files += 1
                 else:
                     remaining = max(0, stat.st_size - offset)
+                    if rotated and remaining == 0 and identity in completed and not complete:
+                        # Same-size overwrites invalidate the durable EOF
+                        # observation even though the old offset still fits.
+                        remaining = stat.st_size
                     unread += remaining
                     unread_files += bool(remaining)
             except FileNotFoundError:
@@ -509,6 +579,13 @@ class Collector:
                    f"unread {state.get('unread_bytes', 0) / 1024**2:.1f} MiB, "
                    f"committed closed spools {state.get('consumed_rotated_bytes', 0) / 1024**2:.1f} MiB. "
                    "Unread/active files are preserved. Use getbible capacity for collection health and sizing advice.")
+        cleanup = state.get("problems", {}).get("spool_cleanup", {})
+        if state.get("consumed_rotated_bytes", 0) and cleanup.get("retained", 0):
+            reasons = ", ".join(f"{reason}: {count}" for reason, count in
+                                sorted(cleanup.get("reason_counts", {}).items()))
+            details += (f" Latest reclamation batch retained {cleanup['retained']} committed files"
+                        + (f" ({reasons})" if reasons else "")
+                        + "; getbible capacity --json includes paths and kernel errors.")
         conditions = {
             "memory": (memory, self.alert_settings["ALERT_MEMORY_PERCENT"] / 100, "Memory exceeds its configured threshold."),
             "cpu": (cpu, self.alert_settings["ALERT_CPU_PERCENT"] / 100, "CPU demand exceeds its configured threshold."),
@@ -551,7 +628,7 @@ class Collector:
         self._history_max_bytes = max_bytes
         sampler = MetricsSampler(cgroup_root=cgroup_root, disks=[str(self.root), str(self.store.path.parent)])
         inspector = HealthInspector(systemctl)
-        next_metric = next_prune = next_cleanup = next_settings = 0.0
+        next_metric = next_prune = next_cleanup = next_rotate = next_settings = 0.0
         next_ingest = next_rollup = 0.0
         try:
             while self.running:
@@ -601,10 +678,12 @@ class Collector:
                         with self.store.db:
                             self.store.set_metadata("last_prune", result)
                         next_prune = now + 60
-                    if now >= next_cleanup:
+                    if now >= next_rotate:
                         self.rotate()
+                        next_rotate = now + 10
+                    if now >= next_cleanup:
                         self.cleanup()
-                        next_cleanup = now + 10
+                        next_cleanup = now + (1 if self._cleanup_pending else 10)
                     # Historical reporting work is resumable and follows each
                     # bounded ingestion pass. It never delays source commits or
                     # makes ordinary request handlers maintain the database.
@@ -625,7 +704,7 @@ class Collector:
                     break
                 # Wake for metrics/settings/shutdown at least once per second
                 # without accidentally ingesting every time this loop wakes.
-                deadline = min(next_ingest, next_metric, next_prune, next_cleanup,
+                deadline = min(next_ingest, next_metric, next_prune, next_cleanup, next_rotate,
                                next_settings if settings else float("inf"))
                 time.sleep(min(1.0, max(.01, deadline - time.monotonic())))
         finally:

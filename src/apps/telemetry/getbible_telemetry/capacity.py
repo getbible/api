@@ -17,6 +17,38 @@ WINDOW = 24 * 3600
 HEADROOM = .25
 
 
+def reclamation_status(spool: dict[str, Any], *, now: float | None = None) -> dict[str, Any]:
+    """Explain retained committed transport independently of unread collection."""
+    now = time.time() if now is None else now
+    committed = finite(spool.get("consumed_rotated_bytes"))
+    cleanup = spool.get("problems", {}).get("spool_cleanup", {})
+    reasons = cleanup.get("reason_counts") or {reason: None for reason in cleanup.get("reasons", [])}
+    explanations = {
+        "writer_open": "A producer still has a committed spool open; inspect nginx log reopening and idle runtime producers.",
+        "writer_open_or_lease_unavailable": "A writer is open or the filesystem refused the safety lease.",
+        "lease_unsupported": "The filesystem does not support the safety lease required for reclamation.",
+        "permission_denied": "Lease or removal permission was denied; inspect service identity and mount ownership.",
+        "filesystem_error": "The filesystem refused reclamation; inspect the recorded errno and collector journal.",
+        "source_changed": "A source changed after collection; it is preserved for another ingestion pass.",
+        "source_changed_or_opening": "A source changed or a writer reopened it during reclamation.",
+    }
+    if committed is None:
+        state, reason = "unknown", "Committed transport usage has not been measured."
+    elif not committed:
+        state, reason = "caught_up", "No committed closed transport spools remain."
+    elif finite(cleanup.get("time")) is not None and now - cleanup["time"] > 60:
+        state, reason = "stale", "The last reclamation attempt is over 60 seconds old; inspect the collector journal."
+    elif cleanup.get("retained") or cleanup.get("error"):
+        state = "blocked"
+        reason = " ".join(explanations.get(key, key.replace("_", " ")) for key in reasons)
+        reason = reason or "The reclamation helper failed; inspect spool_cleanup and the collector journal."
+    else:
+        state, reason = "pending", "Committed closed transport spools await a safe cleanup pass."
+    return {"state": state, "reason": reason, "attempted_at": cleanup.get("time"),
+            "removed_bytes": cleanup.get("removed_bytes"), "retained_bytes": cleanup.get("retained_bytes"),
+            "reason_counts": reasons}
+
+
 def finite(value: Any) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
@@ -121,6 +153,13 @@ class CapacityTracker:
             record["peak"] = max(record["peak"], value)
             record["samples"] += 1
             record["seconds"] += duration
+            if key == "telemetry_spool" and finite(spool.get("consumed_rotated_bytes")) is not None:
+                # Committed transport occupying disk is reclamation pressure,
+                # not evidence that producers need a larger transport allowance.
+                record["sizing_peak"] = max(record.get("sizing_peak", 0),
+                                             max(0, value - spool["consumed_rotated_bytes"]))
+                record["sizing_samples"] = record.get("sizing_samples", 0) + 1
+                record["sizing_seconds"] = record.get("sizing_seconds", 0) + duration
             if above:
                 record["saturated_seconds"] += duration
                 record["saturated_samples"] += 1
@@ -135,7 +174,12 @@ class CapacityTracker:
                    "saturated_seconds": sum(item["saturated_seconds"] for item in aggregate),
                    "saturated_samples": sum(item["saturated_samples"] for item in aggregate),
                    "episodes": sum(item["episodes"] for item in aggregate), "saturation_threshold": .9}
-            row["recommendation"] = self._recommend(row, sample, spool)
+            if key == "telemetry_spool":
+                sizing = [item for item in aggregate if "sizing_peak" in item]
+                row.update(sizing_high_water=max((item["sizing_peak"] for item in sizing), default=0) / scale,
+                           sizing_samples=sum(item["sizing_samples"] for item in sizing),
+                           sizing_observed_seconds=sum(item["sizing_seconds"] for item in sizing))
+            row["recommendation"] = self._recommend(row, sample, spool, now=now)
             current.append(row)
         rates = {"producer_bytes_per_second": None, "collector_bytes_per_second": None,
                  "backlog_growth_bytes_per_second": None, "collector_records_per_second": None}
@@ -175,6 +219,8 @@ class CapacityTracker:
                   "limits": current, "collection": {"state": state, "backlog_observed_seconds": backlog_age,
                   "unread_bytes": spool.get("unread_bytes"), "unread_files": spool.get("unread_files"),
                   "budgeted_spool_bytes": usage, "retained_archive_bytes": spool.get("retained_archive_bytes"),
+                  "consumed_rotated_bytes": spool.get("consumed_rotated_bytes"),
+                  "reclamation": reclamation_status(spool, now=now),
                   "compressed_pending_bytes": spool.get("compressed_pending_bytes"), "rate_window_seconds": 300,
                   "rate_samples": len(observations), **rates}, "problems": spool.get("problems", {}),
                   "note": "Suggested values use observed peak / 0.75. Capped demand is a lower bound, not an ideal-value guarantee. No setting is changed automatically."}
@@ -187,20 +233,30 @@ class CapacityTracker:
         return result
 
     @staticmethod
-    def _recommend(row: dict[str, Any], sample: dict[str, Any], spool: dict[str, Any]) -> dict[str, Any]:
-        if row["observed_seconds"] < 60 or row["samples"] < 6:
+    def _recommend(row: dict[str, Any], sample: dict[str, Any], spool: dict[str, Any],
+                   *, now: float | None = None) -> dict[str, Any]:
+        if row["id"] == "telemetry_spool":
+            if spool.get("consumed_rotated_bytes", 0) > spool.get("spool_max_bytes", GIB) * .25:
+                cleanup = reclamation_status(spool, now=now)
+                return {"status": "investigate_cleanup", "value": None,
+                        "reason": "Committed transport occupies the allowance but is already ingested. "
+                                  + cleanup["reason"] + " Inspect spool_cleanup before increasing the budget."}
+            seconds = row.get("sizing_observed_seconds", 0)
+            samples = row.get("sizing_samples", 0)
+        else:
+            seconds, samples = row["observed_seconds"], row["samples"]
+        if seconds < 60 or samples < 6:
             return {"status": "insufficient_data", "value": None,
-                    "reason": "Collect at least 60 observed seconds and six samples before sizing."}
+                    "reason": "Collect at least 60 observed seconds and six samples before sizing."
+                              + (" Transport sizing requires fresh measurements separating committed spools from demand."
+                                 if row["id"] == "telemetry_spool" else "")}
         if row["setting"] is None:
             return {"status": "operator_review", "value": None,
                     "reason": "This is a host/filesystem measurement, not an adjustable application allowance. Review physical headroom and workload."}
-        desired = max(row["effective_limit"], row["high_water"] / (1 - HEADROOM))
+        peak = row.get("sizing_high_water", row["high_water"])
+        desired = max(row["effective_limit"], peak / (1 - HEADROOM))
         quantum = .1 if row["unit"] == "cores" else .25 if row["id"] == "memory" else 1
         desired = math.ceil(desired / quantum) * quantum
-        if row["id"] == "telemetry_spool":
-            if spool.get("consumed_rotated_bytes", 0) > spool.get("spool_max_bytes", GIB) * .25 and spool.get("problems", {}).get("spool_cleanup", {}).get("retained", 0):
-                return {"status": "investigate_cleanup", "value": None,
-                        "reason": "Committed transport files are awaiting safe closure or filesystem lease support; inspect spool_cleanup before increasing the budget."}
         if row["id"] in {"telemetry_spool", "telemetry_history"}:
             disks = sample.get("disks", [])
             if not disks:
@@ -215,7 +271,9 @@ class CapacityTracker:
                 return {"status": "headroom_unknown" if available is None else "insufficient_headroom", "value": None,
                         "reason": "An increased container memory limit needs confirmed host headroom; reserve at least half of currently available host memory."}
         return {"status": "adequate" if desired <= row["effective_limit"] else "suggested",
-                "value": round(desired, 2), "reason": "Observed 24-hour peak with 25% headroom; never automatically lowers the current allowance.",
+                "value": round(desired, 2), "reason": "Observed 24-hour peak with 25% headroom; never automatically lowers the current allowance."
+                    + (" Already committed closed transport is excluded from sizing demand."
+                       if row["id"] == "telemetry_spool" else ""),
                 "assumptions": "Observed demand may be censored by current limits. Confirm workload and physical/provider capacity before applying."}
 
 
@@ -235,6 +293,10 @@ def capacity_report(store, *, now: float | None = None) -> dict[str, Any]:
     result["stale"] = result["age_seconds"] > 60
     result["state"] = "stale" if result["stale"] else "observed"
     if result["stale"]:
+        collection = result.setdefault("collection", {})
+        collection["state"] = "stale"
+        collection["reclamation"] = {**collection.get("reclamation", {}), "state": "stale",
+                                     "reason": "Collection is not providing current reclamation observations."}
         for item in result.get("limits", []):
             item["recommendation"] = {"status": "stale", "value": None, "reason": "Collection is not providing current observations."}
     return result

@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'src/apps/telemetry'))
 from getbible_telemetry import TelemetryStore
 from getbible_telemetry.capacity import CapacityTracker, capacity_report, incident_update, GIB
+from getbible_telemetry.diagnostics import format_capacity
 from getbible_telemetry.collector import Collector
 from getbible_telemetry.spools import reclaim
 
@@ -92,7 +93,17 @@ class CapacityTest(unittest.TestCase):
     @unittest.skipUnless(os.geteuid() == 0, 'ownership transition requires root')
     def test_reclamation_of_other_uid_does_not_require_proc_or_new_capabilities(self):
         path = self.archive()
-        os.chown(path, 65534, 65534)
+        alternate_uid = None
+        for line in Path('/proc/self/uid_map').read_text().splitlines():
+            first, _host, count = map(int, line.split())
+            if first <= 65534 < first + count:
+                alternate_uid = 65534
+                break
+            if first + count > max(1, first):
+                alternate_uid = max(1, first)
+        if alternate_uid is None:
+            self.skipTest('The execution environment maps only root; cross-owner reclamation requires another mapped UID')
+        os.chown(path, alternate_uid, -1)
         info = path.stat()
         payload = [{'path': str(path), 'identity': f'{info.st_dev}:{info.st_ino}',
                     'size': info.st_size, 'mtime_ns': info.st_mtime_ns}]
@@ -173,6 +184,7 @@ class CapacityTest(unittest.TestCase):
 
     def observe(self, tracker, t, **extra):
         spool = {'budgeted_spool_bytes': 2 * GIB, 'spool_max_bytes': GIB, 'unread_bytes': 0,
+                 'consumed_rotated_bytes': 0,
                  'unread_files': 0, 'collector_instance': 'a', 'committed_bytes': t * 100,
                  'committed_records': t, 'problems': {}, **extra}
         with self.store.db:
@@ -196,6 +208,15 @@ class CapacityTest(unittest.TestCase):
             stale = capacity_report(self.store, now=1000)
         self.assertTrue(stale['stale'])
         self.assertIsNone(stale['limits'][0]['recommendation']['value'])
+        self.assertEqual(stale['collection']['state'], 'stale')
+        self.assertEqual(stale['collection']['reclamation']['state'], 'stale')
+        self.assertIn('not providing current', stale['collection']['reclamation']['reason'])
+        self.assertEqual(stale['collection']['budgeted_spool_bytes'], 2 * GIB)
+        self.assertEqual(stale['limits'][0]['high_water'], 2)
+        with self.store.db:
+            current = capacity_report(self.store, now=181)
+        self.assertEqual(current['collection']['state'], result['collection']['state'])
+        self.assertEqual(current['collection']['reclamation']['state'], 'caught_up')
 
     def test_backlog_stall_is_not_an_instruction_to_raise_the_limit(self):
         tracker = CapacityTracker(self.store)
@@ -204,6 +225,64 @@ class CapacityTest(unittest.TestCase):
         self.assertEqual(result['collection']['state'], 'stalled')
         self.assertEqual(result['limits'][0]['recommendation']['status'], 'investigate_collection')
         self.assertIsNone(result['limits'][0]['recommendation']['value'])
+
+    def test_committed_transport_pressure_reports_cleanup_separately_from_collection(self):
+        tracker = CapacityTracker(self.store)
+        cleanup = {'time': 100, 'retained': 4, 'retained_bytes': int(4.25 * GIB),
+                   'reason_counts': {'writer_open': 4}, 'failures': [{'reason': 'writer_open', 'errno': 11}]}
+        self.observe(tracker, 100, budgeted_spool_bytes=4.25 * GIB,
+                     consumed_rotated_bytes=4.25 * GIB, problems={'spool_cleanup': cleanup})
+        result = self.observe(tracker, 110, budgeted_spool_bytes=4.25 * GIB,
+                              consumed_rotated_bytes=4.25 * GIB, problems={'spool_cleanup': cleanup})
+        self.assertEqual(result['collection']['state'], 'caught_up')
+        self.assertEqual(result['collection']['reclamation']['state'], 'blocked')
+        self.assertEqual(result['collection']['consumed_rotated_bytes'], 4.25 * GIB)
+        advice = result['limits'][0]['recommendation']
+        self.assertEqual(advice['status'], 'investigate_cleanup')
+        self.assertIsNone(advice['value'])
+        self.assertIn('nginx log reopening', advice['reason'])
+        rendered = format_capacity({'state': 'observed', **result})
+        self.assertIn('Committed closed transport: 4.250 GiB (already ingested)', rendered)
+        self.assertIn('Reclamation: blocked', rendered)
+        self.assertIn('"errno": 11', rendered)
+
+    def test_old_pressure_peaks_do_not_supply_transport_sizing_evidence(self):
+        tracker = CapacityTracker(self.store)
+        tracker.history['hours'] = {'0': {'telemetry_spool': {'peak': 10 * GIB, 'samples': 100,
+            'seconds': 600, 'saturated_seconds': 600, 'saturated_samples': 100, 'episodes': 1}}}
+        first = self.observe(tracker, 1000, budgeted_spool_bytes=GIB / 4)
+        self.assertEqual(first['limits'][0]['high_water'], 10)
+        self.assertEqual(first['limits'][0]['recommendation']['status'], 'insufficient_data')
+        for t in range(1010, 1080, 10):
+            result = self.observe(tracker, t, budgeted_spool_bytes=GIB / 4)
+        row = result['limits'][0]
+        self.assertEqual(row['high_water'], 10)
+        self.assertEqual(row['sizing_high_water'], .25)
+        self.assertEqual(row['recommendation']['status'], 'adequate')
+        self.assertEqual(row['recommendation']['value'], 1)
+
+    def test_committed_transport_is_excluded_from_sizing_after_reclamation(self):
+        tracker = CapacityTracker(self.store)
+        for t in range(100, 180, 10):
+            self.observe(tracker, t, budgeted_spool_bytes=4.25 * GIB, consumed_rotated_bytes=4 * GIB)
+        result = self.observe(tracker, 180, budgeted_spool_bytes=GIB / 4)
+        row = result['limits'][0]
+        self.assertEqual(row['high_water'], 4.25)
+        self.assertEqual(row['sizing_high_water'], .25)
+        self.assertEqual(row['recommendation']['status'], 'adequate')
+        self.assertEqual(row['recommendation']['value'], 1)
+
+    def test_reclamation_diagnostics_distinguish_unsupported_leases_and_stale_attempts(self):
+        tracker = CapacityTracker(self.store)
+        cleanup = {'time': 100, 'retained': 1, 'reason_counts': {'lease_unsupported': 1}}
+        result = self.observe(tracker, 100, consumed_rotated_bytes=GIB,
+                              problems={'spool_cleanup': cleanup})
+        self.assertEqual(result['collection']['reclamation']['state'], 'blocked')
+        self.assertIn('filesystem does not support', result['limits'][0]['recommendation']['reason'])
+        result = self.observe(tracker, 200, consumed_rotated_bytes=GIB,
+                              problems={'spool_cleanup': cleanup})
+        self.assertEqual(result['collection']['reclamation']['state'], 'stale')
+        self.assertIn('over 60 seconds old', result['limits'][0]['recommendation']['reason'])
 
     def test_observation_gaps_and_insufficient_headroom_are_not_filled_in(self):
         tracker = CapacityTracker(self.store)

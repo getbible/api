@@ -15,7 +15,7 @@ import sqlite3
 from types import SimpleNamespace
 from typing import Any
 
-from .capacity import capacity_report
+from .capacity import capacity_report, GIB
 
 
 def read_config(path: str | os.PathLike[str]) -> dict[str, str]:
@@ -71,10 +71,17 @@ def format_capacity(report: dict[str, Any]) -> str:
     lines = ["getBible capacity", "State: " + report["state"], report.get("note", ""), ""]
     collection = report.get("collection", {})
     lines.append("Collection: " + collection.get("state", "unknown"))
-    for key in ("unread_bytes", "unread_files", "budgeted_spool_bytes", "retained_archive_bytes", "consumed_rotated_bytes",
+    for key in ("unread_bytes", "unread_files", "budgeted_spool_bytes", "retained_archive_bytes",
                 "producer_bytes_per_second", "collector_bytes_per_second", "backlog_growth_bytes_per_second", "backlog_observed_seconds"):
         if collection.get(key) is not None:
             lines.append(f"  {key}: {collection[key]}")
+    if collection.get("consumed_rotated_bytes") is not None:
+        lines.append(f"  Committed closed transport: {collection['consumed_rotated_bytes'] / GIB:.3f} GiB (already ingested)")
+    cleanup = collection.get("reclamation", {})
+    if cleanup:
+        lines.extend(["Reclamation: " + cleanup.get("state", "unknown"), "  " + cleanup.get("reason", "")])
+    if report.get("problems", {}).get("spool_cleanup"):
+        lines.append("  Last cleanup: " + json.dumps(report["problems"]["spool_cleanup"], ensure_ascii=False, sort_keys=True))
     lines.append("")
     for row in report.get("limits", []):
         lines.append(row["label"])
