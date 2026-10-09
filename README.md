@@ -20,7 +20,9 @@ describes the official MCP service at [https://mcp.getbible.net/](https://mcp.ge
   key. Endpoints share their domain's isolated sync user and nginx vhost;
   each tree is published as atomic hard-linked releases and served by nginx
   with open CORS, locked security headers, problem-document errors and
-  compression.
+  compression. An optional `?_=VALUE` parameter supports browser cache busting;
+  the origin validates its 1–128 URL-safe characters and otherwise ignores it.
+  See the [static endpoint contract](docs/STATIC_ENDPOINTS.md#optional-url-change-token).
 - **Runtime domains**: the `query` (references to verses) and `search`
   (full-text search) services built on the getBible librarian, one service
   per version behind the one vhost, each an immutable release run by gunicorn

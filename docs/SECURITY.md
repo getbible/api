@@ -66,9 +66,15 @@ the image's manager code is updated by replacing the image.
   builders validate JSON, checksums and manifests upstream. Publication uses
   Git object identity to reuse unchanged files without rereading their bodies;
   unsafe paths, symlinks and interrupted transfers are still rejected.
-- nginx: no directory listings, no query strings, safe methods only, 1 KB
+- nginx: no directory listings, safe methods only, 1 KB
   body limit, short header and body timeouts, `server_tokens off`, locked
   CSP, `nosniff`, HSTS, JSON problem documents for every error.
+- Static query strings allow only one optional `_` value matching
+  `[A-Za-z0-9_-]{1,128}`. Validation uses the complete raw query string:
+  extra or duplicate parameters, empty values and percent encodings are
+  rejected with `400` and `no-store`. The value never participates in file
+  selection, hash validation or origin cache state; existing access checks
+  remain in force. See `STATIC_ENDPOINTS.md`.
 
 ## Runtime domains
 

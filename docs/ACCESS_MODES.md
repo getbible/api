@@ -74,21 +74,23 @@ browsers can reach the `401`.
 Every domain advertises its cache policy in HTTP response headers, whether
 Cloudflare proxying is enabled or callers connect directly. `Cache-Control`
 tells a browser, application cache or CDN how long it may reuse a response;
-it cannot force a caller to maintain a cache. Current defaults are:
+it cannot force a caller to maintain a cache. Fresh-installation defaults are:
 
 | Public resource or response | Fresh lifetime (`max-age`) |
 | --- | --- |
-| Static JSON and text data | 3,600 seconds |
+| Static JSON and text data, including `checksum.json` | 2,592,000 seconds (30 days) |
 | Static `.sha` change tokens | 300 seconds |
-| Query GET/HEAD data | 300 seconds |
-| Search GET/HEAD data, including query-string filters | 60 seconds |
+| Query GET/HEAD data | 2,592,000 seconds (30 days) |
+| Search GET/HEAD data, including query-string filters | 2,592,000 seconds (30 days) |
 | Documentation, OpenAPI and version discovery | 300 seconds |
 | Favicon and page images | 86,400 seconds |
 | nginx-generated not-found responses | 60 seconds |
 
-Static HTML data uses the 300-second documentation lifetime. Configured
-domain/endpoint lifetimes replace these defaults. Public static data also
-allows stale responses for 86,400 seconds while revalidating or during an
+Static HTML data uses the 300-second documentation lifetime. `DEFAULT_*`
+settings seed new domains/endpoints; saved domain/endpoint lifetimes remain
+authoritative. Runtime responses may shorten their configured lifetime to
+account for the last successful source check; see `RUNTIME_RESOURCES.md`.
+Public static data also allows stale responses for 86,400 seconds while revalidating or during an
 origin error; `.sha` allows 3,600 seconds while revalidating and 86,400 during
 an error. Query/search responses allow 60 seconds while revalidating.
 These stale allowances favor availability and are additional to the fresh
@@ -96,14 +98,22 @@ lifetime. nginx may also serve its existing public runtime cache during an
 upstream error or refresh.
 
 Cache the URL including its entire query string: different search filters
-must have separate entries. Retain the returned `ETag`, then send it as
-`If-None-Match` when revalidating. An unchanged representation returns `304`
-with no response body and its cache policy; reuse the stored body. Changed
+and static `_` values must have separate entries. Retain the returned `ETag`,
+then send it as `If-None-Match` when revalidating. An unchanged representation
+returns `304` with no response body and its cache policy; reuse the stored body. Changed
 content returns `200` with its new body and ETag. Static files also provide
 `Last-Modified` and accept `If-Modified-Since`. An ETag represents the exact
 response; `.sha` files and search `query.sha` identify the underlying data.
 Response freshness still follows its cache lifetime, so token changes do
 not instantly invalidate copies already held by callers.
+
+Static endpoints accept an optional `?_=VALUE` URL change token containing
+1–128 ASCII letters, digits, underscores or hyphens. Reuse a checksum to keep
+the URL stable or change the value to use a different browser cache key.
+The origin validates and otherwise ignores the value: it changes neither
+the file served nor its validators, lifetime or access requirements. Only
+one `_` parameter is allowed, without other parameters or percent encoding.
+See `STATIC_ENDPOINTS.md` for examples and rejection rules.
 
 For V2 consumers that persist scripture, HTTP freshness does not replace the
 [V2 scripture-cache policy](https://github.com/getbible/mcp/blob/main/site/v2/cache-policy.md).

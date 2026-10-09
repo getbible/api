@@ -26,16 +26,21 @@
 {{#IF VERSIONS_JSON}}<p>Machine-readable index of the endpoints and their OpenAPI documents: <a href="/versions.json">versions.json</a>.</p>
 {{/IF}}
 <h2>How to call it</h2>
-<p>Plain HTTPS <code>GET</code> requests, from any origin. Responses are JSON, plus <code>.sha</code> and <code>.txt</code> files as plain text. Nothing here accepts query strings or request bodies.</p>
+<p>Plain HTTPS <code>GET</code> requests, from any origin. Responses are JSON, plus <code>.sha</code> and <code>.txt</code> files as plain text. Request bodies are not used. The only supported query parameter is the optional <code>_</code> URL change token described below.</p>
 <pre><code>curl https://{{DOMAIN}}/{{FIRST_VERSION}}/{{EXAMPLE_PATH}}</code></pre>
 <ul>
 <li>Allowed file types: {{EXTENSIONS_LIST}}.</li>
 <li>Methods: <code>GET</code>, <code>HEAD</code>, <code>OPTIONS</code>. Anything else answers <code>405</code>.</li>
 <li>CORS is open: <code>Access-Control-Allow-Origin: *</code> on every response, preflights answer <code>204</code>.</li>
-<li>Caching: <code>Cache-Control: public, max-age={{CACHE_TTL}}</code> on documents and <code>max-age={{SHA_CACHE_TTL}}</code> on checksum files; every response carries an <code>ETag</code>, so conditional requests answer <code>304</code>.</li>
+<li>Caching: <code>Cache-Control: public, max-age={{CACHE_TTL}}</code> on documents and <code>max-age={{SHA_CACHE_TTL}}</code> on <code>.sha</code> files; every response carries an <code>ETag</code>, so conditional requests answer <code>304</code>.</li>
 <li>Compression: gzip (and brotli where available) on request.</li>
 <li>Health: <code>GET /healthz</code> answers <code>{"status":"ok"}</code>.</li>
 </ul>
+
+<h2>Optional URL change token</h2>
+<p>Append <code>?_=VALUE</code> to give a browser a distinct cache key. The value must contain 1–128 ASCII letters, digits, underscores or hyphens (<code>[A-Za-z0-9_-]{1,128}</code>); timestamps and checksums are supported. Use only one <code>_</code> parameter, with no other parameters or percent encoding. Empty values, duplicate keys, bare query tokens and other parameter names return <code>400</code> with <code>Cache-Control: no-store</code>.</p>
+<pre><code>curl 'https://{{DOMAIN}}/{{FIRST_VERSION}}/{{EXAMPLE_PATH}}?_=9f4c2a17'</code></pre>
+<p>The origin validates and otherwise ignores the value, serving the same file with the same validators, cache lifetime and access requirements. Reuse the value to keep the URL stable; change it to use a different URL. This does not purge old cached URLs or select a content version. Any CDN cache must retain the complete query string to distinguish those URLs.</p>
 
 <h2>Access</h2>
 {{ACCESS_HTML}}
@@ -45,7 +50,7 @@
 <pre><code>{"type":"https://getbible.net/problems/not-found","title":"Not Found","status":404,"code":"not_found","detail":"No such resource on this API. ...","instance":"urn:request:..."}</code></pre>
 <table>
 <tr><th>Status</th><th>Code</th><th>Meaning</th></tr>
-<tr><td>400</td><td>bad_request</td><td>A query string or malformed request was sent.</td></tr>
+<tr><td>400</td><td>bad_request</td><td>An unsupported query string, invalid <code>_</code> value or malformed request was sent.</td></tr>
 <tr><td>401</td><td>unauthorized</td><td>A bearer token is required and was missing or invalid.</td></tr>
 <tr><td>404</td><td>not_found</td><td>No such document in this version.</td></tr>
 <tr><td>405</td><td>method_not_allowed</td><td>Only GET, HEAD and OPTIONS are accepted.</td></tr>

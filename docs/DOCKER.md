@@ -163,10 +163,10 @@ existing domain-specific choices stay in their registry.
 | `GETBIBLE_DEFAULT_QUOTA_HOUR` | `10000` | Existing public hourly token-bucket setting |
 | `GETBIBLE_DEFAULT_QUOTA_DAY` | `100000` | Existing public daily token-bucket setting |
 | `GETBIBLE_DEFAULT_CONN_LIMIT` | `100` | Concurrent public origin connections |
-| `GETBIBLE_DEFAULT_CACHE_TTL` | `3600` | Public static data freshness, seconds |
-| `GETBIBLE_DEFAULT_SHA_CACHE_TTL` | `300` | Static change-token freshness, seconds |
-| `GETBIBLE_DEFAULT_QUERY_CACHE_TTL` | `300` | Query GET/HEAD freshness, seconds |
-| `GETBIBLE_DEFAULT_SEARCH_CACHE_TTL` | `60` | Search GET/HEAD freshness, seconds |
+| `GETBIBLE_DEFAULT_CACHE_TTL` | `2592000` | Public static JSON/text freshness, including `checksum.json`; 30 days |
+| `GETBIBLE_DEFAULT_SHA_CACHE_TTL` | `300` | Static `.sha` change-token freshness, seconds |
+| `GETBIBLE_DEFAULT_QUERY_CACHE_TTL` | `2592000` | Query GET/HEAD freshness, seconds; 30 days |
+| `GETBIBLE_DEFAULT_SEARCH_CACHE_TTL` | `2592000` | Search GET/HEAD freshness, seconds; 30 days |
 | `GETBIBLE_DEFAULT_QUERY_WORKERS` | `4` | Desired query worker count before resource allocation |
 | `GETBIBLE_DEFAULT_QUERY_THREADS` | `4` | Desired query threads per worker |
 | `GETBIBLE_DEFAULT_SEARCH_WORKERS` | `2` | Desired search worker count before resource allocation |
