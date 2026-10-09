@@ -28,6 +28,8 @@ export default function Capacity({refresh, execute}) {
                 <div><span>Collection</span><strong>{stale ? 'Unknown — observations are not current' : words(collection.state)}</strong></div>
                 <div><span>Unread backlog</span><strong>{bytes(collection.unread_bytes)} · {number(collection.unread_files)} files</strong></div>
                 <div><span>Transport / retained archives</span><strong>{bytes(collection.budgeted_spool_bytes)} / {bytes(collection.retained_archive_bytes)}</strong></div>
+                <div><span>Committed closed transport</span><strong>{bytes(collection.consumed_rotated_bytes)} · already ingested</strong></div>
+                <div><span>Reclamation</span><div className="text-end"><strong>{stale ? 'Unknown — observations are not current' : words(collection.reclamation?.state)}</strong><small className="d-block">{collection.reclamation?.reason}</small></div></div>
                 <div><span>Producer / collector throughput</span><strong>{rate(collection.producer_bytes_per_second)} / {rate(collection.collector_bytes_per_second)}</strong></div>
                 <div><span>Backlog growth / continuous backlog</span><strong>{rate(collection.backlog_growth_bytes_per_second)} / {number(collection.backlog_observed_seconds)} seconds</strong></div>
                 <div><span>Rate window / peak window</span><strong>{number(collection.rate_window_seconds)} seconds / {number(report.window_seconds / 3600)} hours</strong></div>

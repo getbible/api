@@ -256,11 +256,31 @@ reminder or sustained recovery rather than resending an unchanged message at
 every short cooldown. Missing/stale measurements never imply recovery. Inspect
 open incidents and the collector journal when capacity is still saturated.
 
+If unread bytes are zero while committed closed transport occupies the allowance,
+ingestion has caught up and reclamation needs attention. The capacity report shows
+these bytes separately and labels reclamation as pending, blocked or stale. The
+last `spool_cleanup` observation records attempted/removed/retained bytes, reason
+counts and bounded failure details including errno. An open writer points to a
+producer that has not closed its rotated file; inspect nginx reopen failures.
+The collector retries nginx reopening for writer-held nginx archives. For an idle
+runtime producer, Gunicorn's USR1 handling reopens application log files in its
+master and workers. Administrative event producers close their append streams
+after each event, so idle dashboard auditing no longer holds rotated files open.
+Unsupported leases or denied permissions point to the mounted filesystem or
+service identity rather than a need for a larger budget. Inspect current evidence
+with `getbible capacity --json` and `journalctl -u getbible-telemetry --since '1 hour ago'`.
+Safe cleanup retries automatically; do not delete a transport file merely because
+the unread count is zero, since a producer may still append to it.
+
 Recommendations use measured demand/high-water usage, saturation observations and
 available headroom, and explain their headroom assumptions. A growing or stalled
 unread backlog requires fixing collection before relying on a larger spool
 allowance. Advice is withheld when evidence/headroom is insufficient; no limit is
 automatically raised and no unread history is discarded to silence an alarm.
+Transport sizing uses the peak active/pending demand after subtracting committed
+closed spools; the total occupied high-water remains visible as pressure evidence.
+Older observations that lack this distinction do not justify an increased
+allowance: sizing waits for at least 60 observed seconds and six new samples.
 Configured values controlled by deployment environment or host cgroups are shown
 as such. Collector restart retains the incident, while real recovery clears it
 after the configured stability interval.

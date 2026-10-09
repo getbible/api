@@ -24,6 +24,7 @@ from getbible_dashboard.server import Dashboard, DashboardHTTPServer, DashboardH
 from getbible_dashboard.analytics import ReportPreparing
 from tests.python.test_dashboard_auth import Clock, FakeTelegram
 from getbible_telemetry.store import TelemetrySchemaError
+from getbible_telemetry.producer import emit_event
 
 
 class UnixConnection(HTTPConnection):
@@ -450,6 +451,48 @@ class LifecycleTests(unittest.TestCase):
         self.assertIn("schema 1", message)
         self.assertIn("preserved", message)
         self.assertIn("database migrations", message)
+
+
+class AuditProducerTests(unittest.TestCase):
+    def test_idle_audit_releases_rotated_files_and_retains_redacted_events(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "dashboard.log"
+            archived = path.with_name("dashboard.log-old.spool")
+            streams = []
+            builtin_open = open
+
+            def record_stream(*args, **kwargs):
+                stream = builtin_open(*args, **kwargs)
+                streams.append(stream)
+                return stream
+
+            with patch("getbible_telemetry.producer.open", side_effect=record_stream, create=True):
+                emit_event("dashboard.session_created", {
+                    "session_ref": "public-session", "password": "private-password",
+                    "session_id": "private-session", "cookie": "private-cookie",
+                }, path=str(path))
+                self.assertTrue(streams[0].closed, "Idle auditing must not retain a spool writer")
+                path.rename(archived)
+                path.touch()
+                emit_event("dashboard.sleeping", {}, path=str(path))
+                self.assertTrue(streams[1].closed)
+
+            original = json.loads(archived.read_text())
+            self.assertEqual(original["event"], "dashboard.session_created")
+            self.assertEqual(original["session_ref"], "public-session")
+            self.assertNotIn("private-", archived.read_text())
+            self.assertEqual(json.loads(path.read_text())["event"], "dashboard.sleeping")
+
+    def test_audit_write_failure_remains_visible_and_closes_the_stream(self):
+        class UnavailableStream(io.StringIO):
+            def write(self, message):
+                raise OSError("Audit spool unavailable")
+
+        stream = UnavailableStream()
+        with patch("getbible_telemetry.producer.open", return_value=stream, create=True):
+            with self.assertRaises(OSError):
+                emit_event("dashboard.session_created", {}, path="dashboard.log")
+        self.assertTrue(stream.closed)
 
 
 if __name__ == "__main__":

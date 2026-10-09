@@ -6,6 +6,7 @@ import json
 import contextlib
 import io
 import os
+import errno
 import sqlite3
 import sys
 import tempfile
@@ -24,6 +25,7 @@ from getbible_telemetry.metrics import MetricsSampler
 from getbible_telemetry.producer import emit_event
 from getbible_telemetry.cli import main
 from getbible_telemetry.settings import numeric_setting
+from getbible_telemetry.spools import reclaim
 from getbible_telemetry.store import SCHEMA_VERSION, TelemetrySchemaError, prepare_history
 
 
@@ -437,6 +439,146 @@ class TelemetryTest(unittest.TestCase):
             self.assertEqual(collector.cleanup(), 1)
         self.assertFalse(path.exists())
         self.assertEqual(self.store.summary(0, 200)["calls"], 1)
+
+    def test_cleanup_preserves_rewritten_same_size_until_new_contents_are_committed(self):
+        path = self.root / "logs/bible.test/archive/access.log-1.spool"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(edge("old")) + "\n")
+        collector = Collector(self.store, str(self.root / "logs"))
+        collector.ingest_file(path, "bible.test", "edge", rotated=True)
+        previous = path.stat()
+        path.write_text(json.dumps(edge("new")) + "\n")
+        os.utime(path, ns=(previous.st_atime_ns, previous.st_mtime_ns + 1_000_000))
+        self.assertEqual(path.stat().st_size, previous.st_size)
+        changed = collector.state()
+        self.assertEqual(changed["consumed_rotated_bytes"], 0)
+        self.assertEqual(changed["unread_bytes"], previous.st_size)
+        with patch("getbible_telemetry.collector.time.monotonic", return_value=10**12):
+            self.assertEqual(collector.cleanup(), 0)
+        with patch("getbible_telemetry.collector.time.monotonic", return_value=2 * 10**12):
+            self.assertEqual(collector.cleanup(), 0)
+        self.assertTrue(path.exists())
+        self.assertEqual(collector.ingest_file(path, "bible.test", "edge", rotated=True), 1)
+        self.assertEqual(collector.state()["consumed_rotated_bytes"], previous.st_size)
+        self.assertEqual(collector.state()["unread_bytes"], 0)
+        collector.cleanup()
+        with patch("getbible_telemetry.collector.time.monotonic", return_value=3 * 10**12):
+            self.assertEqual(collector.cleanup(), 1)
+        self.assertEqual(self.store.summary(0, 200)["calls"], 2)
+
+    def test_cleanup_passes_unread_prefix_to_drain_bounded_committed_batches(self):
+        archive = self.root / "logs/bible.test/archive"
+        archive.mkdir(parents=True)
+        collector = Collector(self.store, str(self.root / "logs"))
+        unread, committed = [], []
+        for index in range(144):
+            path = archive / f"access.log-{index:03}.spool"
+            path.write_text(json.dumps(edge(str(index))) + "\n")
+            os.utime(path, (index + 100, index + 100))
+            if index < 80:
+                unread.append(path)
+            else:
+                committed.append(path)
+                collector.ingest_file(path, "bible.test", "edge", rotated=True)
+        with patch("getbible_telemetry.collector.time.monotonic", return_value=100):
+            self.assertEqual(collector.cleanup(), 0)
+        with patch("getbible_telemetry.collector.time.monotonic", return_value=106):
+            self.assertEqual(collector.cleanup(), 32)
+        self.assertTrue(collector._cleanup_pending)
+        # Cursor movement covers the 80 unread files and 32 candidates. With
+        # the first batch gone, the remaining committed files still follow.
+        self.assertEqual(collector._cleanup_cursor, 256)
+        with patch("getbible_telemetry.collector.time.monotonic", return_value=107):
+            self.assertEqual(collector.cleanup(), 32)
+        self.assertTrue(all(path.exists() for path in unread))
+        self.assertTrue(all(not path.exists() for path in committed))
+        self.assertEqual(self.store.summary(0, 200)["calls"], 64)
+
+    def test_same_size_tail_rewrite_replays_before_authorizing_cleanup(self):
+        path = self.root / "logs/bible.test/archive/access.log-1.spool"
+        path.parent.mkdir(parents=True)
+        prefix = json.dumps(edge("same", padding="x" * 512)) + "\n"
+        path.write_text(prefix + json.dumps(edge("old1")) + "\n")
+        collector = Collector(self.store, str(self.root / "logs"))
+        self.assertEqual(collector.ingest_file(path, "bible.test", "edge", rotated=True), 2)
+        previous = path.stat()
+        path.write_text(prefix + json.dumps(edge("new1")) + "\n")
+        os.utime(path, ns=(previous.st_atime_ns, previous.st_mtime_ns + 1_000_000))
+        self.assertEqual(path.stat().st_size, previous.st_size)
+        self.assertEqual(collector.cleanup(), 0)
+        self.assertEqual(collector.ingest_file(path, "bible.test", "edge", rotated=True), 2)
+        # The unchanged first record is idempotent; the new tail is retained
+        # alongside the previously committed history before deleting transport.
+        self.assertEqual(self.store.summary(0, 200)["calls"], 3)
+        self.assertEqual({row["request_id"] for row in self.store.requests(0, 200)["items"]},
+                         {"same", "old1", "new1"})
+        collector.cleanup()
+        with patch("getbible_telemetry.collector.time.monotonic", return_value=10**12):
+            self.assertEqual(collector.cleanup(), 1)
+        self.assertFalse(path.exists())
+
+    def test_source_replacement_between_stat_and_open_does_not_commit_wrong_identity(self):
+        path = self.root / "logs/bible.test/archive/access.log-1.spool"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(edge("old1")) + "\n")
+        replacement = path.with_name("replacement")
+        replacement.write_text(json.dumps(edge("new1")) + "\n")
+        collector = Collector(self.store, str(self.root / "logs"))
+        builtin_open = open
+
+        def replace_then_open(filename, mode):
+            replacement.replace(path)
+            return builtin_open(filename, mode)
+
+        with patch("getbible_telemetry.collector.open", side_effect=replace_then_open):
+            self.assertEqual(collector.ingest_file(path, "bible.test", "edge", rotated=True), 0)
+        self.assertTrue(collector._batch_pending)
+        self.assertEqual(self.store.db.execute("SELECT count(*) FROM sources").fetchone()[0], 0)
+        self.assertEqual(self.store.summary(0, 200)["calls"], 0)
+        self.assertEqual(collector.ingest_file(path, "bible.test", "edge", rotated=True), 1)
+        self.assertEqual(self.store.requests(0, 200)["items"][0]["request_id"], "new1")
+
+    def test_spool_reclamation_exposes_kernel_failure_and_retries_nginx_reopen(self):
+        path = self.root / "logs/bible.test/archive/access.log-1.spool"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(edge()) + "\n")
+        collector = Collector(self.store, str(self.root / "logs"))
+        collector.ingest_file(path, "bible.test", "edge", rotated=True)
+        collector.cleanup()
+        with path.open("ab"), patch.object(collector, "_nginx_reopen", return_value=True) as reopen, \
+                patch("getbible_telemetry.collector.time.monotonic", return_value=10**12):
+            self.assertEqual(collector.cleanup(), 0)
+            reopen.assert_called_once_with()
+        cleanup = self.store.storage()["metadata"]["spool_cleanup"]
+        self.assertEqual(cleanup["reason_counts"], {"writer_open": 1})
+        self.assertEqual(cleanup["retained_bytes"], path.stat().st_size)
+        self.assertEqual(cleanup["failures"][0]["errno"], errno.EAGAIN)
+        self.assertEqual(cleanup["failures"][0]["operation"], "lease")
+        self.assertFalse(collector._cleanup_pending)
+        with patch("getbible_telemetry.collector.time.monotonic", return_value=2 * 10**12):
+            self.assertEqual(collector.cleanup(), 1)
+        collector.cleanup()
+        cleared = self.store.storage()["metadata"]["spool_cleanup"]
+        self.assertEqual(cleared["retained"], 0)
+        self.assertEqual(cleared["failures"], [])
+
+    def test_reclamation_separates_unsupported_leases_and_permission_errors(self):
+        path = self.root / "archive/access.log-1.spool"
+        path.parent.mkdir()
+        path.write_text(json.dumps(edge()) + "\n")
+        info = path.stat()
+        item = {"path": str(path), "identity": f"{info.st_dev}:{info.st_ino}",
+                "size": info.st_size, "mtime_ns": info.st_mtime_ns}
+        for code, reason in ((errno.EOPNOTSUPP, "lease_unsupported"),
+                             (errno.EPERM, "permission_denied")):
+            with self.subTest(code=code), patch("getbible_telemetry.spools.fcntl.fcntl",
+                                               side_effect=OSError(code, os.strerror(code))):
+                result = reclaim(item)
+                self.assertFalse(result["removed"])
+                self.assertEqual(result["reason"], reason)
+                self.assertEqual(result["errno"], code)
+                self.assertEqual(result["operation"], "lease")
+                self.assertTrue(path.exists())
 
     def test_malformed_logs_are_preserved_as_diagnostics(self):
         path = self.root / "access.log"
