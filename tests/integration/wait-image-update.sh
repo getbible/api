@@ -17,6 +17,11 @@ image_update_completion() {
     # Unstarted, queued and running oneshots cannot acknowledge a previous result.
     [[ "$active" == inactive || "$active" == failed ]] || return 75
     [[ "$process" == 0 && "$started" =~ ^[0-9]+$ && "$finished" =~ ^[0-9]+$ ]] || return 75
+    # A failed prerequisite can prevent ExecStart entirely. That terminal
+    # service failure is not a queued job or the expected candidate rejection.
+    if [[ -n "$result" && "$result" != success ]] && (( started == 0 && finished == 0 )); then
+        return 1
+    fi
     (( started > 0 && finished >= started )) || return 75
     [[ "$code" =~ ^[0-9]+$ && -n "$result" ]] || return 75
     if [[ "$expected" == failed ]]; then
@@ -28,7 +33,7 @@ image_update_completion() {
 
 image_update_wait() {
     local desired="$1" expected="${2:-current}" state="${3:-/var/lib/getbible/state/image-update.conf}"
-    local budget="${4:-600}" snapshot completion observed_version observed_status deadline
+    local budget="${4:-600}" snapshot completion prerequisite preparation observed_version observed_status deadline
     [[ "$expected" == current || "$expected" == failed ]] || return 2
     [[ "$budget" =~ ^[1-9][0-9]{0,3}$ ]] || return 2
     deadline=$((SECONDS + budget))
@@ -50,10 +55,23 @@ image_update_wait() {
             printf 'This boot completed image application without the expected result (%s, %s).\n%s\n' "$desired" "$expected" "$snapshot" >&2
             break
         fi
+        # A dependency-failed job may leave the image unit's own Result at
+        # success with zero execution timestamps. Observe its required
+        # preparation service before waiting on a job which cannot run.
+        prerequisite="$(systemctl show getbible-prepare.service \
+            -p ActiveState -p Result -p MainPID -p ExecMainStartTimestampMonotonic \
+            -p ExecMainExitTimestampMonotonic -p ExecMainStatus)" || return 1
+        preparation=0
+        image_update_completion "$prerequisite" current || preparation=$?
+        if (( preparation == 1 )); then
+            printf 'Required image preparation failed before image application could complete.\n%s\n' "$prerequisite" >&2
+            break
+        fi
         sleep 1
     done
     cat "$state" 2>/dev/null || true
-    journalctl -u getbible-image-update.service --no-pager -n 80 >&2 || true
+    systemctl --no-pager --full status getbible-prepare.service getbible-image-update.service >&2 || true
+    journalctl -u getbible-prepare.service -u getbible-image-update.service --no-pager -n 160 >&2 || true
     return 1
 }
 
