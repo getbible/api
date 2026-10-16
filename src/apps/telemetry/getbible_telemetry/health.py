@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import re
 import shlex
 import subprocess
@@ -13,14 +14,19 @@ from pathlib import Path
 from typing import Any
 
 from .store import timestamp
+from .service_alerts import PROPERTIES, ServiceIncidents, boot_id, failure_message, parse_units
 
 
 class HealthInspector:
-    def __init__(self, executable: str = "/usr/bin/systemctl") -> None:
+    def __init__(self, executable: str = "/usr/bin/systemctl", *,
+                 incident_directory: str | Path = "/var/lib/getbible/telemetry/service-alerts",
+                 storage_directory: str | Path = "/var/lib/getbible/storage") -> None:
         self.executable = executable
         self.last_sample: dict[str, Any] = {"available": False, "conditions": {}}
         self.next_check = 0.0
         self._worker: threading.Thread | None = None
+        self.incidents = ServiceIncidents(incident_directory)
+        self.storage_directory = Path(storage_directory)
 
     def current(self, *, grace_seconds: float = 3600) -> dict[str, Any]:
         """Inspect off the ingest loop; a stalled service bus cannot block logs."""
@@ -47,10 +53,30 @@ class HealthInspector:
             self.last_sample = {"available": False, "conditions": {}, "reason": "systemd state unavailable"}
             return self.last_sample
         conditions = {}
+        failed_units = set()
         for line in failed.splitlines():
             unit = line.split()[0] if line.split() else ""
             if unit == "nginx.service" or re.fullmatch(r"getbible-[A-Za-z0-9_.@-]+\.service", unit):
+                # The notification helper itself must not create an alert loop.
+                if unit.startswith("getbible-alert@"):
+                    continue
+                failed_units.add(unit)
                 conditions["service:" + unit] = {"unhealthy": True, "message": "Managed service failed: " + unit}
+        try:
+            tracked = {unit for unit, state in self.incidents.snapshot().items() if state.get("active")}
+        except (OSError, ValueError):
+            tracked = set()  # The collector exposes incident journal errors.
+        units = sorted(failed_units | tracked)
+        if units:
+            details = self._run("show", *units, "--no-pager", "--property=" + ",".join(PROPERTIES))
+            for unit, values in parse_units(details or "").items():
+                if unit == "getbible-storage.service":
+                    try:
+                        values["storage_usage"] = json.loads((self.storage_directory / "usage.json").read_text())
+                    except (OSError, ValueError):
+                        pass
+                conditions["service:" + unit] = {"unhealthy": values.get("ActiveState") == "failed",
+                                                 "message": failure_message(unit, values), "unit_state": values}
         timers = self._run("list-timers", "--all", "--plain", "--no-legend", "--no-pager", "getbible-sync-*.timer") or ""
         syncs = []
         for line in timers.splitlines():
@@ -89,5 +115,6 @@ class HealthInspector:
             syncs.append(item)
             conditions["sync:" + service] = {"unhealthy": stale,
                                              "message": "Scheduled sync has no successful LAST_CHECK after its timer trigger: " + service}
-        self.last_sample = {"available": True, "conditions": conditions, "syncs": syncs, "sampled_at": now}
+        self.last_sample = {"available": True, "conditions": conditions, "syncs": syncs, "sampled_at": now,
+                            "monotonic": time.monotonic(), "boot_id": boot_id()}
         return self.last_sample

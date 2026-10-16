@@ -6,13 +6,17 @@ Type=oneshot
 User=root
 Group={{NOTIFY_GROUP}}
 Environment=GB_TELEGRAM_CONF={{RUN}}/telegram.conf
-ExecStart={{LIBEXEC}}/getbible-notify fail "Service failed: %I" "A managed getBible service failed. Inspect its journal and the dashboard before retrying."
+EnvironmentFile=-{{RUN}}/telemetry.env
+# Keep the literal instance: %I unescapes hyphens into path separators.
+ExecStart={{PYTHON}} {{MANAGEMENT_RELEASE}}/apps/telemetry/getbible_telemetry/service_alerts.py %i --directory {{VAR}}/telemetry/service-alerts --systemctl {{SYSTEMCTL}} --notify {{LIBEXEC}}/getbible-notify
+UMask=0077
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 PrivateDevices=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-TimeoutStartSec=20
+ReadWritePaths={{VAR}}/telemetry
+TimeoutStartSec=30
 MemoryMax=64M
 TasksMax=16

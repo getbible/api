@@ -144,6 +144,26 @@ class StaticSyncTest(unittest.TestCase):
         self.sync(GB_SYNC_STORAGE_MAX_GIB="1", GETBIBLE_STORAGE_MAX_GIB="000000", **settings)
         self.assertNotEqual(self.live.resolve(), first)
 
+    def test_published_storage_charge_survives_until_a_new_sample(self) -> None:
+        import time
+        state = self.root / "storage"
+        state.mkdir()
+        (state / "usage.json").write_text(json.dumps({"generated_at": time.time(), "used_bytes": 0}))
+        settings = {"GB_SYNC_STORAGE_MAX_GIB": "1", "GB_SYNC_STORAGE_STATE": str(state),
+                    "GB_STORAGE_GUARD": str(BIN / "getbible-storage-guard")}
+        self.sync(**settings)
+        charges = json.loads((state / "reservations.json").read_text())
+        self.assertEqual(len(charges), 1)
+        charge = next(iter(charges.values()))
+        self.assertGreater(charge["committed_at"], 0)
+        self.assertGreater(charge["bytes"], 0)
+        self.payload("next publication")
+        self.commit()
+        self.sync(**settings)
+        charges = json.loads((state / "reservations.json").read_text())
+        self.assertEqual(len(charges), 2)
+        self.assertTrue(all(value.get("committed_at") for value in charges.values()))
+
     def test_invalid_storage_limit_fails_before_creating_sync_directories(self) -> None:
         for value in ("-1", "1.5", "nan", "1000000", "1e2", "1;true", ""):
             with self.subTest(value=value):
