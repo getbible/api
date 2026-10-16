@@ -101,6 +101,8 @@ gb_setting_validate() {
         DASHBOARD_IDLE_SECONDS) [[ "$value" =~ ^[0-9]{1,4}$ ]] && (( 10#$value >= 10 && 10#$value <= 3600 )) ;;
         TELEMETRY_MAX_GIB|TELEMETRY_SPOOL_MAX_GIB|TELEMETRY_SPOOL_ROTATE_MIB|ALERT_COOLDOWN_SECONDS|ALERT_REMINDER_SECONDS|ALERT_HOLD_SECONDS|ALERT_SYNC_GRACE_SECONDS) [[ "$value" =~ ^[1-9][0-9]{0,5}$ ]] ;;
         STORAGE_MAX_GIB) [[ "$value" =~ ^[0-9]{1,6}$ ]] ;;
+        STORAGE_SCAN_MAX_SECONDS)
+            [[ "$value" =~ ^[0-9]{3,5}$ ]] && (( 10#$value >= 120 && 10#$value <= 86400 )) ;;
         DASHBOARD_SESSION_DAYS) [[ "$value" =~ ^[0-9]{1,2}$ ]] && (( 10#$value >= 1 && 10#$value <= 30 )) ;;
         DASHBOARD_TOKEN_SECONDS) [[ "$value" =~ ^[0-9]{1,2}$ ]] && (( 10#$value >= 10 && 10#$value <= 60 )) ;;
         DASHBOARD_DOMAIN) [[ -z "$value" ]] || gb_valid_domain "$value" ;;
@@ -195,7 +197,7 @@ gb_settings_menu() {
         choice="$(ui_menu 'Deployment settings' "Execution: $(gb_execution_mode). Environment values are shown in the configuration report and edited in Compose." \
             report 'Show effective settings and their sources' \
             edit 'Set one system setting' \
-            resources 'Runtime memory budget' \
+            resources 'Hardware alignment and runtime memory budget' \
             back 'Back')" || return 0
         case "$choice" in
             report) ui_msg 'Effective configuration' "$(gb_environment_status)" ;;

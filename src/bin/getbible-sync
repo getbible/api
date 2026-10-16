@@ -62,11 +62,26 @@ freshness_record() {
     mv -f -- "$temporary" "$marker"
 }
 cleanup() {
-    if [[ "$STORAGE_RESERVED" == true ]]; then
-        "$GB_STORAGE_GUARD" release --state "$GB_SYNC_STORAGE_STATE" --id "$STORAGE_ID" >/dev/null || true
+    local storage_action=release
+    [[ "$PUBLISHED" != true ]] || storage_action=commit
+    if [[ -n "$SWAP" ]] && ! rm -f -- "$SWAP"; then
+        log "WARNING: could not remove temporary publication link: $SWAP" >&2
     fi
-    [[ -z "$SWAP" ]] || rm -f -- "$SWAP"
-    if [[ "$PUBLISHED" == false && -n "$RELEASE" ]]; then rm -rf -- "$RELEASE"; fi
+    if [[ "$PUBLISHED" == false && -n "$RELEASE" ]]; then
+        # Keep the estimate charged until removal succeeds. An orphaned export
+        # still occupies space, so retain its charge like a published release
+        # until complete accounting observes it; do not let its lease expire.
+        if ! rm -rf -- "$RELEASE" || [[ -e "$RELEASE" || -L "$RELEASE" ]]; then
+            storage_action=commit
+            log "WARNING: unpublished release cleanup failed; retaining its storage charge: $RELEASE" >&2
+        fi
+    fi
+    if [[ "$STORAGE_RESERVED" == true ]]; then
+        # A completed publication still occupies space absent from an older
+        # snapshot. Retain its charge until a newer complete scan covers it.
+        "$GB_STORAGE_GUARD" "$storage_action" --state "$GB_SYNC_STORAGE_STATE" --id "$STORAGE_ID" >/dev/null \
+            || log "WARNING: storage reservation cleanup could not complete: $STORAGE_ID" >&2
+    fi
 }
 on_error() {
     local code=$?

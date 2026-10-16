@@ -153,6 +153,7 @@ infrastructure_environment_write() {
         gb_install_file "$(gb_tmpdir)/$stage.env" "$GB_RUN/$stage.env" 0640 root:getbible-dashboard || return 1
     done
     printf 'GETBIBLE_STORAGE_MAX_GIB=%s\n' "$(gb_global STORAGE_MAX_GIB 0)" > "$(gb_tmpdir)/storage.env"
+    printf 'GETBIBLE_STORAGE_SCAN_MAX_SECONDS=%s\n' "$(gb_global STORAGE_SCAN_MAX_SECONDS 900)" >> "$(gb_tmpdir)/storage.env"
     gb_install_file "$(gb_tmpdir)/storage.env" "$GB_RUN/storage.env" 0640 "root:$GB_READERS_GROUP" || return 1
     # Native and container services use the same readable effective snapshot;
     # the original configuration remains root controlled under /etc/getbible.
@@ -190,14 +191,19 @@ infrastructure_storage_initial_sample() {
         # Native systemd enforces the sampler's own finite resource limits.
         if ! sd_start getbible-storage.service; then
             gb_warn 'Initial storage accounting failed. Existing APIs remain available; new budgeted publications wait for a fresh sample.'
+        elif [[ "$(gb_global STORAGE_MAX_GIB 0)" != 0 && ! -s "$GB_VAR/storage/usage.json" ]]; then
+            gb_warn 'Initial storage accounting is still in progress. The timer resumes the scan; new budgeted publications wait for its first complete sample.'
         fi
         return
     fi
-    # Container first boot has no running systemd yet. Finish the bounded local
-    # snapshot before any static service can request storage admission.
+    # Container first boot has no running systemd yet. Start one bounded slice;
+    # the independent timer resumes a large scan after boot. Admission refuses
+    # publication until the first complete snapshot exists.
     if ! timeout --kill-after=5s 75s prlimit --as=536870912 --cpu=60:65 -- "$GB_PYTHON" "$GB_LIBEXEC/getbible-storage-guard" "${args[@]}" >/dev/null; then
         gb_warn 'Initial storage accounting failed. Existing APIs remain available; new budgeted publications wait for a fresh sample.'
         tg_notify fail 'Initial storage accounting failed' 'Existing APIs remain available. New publications with a storage budget wait for the independent sampler to recover.'
+    elif [[ "$(gb_global STORAGE_MAX_GIB 0)" != 0 && ! -s "$GB_VAR/storage/usage.json" ]]; then
+        gb_warn 'Initial storage accounting is still in progress. The timer resumes the scan; new budgeted publications wait for its first complete sample.'
     fi
     return 0
 }

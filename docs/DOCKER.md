@@ -332,7 +332,15 @@ process that reaches a hard ceiling.
 docker compose exec --user root getbible getbible resources show
 docker compose exec -T --user root getbible getbible resources show --json
 docker compose exec --user root getbible getbible resources apply
+docker compose exec --user root getbible getbible resources realign
+docker compose exec --user root getbible getbible resources realign --apply
 ```
+
+`resources realign` adds a read-only hardware review, selected-versus-proposed
+settings and current storage/telemetry diagnostics. Its explicit `--apply`
+rechecks and applies changed runtime allocations. Environment-owned settings
+and outer container limits remain controlled by Compose; the report identifies
+these instead of silently replacing them. See [hardware alignment](RUNTIME_RESOURCES.md#review-and-realign-hardware-allocation).
 
 The report distinguishes calculated targets from running generations.
 Configuration changes recalculate targets; `resources apply` activates them

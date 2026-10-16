@@ -17,7 +17,9 @@ EnvironmentFile={{RUN}}/storage.env
 ExecStart={{PYTHON}} {{MANAGEMENT_RELEASE}}/bin/getbible-storage-guard sample --config {{ETC}}/getbible.conf --environment {{RUN}}/storage.env --state {{VAR}}/storage
 UMask=0027
 # This sampler is independent of long-running deployment/adaptation jobs.
-# It reads inode metadata only and exits immediately when the budget is off.
+# It reads inode metadata in resumable 20-second slices, checkpoints progress,
+# and exits immediately when the budget is off. The deadline bounds stuck I/O;
+# completed checkpoints survive a forced termination.
 Nice=19
 IOSchedulingClass=idle
 CPUQuota=50%

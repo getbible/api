@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 from decimal import Decimal
+import hashlib
 import json
 import math
 import os
@@ -39,6 +40,29 @@ def config(path: Path) -> dict[str, str]:
         return {}
     return dict(line.split("=", 1) for line in path.read_text().splitlines()
                 if re.match(r"^[A-Z][A-Z0-9_]*=", line))
+
+
+def host_memory(proc: Path) -> int | None:
+    """Physical RAM is an upper bound, never a container's missing budget."""
+    try:
+        for line in (proc / "meminfo").read_text().splitlines():
+            match = re.fullmatch(r"MemTotal:\s+(\d+)\s+kB", line)
+            if match:
+                return int(match[1]) * 1024
+    except FileNotFoundError:
+        pass
+    return None
+
+
+def available_memory(proc: Path) -> int | None:
+    try:
+        for line in (proc / "meminfo").read_text().splitlines():
+            match = re.fullmatch(r"MemAvailable:\s+(\d+)\s+kB", line)
+            if match:
+                return int(match[1]) * 1024
+    except FileNotFoundError:
+        pass
+    return None
 
 
 def cgroup_limits(proc: Path, override: Path | None = None, owner: str = "self") -> dict:
@@ -350,10 +374,13 @@ def plan(args) -> dict:
     if args.mode == "docker" and cap is None:
         raise ValueError("Docker requires a finite cgroup v2 memory.max; set the Compose memory limit before starting getBible.")
     requested = None if args.budget in {"", "auto"} else memory_bytes(args.budget)
-    budget = min(value for value in (cap, requested) if value is not None)
+    physical = host_memory(Path(args.proc_root))
+    budget = min(value for value in (cap, requested, physical) if value is not None)
     source = "cgroup" if requested is None else "configured budget"
     if requested is not None and cap is not None and cap < requested:
         source = "cgroup (lower than configured budget)"
+    if physical is not None and physical == budget and all(value is None or value > physical for value in (cap, requested)):
+        source = "physical memory (lower than configured or cgroup budget)"
     policy = policy_values(args)
     infrastructure = max(256 * MIB, budget * bounded(policy["RESOURCE_RESERVE_PERCENT"], "RESOURCE_RESERVE_PERCENT", 5, 75) // 100)
     # Each MCP domain has a 256-MiB process ceiling. Reserve its
@@ -429,10 +456,239 @@ def plan(args) -> dict:
             "endpoints": effective}
 
 
+def selected_settings(item: dict) -> dict:
+    """Read only resource fields from the selected immutable generation."""
+    root = Path(item["root"]) / "active"
+    result = {}
+    limits = root / "limits.conf"
+    mapping = {"MemoryMax": "MEMORY_MAX", "MemoryHigh": "MEMORY_HIGH", "CPUQuota": "CPU_QUOTA",
+               "TasksMax": "TASKS_MAX", "LimitNOFILE": "NOFILE"}
+    if limits.is_file():
+        for line in limits.read_text().splitlines():
+            key, separator, value = line.partition("=")
+            if separator and key in mapping:
+                if key.startswith("Memory") and value not in {"", "infinity"}:
+                    value = memory_bytes(value)
+                elif key in {"TasksMax", "LimitNOFILE"} and value.isdigit():
+                    value = int(value)
+                result[mapping[key]] = value
+    prefix = item["kind"].upper()
+    env_mapping = {f"{prefix}_{key}": key for key in ("WORKERS", "THREADS", "WARM_TRANSLATIONS")}
+    env_mapping.update({"GETBIBLE_" + key: key for key in (
+        "SHARED_CORPUS_LIMIT", "SHARED_CORPUS_BYTES", "CHAPTER_CACHE_BYTES", "TRANSLATION_CACHE_BYTES",
+        "TRANSLATION_CACHE_LIMIT", "CHAPTER_CACHE_LIMIT", "REFERENCE_CACHE_LIMIT", "SEARCH_CORPUS_LIMIT")})
+    env_mapping.update(GETBIBLE_CACHE_TTL_SECONDS="MEMORY_CACHE_TTL", GETBIBLE_CACHE_TTL_JITTER="CACHE_TTL_JITTER",
+                       SEARCH_MAX_CONCURRENT="SEARCH_MAX_CONCURRENT", SEARCH_MAX_CONCURRENT_EXPENSIVE="EXPENSIVE_CONCURRENT")
+    for key, raw in config(root / "runtime.env").items():
+        if key not in env_mapping:
+            continue
+        value = re.sub(r'\\([\\"])', r'\1', raw[1:-1]) if raw.startswith('"') and raw.endswith('"') else raw
+        target = env_mapping[key]
+        if target == "CACHE_TTL_JITTER":
+            value = float(value)
+        elif target != "WARM_TRANSLATIONS" and value.isdigit():
+            value = int(value)
+        result[target] = value
+    return result
+
+
+def management_observations(args) -> dict:
+    """Read bounded sampler metadata and the existing read-only capacity view."""
+    storage = {"state": "unavailable", "progress": None, "usage": None}
+    state = Path(getattr(args, "storage_state", "/var/lib/getbible/storage"))
+    now = time.time()
+    for filename, key in (("progress.json", "progress"), ("usage.json", "usage")):
+        try:
+            with (state / filename).open() as stream:
+                data = json.loads(stream.read(65537))
+            if not isinstance(data, dict):
+                continue
+            allowed = {"status", "started_at", "completed_at", "generated_at", "updated_at", "used_bytes",
+                       "max_age_seconds", "error", "entries", "pending", "files", "directories",
+                       "allocated_bytes", "pending_directories", "duration_seconds"}
+            storage[key] = {name: value for name, value in data.items() if name in allowed}
+        except (OSError, ValueError):
+            continue
+    usage = storage["usage"] or {}
+    observed = usage.get("started_at", usage.get("generated_at"))
+    if isinstance(observed, (float, int)):
+        age = now - observed
+        horizon = usage.get("max_age_seconds", 120)
+        storage["age_seconds"] = max(0, age)
+        storage["state"] = "fresh" if isinstance(horizon, (int, float)) and 0 <= age <= horizon and usage.get("status", "complete") == "complete" else "stale"
+    root = Path(__file__).resolve().parent
+    for path in (root / "apps/telemetry", root.parent / "apps/telemetry"):
+        if path.is_dir():
+            sys.path.insert(0, str(path))
+            break
+    try:
+        from getbible_telemetry.diagnostics import read_capacity
+        capacity = read_capacity(getattr(args, "telemetry_db", "/var/lib/getbible/telemetry/traffic.sqlite3"),
+                                 getattr(args, "config", "/etc/getbible/getbible.conf"),
+                                 getattr(args, "environment", "/run/getbible/environment.conf"))
+    except ImportError:
+        capacity = {"state": "unavailable", "note": "Capacity reader is not installed; inspect getbible capacity after updating management services."}
+    return {"storage_accounting": storage, "capacity": capacity}
+
+
+def realignment(args) -> dict:
+    """Offer a conservative, reviewable allocation without changing policy."""
+    proc = Path(args.proc_root)
+    limits = cgroup_limits(proc, Path(args.cgroup_root) if args.cgroup_root else None, owner="1")
+    physical, available = host_memory(proc), available_memory(proc)
+    totals = [value for value in (physical, limits["memory"]) if value is not None]
+    total = min(totals) if totals else None
+    # MemAvailable can describe the host in a container. The current usage at
+    # the limiting ancestor supplies a stricter bound when that value exists.
+    if limits["memory_path"]:
+        usage = Path(limits["memory_path"]).with_name("memory.current")
+        if usage.is_file():
+            remaining = max(0, limits["memory"] - int(usage.read_text()))
+            available = min(remaining, available) if available is not None else remaining
+    hardware = {"physical_memory_bytes": physical, "effective_memory_bytes": total,
+                "available_memory_bytes": available, "cgroup_memory_bytes": limits["memory"],
+                "cpu_capacity": limits["cpus"], "storage": []}
+    for entry in getattr(args, "storage_path", []) or []:
+        name, separator, raw = entry.partition("=")
+        if not separator or not name or not raw:
+            raise ValueError("Storage observations require NAME=PATH.")
+        path = Path(raw)
+        observation = {"name": name, "path": str(path)}
+        try:
+            stats = os.statvfs(path)
+            observation.update(status="observed", total_bytes=stats.f_blocks * stats.f_frsize,
+                               available_bytes=stats.f_bavail * stats.f_frsize,
+                               total_inodes=stats.f_files, available_inodes=stats.f_favail)
+        except OSError as error:
+            observation.update(status="unavailable", error=error.strerror)
+        hardware["storage"].append(observation)
+    saved = config(Path(getattr(args, "config", "/etc/getbible/getbible.conf")))
+    authoritative = set(getattr(args, "authoritative", []) or [])
+    owner = "environment" if "MEMORY_BUDGET" in authoritative else "saved global" if "MEMORY_BUDGET" in saved else "default"
+    proposed = getattr(args, "realign_budget", None) or args.budget
+    reason, assumption = "", "Existing explicit settings remain authoritative; targets are bounded by effective hardware."
+    if args.mode == "native" and proposed in {"", "auto", "off"}:
+        assumption = ("Native recommendation reserves 25% of effective RAM (at least 256 MiB) from both total and "
+                      "currently available RAM. Existing runtime allocations are not counted as reclaimable. "
+                      "This is a conservative starting point, not a workload benchmark; use --memory-budget for a deliberate shared-host allocation.")
+        reserve = max(256 * MIB, total // 4) if total is not None else None
+        if total is None or available is None:
+            reason = "Cannot recommend a native budget without total and available memory; provide --memory-budget."
+        else:
+            recommendation = max(0, min(total, available) - reserve) // MIB
+            if recommendation:
+                proposed = f"{recommendation}M"
+            else:
+                reason = "Available memory does not leave the native host reserve; free capacity or provide a deliberate --memory-budget."
+    budget_changed = proposed != args.budget
+    if budget_changed and owner == "environment":
+        reason = "MEMORY_BUDGET is environment-controlled; change GETBIBLE_MEMORY_BUDGET at its deployment source and rerun the plan."
+    allocation = None
+    proposal = argparse.Namespace(**vars(args))
+    proposal.budget = proposed
+    try:
+        if not reason:
+            allocation = plan(proposal)
+            if not allocation["enabled"]:
+                reason = "Aggregate runtime budgeting is not enabled."
+    except (ValueError, OSError, subprocess.SubprocessError) as error:
+        reason = str(error)
+    comparisons = []
+    entries = inventory(Path(args.registry), Path(args.runtime_root))
+    policies = policy_values(args)
+    for item in entries:
+        selected = selected_settings(item)
+        target = next((row["settings"] for row in (allocation or {}).get("endpoints", [])
+                       if row["domain"] == item["domain"] and row["label"] == item["label"]), {})
+        owners = {}
+        for key in policies:
+            if key.startswith("_") or key.startswith(("QUERY_", "SEARCH_")) and not key.startswith(item["kind"].upper() + "_"):
+                continue
+            endpoint_key = key.removeprefix(item["kind"].upper() + "_")
+            owners[endpoint_key] = ("environment" if key in authoritative else "endpoint" if endpoint_key in item["config"]
+                                    else "saved global" if key in saved else "default")
+        for key in ("WORKERS", "THREADS"):
+            owners[key] = "endpoint" if key in item["config"] else "automatic default"
+        ignored = {"WORKERS_MIN", "WORKERS_MAX"}
+        if item["kind"] == "query":
+            ignored.update(("SEARCH_MAX_CONCURRENT", "EXPENSIVE_CONCURRENT"))
+        differences = {key: {"current": selected.get(key), "proposed": value} for key, value in target.items()
+                       if key not in ignored and selected.get(key) != value}
+        comparisons.append({"domain": item["domain"], "label": item["label"], "kind": item["kind"],
+                            "selected": selected, "target": target, "differences": differences, "policy_owners": owners})
+    changed = {row["domain"] for row in comparisons if row["differences"]}
+    reductions = domain_changes(allocation, True) if allocation else []
+    domains = [name for name in reductions if name in changed] + sorted(changed - set(reductions))
+    # Exclude changing utilization, filesystem free space and timestamps. The
+    # accepted budget and every selected/target resource field remain covered.
+    inputs = {"mode": args.mode, "memory": total, "cgroup": limits["memory"], "cpus": limits["cpus"],
+              "budget": proposed, "configured_budget": args.budget, "owner": owner,
+              "policy": {key: value for key, value in policies.items() if key != "_authoritative"},
+              "authoritative": sorted(authoritative), "endpoints": comparisons}
+    plan_id = hashlib.sha256(json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return {"plan_id": plan_id, "ready": not reason, "status": "blocked" if reason else "ready", "reason": reason,
+            "hardware": hardware, "memory_budget": {"current": args.budget, "proposed": proposed, "owner": owner,
+                                                     "change": budget_changed, "assumption": assumption},
+            "allocation": allocation, "endpoints": comparisons, "domains": domains,
+            "management": management_observations(args),
+            "limitations": ["Storage figures are filesystem availability, not corpus usage; no data tree is scanned and no storage quota is changed.",
+                            "Storage guard and telemetry collector retain separate service limits. Runtime realignment does not repair their failures or raise those limits.",
+                            "Deployment CPU/memory caps remain operator-owned. Measurements under representative traffic determine throughput; this plan is not a universal optimum.",
+                            "Apply uses normal runtime deployments for the listed domains and the installed manager's current code/configuration; it may also bring those domains to the installed runtime code version.",
+                            "Selected settings describe the active generation files; normal readiness and live cgroup overlap checks remain required during apply."]}
+
+
+def print_realignment(result: dict) -> None:
+    hardware, budget = result["hardware"], result["memory_budget"]
+    def mib(value):
+        return "unknown" if value is None else f"{value // MIB} MiB"
+    print(f"Hardware realignment: {result['status']}; plan {result['plan_id']}")
+    print(f"Effective CPU: {hardware['cpu_capacity']:g}; RAM: {mib(hardware['effective_memory_bytes'])}; currently available: {mib(hardware['available_memory_bytes'])}")
+    print(f"Memory budget: {budget['current']} -> {budget['proposed']} (owner: {budget['owner']})")
+    print(budget["assumption"])
+    for row in result["endpoints"]:
+        print(f"  {row['domain']} {row['label']} ({row['kind']}): {len(row['differences'])} resource changes")
+        for key, change in row["differences"].items():
+            print(f"    {key}: {change['current'] if change['current'] is not None else 'unknown'} -> {change['proposed']}")
+        print("    Policy owners: " + ", ".join(f"{key}={value}" for key, value in row["policy_owners"].items()
+                                                if value in {"environment", "endpoint"}))
+    for row in hardware["storage"]:
+        if row["status"] == "observed":
+            print(f"  Storage {row['name']}: {mib(row['available_bytes'])} available / {mib(row['total_bytes'])}; {row['available_inodes']} free inodes")
+        else:
+            print(f"  Storage {row['name']}: observation unavailable ({row['error']})")
+    management = result.get("management", {})
+    storage = management.get("storage_accounting", {})
+    print(f"Storage accounting: {storage.get('state', 'unavailable')}; sampler progress: {(storage.get('progress') or {}).get('status', 'unavailable')}; age: {storage.get('age_seconds', 'unknown')} seconds")
+    capacity = management.get("capacity", {})
+    collection = capacity.get("collection", {})
+    reclamation = collection.get("reclamation", {})
+    print(f"Capacity evidence: {capacity.get('state', 'unavailable')}; collection: {collection.get('state', 'unknown')}; reclamation: {reclamation.get('state', 'unknown')}")
+    if capacity.get("note"):
+        print(capacity["note"])
+    if reclamation.get("reason"):
+        print("Reclamation: " + reclamation["reason"])
+    for row in capacity.get("limits", []):
+        advice = row.get("recommendation", {})
+        print(f"  {row.get('label', row.get('id', 'Capacity'))}: {advice.get('status', 'unknown')}; {advice.get('reason', '')}")
+    if result["reason"]:
+        print("Blocked: " + result["reason"])
+    for note in result["limitations"]:
+        print(note)
+    print("No settings changed. Use resources realign --apply to apply a freshly checked plan.")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("native", "docker"), default="native")
     parser.add_argument("--budget", default="auto")
+    parser.add_argument("--realign", action="store_true", help="Read-only hardware and selected-versus-target review.")
+    parser.add_argument("--realign-budget", help="Explicit budget to review; does not save configuration.")
+    parser.add_argument("--config", default="/etc/getbible/getbible.conf")
+    parser.add_argument("--storage-path", action="append", default=[], metavar="NAME=PATH")
+    parser.add_argument("--storage-state", default="/var/lib/getbible/storage")
+    parser.add_argument("--telemetry-db", default="/var/lib/getbible/telemetry/traffic.sqlite3")
+    parser.add_argument("--environment", default="/run/getbible/environment.conf")
     parser.add_argument("--policy", action="append", default=[], metavar="KEY=VALUE")
     parser.add_argument("--authoritative", action="append", default=[])
     parser.add_argument("--adaptive-state", default="/var/lib/getbible/adaptive.json")
@@ -450,6 +706,15 @@ def main() -> int:
     parser.add_argument("--format", choices=("json", "text", "env", "domains", "reductions", "changes"), default="text")
     args = parser.parse_args()
     try:
+        if args.realign:
+            if args.format not in {"json", "text"}:
+                raise ValueError("Realignment supports text or JSON output.")
+            result = realignment(args)
+            if args.format == "json":
+                print(json.dumps(result, indent=2))
+            else:
+                print_realignment(result)
+            return 0
         if args.wait_drain:
             wait_drain(args)
             return 0

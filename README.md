@@ -51,6 +51,10 @@ describes the official MCP service at [https://mcp.getbible.net/](https://mcp.ge
   retention, analytics with total calls and unique callers, Telegram
   notifications for every change, Cloudflare integration, manager updates
   from the menu or one command, application updates and generation rollback.
+- **Hardware alignment**: `getbible resources realign` reviews effective
+  CPU/RAM, filesystem headroom, configuration ownership and proposed runtime
+  allocations. Add `--apply` to activate a freshly checked plan through healthy
+  runtime generations. See [resource controls](docs/RUNTIME_RESOURCES.md#review-and-realign-hardware-allocation).
 - **Staged deployments**: a domain can be installed and verified on a
   server its DNS does not point to yet, with a placeholder certificate in
   managed TLS mode or the HTTP origin in external TLS mode, and

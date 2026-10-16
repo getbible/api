@@ -126,6 +126,56 @@ is exactly 30 days. CDN cache hits are not visible in origin traffic statistics.
 
 ## Operator controls
 
+### Review and realign hardware allocation
+
+```sh
+getbible resources realign
+getbible resources realign --json
+getbible resources realign --apply
+```
+
+The first two commands are read-only. They report effective CPU capacity,
+physical and cgroup-limited RAM, available memory, filesystem byte/inode
+headroom, configuration ownership, and selected versus proposed runtime
+settings. They do not walk the Bible corpus or initialize an installation.
+The existing capacity observations also distinguish collection/reclamation
+problems from a request for more storage. Missing or stale observations are
+reported explicitly.
+
+Docker uses its finite effective cgroup memory allowance; the container cannot
+raise the deployment's CPU or memory ceiling. An existing explicit application
+budget is retained. Native installations with `MEMORY_BUDGET=auto` receive a
+conservative proposal derived from both total and currently available memory,
+leaving at least 25% of effective RAM (with a 256-MiB floor) for the host.
+Existing runtime memory is not assumed reclaimable. The runtime allocator
+then reserves infrastructure and deployment-overlap capacity within that
+application budget. This is a starting allocation, not a throughput benchmark.
+An operator can supply a deliberate shared-host budget with
+`resources realign --memory-budget 4G` and review it before adding `--apply`.
+After changing native hardware, `resources realign --memory-budget auto`
+requests a new automatic recommendation instead of retaining a saved budget.
+
+Every proposal has a plan identifier. `--expected-plan` accepts that identifier
+to reject changed hardware, configuration or selected-generation settings.
+When replaying a native automatic proposal later, pass its displayed proposed
+`--memory-budget` as well as `--expected-plan`; otherwise changed available RAM
+may produce a different proposal. The menu preserves both values internally.
+Apply rechecks the plan under the manager lock, saves only an editable memory
+budget when needed, and applies changed runtime domains through the existing
+candidate-readiness, nginx validation/reload and drain transactions. Reductions
+are applied before increases. As with `resources apply`, these transactions use
+the installed manager's current runtime code and configuration for the selected
+domains. A failed candidate retains its serving generation;
+the command reports an incomplete application rather than claiming success.
+Environment-owned settings must be changed at their deployment source.
+Deliberately configured endpoint workers, cache policies and limits remain
+subject to their existing precedence and hardware bounds.
+
+The same review and apply controls are available under Settings > Deployment
+settings > Hardware alignment and runtime memory budget. Alignment does not
+increase telemetry allowances to conceal failed cleanup, remove data, change
+storage admission policy, or change the host's container configuration.
+
 ```sh
 getbible runtime query.example.org cache v2 info
 getbible runtime query.example.org cache v2 warm kjv
@@ -156,15 +206,42 @@ them. Public query/search HTTP routes never expose these controls.
 `GETBIBLE_STORAGE_MAX_GIB=0` disables application storage admission. With a
 positive cap, an independent root timer records managed allocated disk blocks
 without reading file contents, deduplicating hard-linked releases. It samples
-again 30 seconds after the previous sample finishes, independently of resource
-applications, and has a 75-second execution timeout. It is inactive when the
-storage cap is disabled. Startup obtains the first snapshot before sync services
-can publish.
+in bounded slices, 30 seconds after the previous invocation finishes,
+independently of resource applications. Each slice has a 75-second systemd
+deadline and normally yields after 20 seconds. A disk-backed directory queue,
+checkpointed totals and hard-link index preserve completed work across timer
+runs and process interruption without retaining the corpus's inode identities
+in Python memory. Incomplete scans never replace the last complete snapshot.
+It exits without scanning when the storage cap is disabled. Startup begins
+the first slice; budgeted publication waits until a complete snapshot exists.
+
+`STORAGE_SCAN_MAX_SECONDS` (default `900`, supported range `120`–`86400`)
+limits the wall-clock horizon of a whole scan, including timer waits. Its
+deployment override is `GETBIBLE_STORAGE_SCAN_MAX_SECONDS`. Exceeding the
+horizon or encountering an unreadable directory records a failure and retains
+the last complete accounting. The next invocation starts a new scan. Progress
+and the last error are recorded in `progress.json`; scan work is private under
+the storage state's `.scan` directory. No partial count authorizes publication.
+
+A complete snapshot records its start, completion and duration. Freshness is
+measured from its start and is bounded by twice the configured scan horizon
+plus 40 seconds for timer/scheduling margin. This allows consecutive bounded
+scans to complete without the old fixed 120-second freshness window expiring
+mid-scan. Legacy snapshots retain the 120-second window. Increasing the scan
+horizon therefore also increases the tolerated accounting age; do so only
+when the observed corpus traversal needs it. This admission estimate is not
+a strict physical disk quota.
 Trusted sync services reserve conservative projected export space under one
 shared lock before export, and recheck before publication. Stale accounting or
 insufficient budget refuses publication and preserves current and rollback
-releases. Successful/failed sync exits release their reservation; crashed leases
-expire after 24 hours. Snapshot and reservations live in
+releases. Failed exports release their reservation only after their staged files
+are removed; failed cleanup retains a committed charge for the orphaned files.
+Successful publications retain a committed charge until a complete snapshot
+whose scan started after publication covers the added storage. Sequential
+publications therefore cannot reuse unaccounted headroom between scans.
+Uncommitted crashed leases expire
+after 24 hours; committed charges do not expire merely with time.
+Snapshot and reservations live in
 `/var/lib/getbible/storage`.
 
 This is an application admission guard, not a filesystem quota. Git fetches,
@@ -173,6 +250,16 @@ outstanding reservations may conservatively count some storage twice. A strict
 physical bound requires a host-supported filesystem quota. Never remove the
 live corpus to reclaim room. Telemetry has its own oldest-first retention cap;
 the dashboard reports both budgets and measured usage.
+
+Service failure alerts share durable incident records under
+`/var/lib/getbible/telemetry/service-alerts` between systemd and the collector.
+The first failure reports the unit's result and exit status;
+continuing failures send bounded reminders instead of one message per retry.
+A retry in `activating` state or `reset-failed` is not recovery. Storage recovery
+also requires a newer complete, fresh accounting snapshot. An ingested rotated
+telemetry spool is not necessarily closed: `getbible capacity --json` reports
+the reclamation reason before any safe removal. Keep unread files and files
+with writable descriptors intact.
 
 ## Verification
 
