@@ -234,10 +234,12 @@ a strict physical disk quota.
 Trusted sync services reserve conservative projected export space under one
 shared lock before export, and recheck before publication. Stale accounting or
 insufficient budget refuses publication and preserves current and rollback
-releases. Failed exports release their reservation. Successful publications
-retain a committed charge until a complete snapshot whose scan started after
-publication covers the added storage. Sequential publications therefore cannot
-reuse unaccounted headroom between scans. Uncommitted crashed leases expire
+releases. Failed exports release their reservation only after their staged files
+are removed; failed cleanup retains a committed charge for the orphaned files.
+Successful publications retain a committed charge until a complete snapshot
+whose scan started after publication covers the added storage. Sequential
+publications therefore cannot reuse unaccounted headroom between scans.
+Uncommitted crashed leases expire
 after 24 hours; committed charges do not expire merely with time.
 Snapshot and reservations live in
 `/var/lib/getbible/storage`.

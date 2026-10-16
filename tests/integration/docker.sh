@@ -287,6 +287,57 @@ container bash -Eeuo pipefail -c 'for kind in query search; do
     "/opt/getbible/$kind/v2/current/.venv/bin/python" -m pip check
 done'
 container getbible resources --json | python3 -c 'import json,sys; p=json.load(sys.stdin); assert p["enabled"] and p["cgroup_limit_bytes"] == 4*1024**3 and p["budget_bytes"] <= 4*1024**3; assert len(p["endpoints"]) == 2 and p["mcp_reserve_bytes"] >= 512*1024**2'
+# A saved cache policy creates a real alignment change without changing the
+# container cap or the later recreation fixture's authoritative 35% policy.
+manager settings set CACHE_MEMORY_PERCENT 45
+REALIGN_CONFIG="$(container sha256sum /etc/getbible/getbible.conf)"
+manager resources realign --json > "$TEST_ROOT/realign-before.json"
+[[ "$(container sha256sum /etc/getbible/getbible.conf)" == "$REALIGN_CONFIG" ]]
+REALIGN_PLAN="$(python3 - "$TEST_ROOT/realign-before.json" <<'PYREALIGN'
+import json, sys
+plan = json.load(open(sys.argv[1]))
+assert plan["ready"], plan
+assert len(plan["endpoints"]) == 2 and len(plan["domains"]) == 2, plan
+assert plan["memory_budget"]["proposed"] == "auto" and not plan["memory_budget"]["change"], plan
+print(plan["plan_id"])
+PYREALIGN
+)"
+manager resources realign --expected-plan "$REALIGN_PLAN" --apply --json > "$TEST_ROOT/realign-applied.json"
+manager resources realign --json > "$TEST_ROOT/realign-after.json"
+python3 - "$TEST_ROOT/realign-applied.json" "$TEST_ROOT/realign-after.json" <<'PYREALIGN'
+import json, sys
+application = json.load(open(sys.argv[1]))["application"]
+assert application["status"] == "complete" and not application["pending_domains"], application
+assert len(application["applied_domains"]) == 2, application
+plan = json.load(open(sys.argv[2]))
+assert plan["ready"] and not plan["domains"], plan
+assert all(not item["differences"] for item in plan["endpoints"]), plan
+print("Docker hardware alignment has no pending allocation differences")
+PYREALIGN
+container /usr/bin/python3 - <<'PYREALIGN'
+from pathlib import Path
+import subprocess
+
+for kind in ("query", "search"):
+    active = Path(f"/opt/getbible/{kind}/v2/active").resolve()
+    unit = f"getbible-{kind}-v2-{active.name}.service"
+    def unit_value(key):
+        return subprocess.check_output(["systemctl", "show", "--property=" + key, "--value", unit], text=True).strip()
+    values = dict(entry.split("=", 1) for entry in Path(f"/proc/{unit_value('MainPID')}/environ").read_text().split("\0") if "=" in entry)
+    cache = sum(int(values[name]) for name in ("GETBIBLE_SHARED_CORPUS_BYTES", "GETBIBLE_CHAPTER_CACHE_BYTES", "GETBIBLE_TRANSLATION_CACHE_BYTES"))
+    assert cache == int(unit_value("MemoryMax")) // int(values[kind.upper() + "_WORKERS"]) * 45 // 100, (kind, cache)
+    print(f"Docker {kind} process uses the realigned cache allocation")
+PYREALIGN
+runtime_generations > "$TEST_ROOT/realign-generations"
+manager resources realign --apply --json > "$TEST_ROOT/realign-noop.json"
+python3 -c 'import json,sys; p=json.load(open(sys.argv[1]))["application"]; assert p["status"] == "complete" and not p["applied_domains"] and not p["pending_domains"],p' "$TEST_ROOT/realign-noop.json"
+runtime_generations > "$TEST_ROOT/realign-generations-noop"
+cmp "$TEST_ROOT/realign-generations" "$TEST_ROOT/realign-generations-noop"
+for kind in query search; do
+    container curl --fail --silent -H "Host: $kind.example.test" http://127.0.0.1/readyz \
+        | python3 -c 'import json,sys; assert json.load(sys.stdin)["status"] == "ready"'
+done
+container /usr/share/getbible/api/docker/healthcheck.sh
 # Write from inside the running mount namespace: systemd's private temporary
 # mounts must not hide a fixture copied through Docker's archive endpoint.
 container sh -c 'cat > /run/getbible/infrastructure-ci.py' < "$ROOT/tests/integration/infrastructure.py"
