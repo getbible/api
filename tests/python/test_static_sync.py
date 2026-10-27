@@ -144,6 +144,77 @@ class StaticSyncTest(unittest.TestCase):
         self.sync(GB_SYNC_STORAGE_MAX_GIB="1", GETBIBLE_STORAGE_MAX_GIB="000000", **settings)
         self.assertNotEqual(self.live.resolve(), first)
 
+    def test_published_storage_charge_survives_until_a_new_sample(self) -> None:
+        import time
+        state = self.root / "storage"
+        state.mkdir()
+        (state / "usage.json").write_text(json.dumps({"generated_at": time.time(), "used_bytes": 0}))
+        settings = {"GB_SYNC_STORAGE_MAX_GIB": "1", "GB_SYNC_STORAGE_STATE": str(state),
+                    "GB_STORAGE_GUARD": str(BIN / "getbible-storage-guard")}
+        self.sync(**settings)
+        charges = json.loads((state / "reservations.json").read_text())
+        self.assertEqual(len(charges), 1)
+        charge = next(iter(charges.values()))
+        self.assertGreater(charge["committed_at"], 0)
+        self.assertGreater(charge["bytes"], 0)
+        self.payload("next publication")
+        self.commit()
+        self.sync(**settings)
+        charges = json.loads((state / "reservations.json").read_text())
+        self.assertEqual(len(charges), 2)
+        self.assertTrue(all(value.get("committed_at") for value in charges.values()))
+
+    def test_failed_export_keeps_charge_until_cleanup_succeeds(self) -> None:
+        import time
+        self.sync()
+        current = self.live.resolve()
+        self.payload("failed replacement")
+        self.commit()
+        exporter = self.root / "failed-exporter"
+        exporter.write_text('#!/usr/bin/env bash\nprintf "partial export\\n" > "$4/partial.json"\nexit 23\n')
+        exporter.chmod(0o755)
+        commands = self.root / "cleanup-bin"
+        commands.mkdir()
+        remover = commands / "rm"
+        remover.write_text("""#!/usr/bin/env python3
+import json
+import os
+import sys
+from pathlib import Path
+
+if sys.argv[-1].startswith(os.environ["SYNC_TEST_RELEASES"] + "/"):
+    state = Path(os.environ["SYNC_TEST_STORAGE"])
+    charges = json.loads((state / "reservations.json").read_text())
+    # The reservation must still protect the staged files during removal.
+    (state / "charges-at-removal.json").write_text(json.dumps(charges))
+    if os.environ["SYNC_TEST_REFUSE_REMOVAL"] == "1":
+        sys.exit(1)
+os.execv(os.environ["SYNC_TEST_REAL_RM"], ["rm", *sys.argv[1:]])
+""")
+        remover.chmod(0o755)
+        for refuse in (False, True):
+            with self.subTest(refuse_removal=refuse):
+                state = self.root / f"storage-cleanup-{refuse}"
+                state.mkdir()
+                (state / "usage.json").write_text(json.dumps({"generated_at": time.time(), "used_bytes": 0}))
+                result = self.sync(success=False, GB_SYNC_STORAGE_MAX_GIB="1", GB_SYNC_STORAGE_STATE=str(state),
+                                   GB_STORAGE_GUARD=str(BIN / "getbible-storage-guard"), GB_EXPORT=str(exporter),
+                                   PATH=str(commands) + os.pathsep + os.environ["PATH"],
+                                   SYNC_TEST_RELEASES=str(self.data / "releases/v2"), SYNC_TEST_STORAGE=str(state),
+                                   SYNC_TEST_REFUSE_REMOVAL="1" if refuse else "0", SYNC_TEST_REAL_RM=shutil.which("rm"))
+                protected = json.loads((state / "charges-at-removal.json").read_text())
+                self.assertEqual(len(protected), 1)
+                self.assertNotIn("committed_at", next(iter(protected.values())))
+                charges = json.loads((state / "reservations.json").read_text())
+                if refuse:
+                    self.assertEqual(len(charges), 1)
+                    self.assertGreater(next(iter(charges.values()))["committed_at"], 0)
+                    self.assertIn("unpublished release cleanup failed", result.stderr)
+                else:
+                    self.assertEqual(charges, {})
+                self.assertEqual(self.live.resolve(), current)
+                self.assertEqual(len(list((self.data / "releases/v2").iterdir())), 2 if refuse else 1)
+
     def test_invalid_storage_limit_fails_before_creating_sync_directories(self) -> None:
         for value in ("-1", "1.5", "nan", "1000000", "1e2", "1;true", ""):
             with self.subTest(value=value):

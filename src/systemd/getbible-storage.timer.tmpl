@@ -3,8 +3,9 @@ Description=Keep getBible storage admission accounting current
 
 [Timer]
 OnBootSec=10s
-# With the 75-second service deadline, this interval keeps a successful sample
-# within the admission guard's 120-second freshness window.
+# Resume unfinished accounting without discarding completed scan work.
+# Complete snapshots carry a freshness window derived from the bounded whole
+# scan horizon, this 30-second interval and scheduling allowance.
 OnUnitInactiveSec=30s
 AccuracySec=1s
 Unit=getbible-storage.service

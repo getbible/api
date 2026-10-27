@@ -8,12 +8,16 @@ hard physical storage limit is required.
 """
 from __future__ import annotations
 import argparse
+from contextlib import closing
 import fcntl
 import json
+import math
 import os
 from pathlib import Path
 import re
+import sqlite3
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -21,6 +25,9 @@ import time
 
 DEFAULT_ROOTS = ("/srv/getbible", "/opt/getbible", "/var/cache/getbible", "/var/cache/nginx/getbible",
                  "/var/log/getbible", "/var/lib/getbible", "/var/backups/getbible", "/var/www/getbible", "/etc/getbible")
+SCAN_MAX_SECONDS = 900
+SCAN_SLICE_SECONDS = 20
+SAMPLE_INTERVAL_SECONDS = 30
 
 
 def write_json(path, data, mode):
@@ -36,30 +43,250 @@ def write_json(path, data, mode):
         Path(temporary).unlink(missing_ok=True)
 
 
+def scan_roots(roots):
+    """A union of lexical paths, without resolving/following a root symlink."""
+    paths = list(dict.fromkeys(os.path.abspath(root) for root in roots))
+    return [path for path in paths if not any(
+        other != path and os.path.commonpath((path, other)) == other for other in paths)]
+
+
+def inode_key(metadata):
+    return struct.pack("!QQ", metadata.st_dev, metadata.st_ino)
+
+
+def directory_entries(descriptor, cursor):
+    """Resume Linux readdir at the start of its last buffered block.
+
+    scandir duplicates the directory descriptor and shares its kernel offset.
+    That offset points AFTER readdir's buffer, not after the returned entry.
+    Replaying the buffer's START therefore cannot skip its unread entries.
+    Persisted entry names suppress this bounded replay after a checkpoint.
+    """
+    os.lseek(descriptor, cursor, os.SEEK_SET)
+    offset = buffer_start = cursor
+    with os.scandir(descriptor) as entries:
+        for entry in entries:
+            following = os.lseek(descriptor, 0, os.SEEK_CUR)
+            if following != offset:
+                buffer_start, offset = offset, following
+            yield entry, buffer_start
+
+
+def scan_progress(connection, started_at, status):
+    allocated, files = connection.execute("SELECT COALESCE(SUM(allocated),0), COALESCE(SUM(files),0) FROM roots").fetchone()
+    pending = connection.execute("SELECT COUNT(*) FROM directories WHERE done=0").fetchone()[0]
+    return {"status": status, "started_at": started_at, "updated_at": time.time(),
+            "allocated_bytes": allocated, "files": files, "pending_directories": pending}
+
+
+def account_file(connection, root_id, metadata):
+    identity = inode_key(metadata)
+    allocated, logical = metadata.st_blocks * 512, metadata.st_size
+    previous = connection.execute("SELECT root,allocated,logical FROM inodes WHERE inode=?", (identity,)).fetchone()
+    if previous is None:
+        connection.execute("INSERT INTO inodes VALUES (?,?,?,?)", (identity, root_id, allocated, logical))
+        connection.execute("UPDATE roots SET allocated=allocated+?, logical=logical+?, files=files+1 WHERE id=?",
+                           (allocated, logical, root_id))
+    else:
+        owner, old_allocated, old_logical = previous
+        # Replaying a changed directory neither double-counts unchanged files
+        # nor loses observed growth. Removed/replaced allocations are retained
+        # conservatively until the next complete scan.
+        allocated, logical = max(allocated, old_allocated), max(logical, old_logical)
+        if (allocated, logical) != (old_allocated, old_logical):
+            connection.execute("UPDATE inodes SET allocated=?,logical=? WHERE inode=?", (allocated, logical, identity))
+            connection.execute("UPDATE roots SET allocated=allocated+?,logical=logical+? WHERE id=?",
+                               (allocated - old_allocated, logical - old_logical, owner))
+
+
+def prepare_scan(connection, path, roots, max_seconds):
+    # This is disposable scan work, never serving data. Disk-backed queues and
+    # identities keep Python memory independent of corpus size. WAL transactions
+    # retain committed progress if systemd terminates an interrupted slice.
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA synchronous=FULL")
+    connection.execute("PRAGMA cache_size=-4096")
+    connection.execute("PRAGMA temp_store=FILE")
+    connection.execute("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    saved = dict(connection.execute("SELECT key,value FROM metadata"))
+    expected = {"schema": "3", "roots": json.dumps(roots), "max_seconds": str(max_seconds)}
+    if saved and any(saved.get(key) != value for key, value in expected.items()):
+        connection.close()
+        path.unlink()
+        return scan_database(path, roots, max_seconds)
+    if not saved:
+        connection.executescript("""
+            CREATE TABLE IF NOT EXISTS roots (id INTEGER PRIMARY KEY, path BLOB NOT NULL,
+                allocated INTEGER NOT NULL DEFAULT 0, logical INTEGER NOT NULL DEFAULT 0,
+                files INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS directories (id INTEGER PRIMARY KEY, root INTEGER NOT NULL,
+                path BLOB NOT NULL, inode BLOB UNIQUE NOT NULL, done INTEGER NOT NULL DEFAULT 0,
+                cursor INTEGER NOT NULL DEFAULT 0, mtime INTEGER NOT NULL DEFAULT 0, ctime INTEGER NOT NULL DEFAULT 0);
+            CREATE INDEX IF NOT EXISTS pending_directories ON directories(done,id);
+            CREATE TABLE IF NOT EXISTS entries (directory INTEGER NOT NULL, name BLOB NOT NULL,
+                PRIMARY KEY(directory,name)) WITHOUT ROWID;
+            CREATE TABLE IF NOT EXISTS inodes (inode BLOB PRIMARY KEY, root INTEGER NOT NULL,
+                allocated INTEGER NOT NULL, logical INTEGER NOT NULL) WITHOUT ROWID;
+        """)
+        for table in ("roots", "directories", "entries", "inodes"):
+            connection.execute(f"DELETE FROM {table}")
+        expected["started_at"] = str(time.time())
+        connection.executemany("INSERT INTO metadata VALUES (?,?)", expected.items())
+        for number, root in enumerate(roots):
+            connection.execute("INSERT INTO roots(id,path) VALUES (?,?)", (number, os.fsencode(root)))
+            try:
+                metadata = os.stat(root, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if stat.S_ISDIR(metadata.st_mode):
+                connection.execute("INSERT OR IGNORE INTO directories(root,path,inode) VALUES (?,?,?)",
+                                   (number, os.fsencode(root), inode_key(metadata)))
+        connection.commit()
+        saved = expected
+    return connection, float(saved["started_at"])
+
+
+def scan_database(path, roots, max_seconds):
+    connection = sqlite3.connect(path)
+    try:
+        return prepare_scan(connection, path, roots, max_seconds)
+    except BaseException:
+        connection.close()
+        raise
+
+
+def sample(roots, state, *, max_seconds=SCAN_MAX_SECONDS, slice_seconds=SCAN_SLICE_SECONDS):
+    """Resume bounded work; only a complete scan can replace usage.json.
+
+    Each checkpoint commits the directory cursor, names, hard-link identities
+    and totals together, so resuming cannot count a partial directory twice.
+    """
+    if not 120 <= max_seconds <= 86400 or not 0 < slice_seconds <= 60:
+        raise ValueError("Storage scan horizon must be 120..86400 seconds and slice must be at most 60 seconds.")
+    state = Path(state).absolute()
+    work = state / ".scan"
+    work.mkdir(mode=0o700, exist_ok=True)
+    info = work.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+        raise ValueError("Storage scan workspace must be a directory owned by the sampler.")
+    os.chmod(work, 0o700)
+    descriptor = os.open(work / "lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return {"status": "in_progress", "reason": "another sampler owns the active scan"}
+        database = work / "scan.sqlite3"
+        connection = None
+        started_at = time.time()
+        try:
+            connection, started_at = scan_database(database, scan_roots(roots), max_seconds)
+            elapsed = time.time() - started_at
+            if elapsed < -5 or elapsed >= max_seconds:
+                raise TimeoutError(f"Storage scan did not complete within its {max_seconds}-second horizon; last complete accounting was retained.")
+            deadline = time.monotonic() + min(slice_seconds, max_seconds - elapsed)
+            checkpoint_at = time.monotonic()
+            processed = 0
+            while row := connection.execute("SELECT id,root,path,inode,cursor,mtime,ctime FROM directories WHERE done=0 ORDER BY id LIMIT 1").fetchone():
+                directory_id, root_id, raw_path, identity, cursor, mtime, ctime = row
+                directory = os.fsdecode(raw_path)
+                try:
+                    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                except FileNotFoundError:
+                    connection.execute("UPDATE directories SET done=1 WHERE id=?", (directory_id,))
+                    connection.execute("DELETE FROM entries WHERE directory=?", (directory_id,))
+                    continue
+                try:
+                    current = os.fstat(descriptor)
+                    if inode_key(current) != identity:
+                        raise ValueError("A directory was replaced during storage sampling; restart accounting and retain the last complete snapshot.")
+                    if (current.st_mtime_ns, current.st_ctime_ns) != (mtime, ctime):
+                        cursor = 0
+                        connection.execute("DELETE FROM entries WHERE directory=?", (directory_id,))
+                    connection.execute("UPDATE directories SET mtime=?,ctime=? WHERE id=?",
+                                       (current.st_mtime_ns, current.st_ctime_ns, directory_id))
+                    with closing(directory_entries(descriptor, cursor)) as entries:
+                        for entry, buffer_start in entries:
+                            if time.monotonic() >= deadline:
+                                connection.execute("UPDATE directories SET cursor=? WHERE id=?", (buffer_start, directory_id))
+                                connection.commit()
+                                if time.time() - started_at >= max_seconds:
+                                    raise TimeoutError(f"Storage scan exceeded its {max_seconds}-second horizon; last complete accounting was retained.")
+                                progress = scan_progress(connection, started_at, "in_progress")
+                                write_json(state / "progress.json", progress, 0o640)
+                                return progress
+                            name = os.fsencode(entry.name)
+                            if connection.execute("SELECT 1 FROM entries WHERE directory=? AND name=?", (directory_id, name)).fetchone():
+                                continue
+                            path = os.path.join(directory, entry.name)
+                            # Never include the sampler's own growing queue/index
+                            # or its temporary atomic-write files in its usage.
+                            own_work = path == str(work) or (directory == str(state) and
+                                (entry.name == "progress.json" or entry.name.startswith(".storage-")))
+                            if not own_work:
+                                try:
+                                    metadata = entry.stat(follow_symlinks=False)
+                                except FileNotFoundError:
+                                    metadata = None
+                                if metadata is not None and stat.S_ISDIR(metadata.st_mode):
+                                    connection.execute("INSERT OR IGNORE INTO directories(root,path,inode) VALUES (?,?,?)",
+                                                       (root_id, os.fsencode(path), inode_key(metadata)))
+                                elif metadata is not None and stat.S_ISREG(metadata.st_mode):
+                                    account_file(connection, root_id, metadata)
+                            connection.execute("INSERT INTO entries VALUES (?,?)", (directory_id, name))
+                            processed += 1
+                            if processed % 256 == 0 or time.monotonic() - checkpoint_at >= 1:
+                                connection.execute("UPDATE directories SET cursor=? WHERE id=?", (buffer_start, directory_id))
+                                connection.commit()
+                                checkpoint_at = time.monotonic()
+                        after = os.fstat(descriptor)
+                        if (after.st_mtime_ns, after.st_ctime_ns) != (current.st_mtime_ns, current.st_ctime_ns):
+                            # Directory cookies may have changed. Replay names
+                            # to discover additions without double accounting.
+                            connection.execute("UPDATE directories SET cursor=0 WHERE id=?", (directory_id,))
+                            connection.execute("DELETE FROM entries WHERE directory=?", (directory_id,))
+                        else:
+                            connection.execute("UPDATE directories SET done=1 WHERE id=?", (directory_id,))
+                            connection.execute("DELETE FROM entries WHERE directory=?", (directory_id,))
+                        connection.commit()
+                finally:
+                    os.close(descriptor)
+            completed_at = time.time()
+            if completed_at - started_at > max_seconds:
+                raise TimeoutError(f"Storage scan exceeded its {max_seconds}-second horizon; last complete accounting was retained.")
+            totals = [{"path": os.fsdecode(path), "allocated_bytes": allocated, "logical_bytes": logical, "files": files}
+                      for path, allocated, logical, files in connection.execute("SELECT path,allocated,logical,files FROM roots ORDER BY id")]
+            report = {"status": "complete", "generated_at": started_at, "started_at": started_at,
+                      "completed_at": completed_at, "duration_seconds": completed_at - started_at,
+                      "max_age_seconds": 2 * max_seconds + SAMPLE_INTERVAL_SECONDS + 10,
+                      "used_bytes": sum(item["allocated_bytes"] for item in totals), "roots": totals,
+                      "measurement": "allocated_blocks_deduplicated_by_inode", "hard_quota": False}
+            write_json(state / "usage.json", report, 0o640)
+            write_json(state / "progress.json", scan_progress(connection, started_at, "complete"), 0o640)
+            connection.close()
+            connection = None
+            database.unlink()
+            return report
+        except (OSError, ValueError, sqlite3.Error) as error:
+            if connection is not None:
+                connection.close()
+                connection = None
+            database.unlink(missing_ok=True)
+            write_json(state / "progress.json", {"status": "failed", "started_at": started_at,
+                       "updated_at": time.time(), "error": str(error)}, 0o640)
+            raise
+        finally:
+            if connection is not None:
+                connection.close()
+
+
 def snapshot(roots):
-    seen = set()
-    totals = []
-    for root in roots:
-        allocated = logical = files = 0
-        root = Path(root)
-        if root.exists() and not root.is_symlink():
-            for directory, names, filenames in os.walk(root, followlinks=False):
-                names[:] = [name for name in names if not (Path(directory) / name).is_symlink()]
-                for name in filenames:
-                    try:
-                        metadata = (Path(directory) / name).lstat()
-                    except FileNotFoundError:
-                        continue
-                    identity = (metadata.st_dev, metadata.st_ino)
-                    if identity in seen or not stat.S_ISREG(metadata.st_mode):
-                        continue
-                    seen.add(identity)
-                    allocated += metadata.st_blocks * 512
-                    logical += metadata.st_size
-                    files += 1
-        totals.append({"path": str(root), "allocated_bytes": allocated, "logical_bytes": logical, "files": files})
-    return {"generated_at": time.time(), "used_bytes": sum(item["allocated_bytes"] for item in totals),
-            "roots": totals, "measurement": "allocated_blocks_deduplicated_by_inode", "hard_quota": False}
+    """Synchronous diagnostic snapshot; periodic production sampling resumes."""
+    with tempfile.TemporaryDirectory(prefix="getbible-storage-") as state:
+        while True:
+            report = sample(roots, state)
+            if report["status"] == "complete":
+                return report
 
 
 def estimate_export(checkout, revision):
@@ -93,16 +320,40 @@ def admission(args):
         except FileNotFoundError:
             reservations = {}
         if args.action == "release":
+            if reservations.get(args.id, {}).get("committed_at") is not None:
+                return {"released": False, "retained_committed": args.id}
             reservations.pop(args.id, None)
             write_json(directory / "reservations.json", reservations, 0o660)
             return {"released": args.id}
+        if args.action == "commit":
+            if args.id in reservations:
+                reservations[args.id].setdefault("committed_at", time.time())
+                write_json(directory / "reservations.json", reservations, 0o660)
+            return {"committed": args.id}
         usage = json.loads((directory / "usage.json").read_text())
         now = time.time()
-        if now - usage["generated_at"] > args.max_age or usage["generated_at"] > now + 5:
+        max_age = args.max_age if args.max_age is not None else usage.get("max_age_seconds", 120)
+        observed_at = usage.get("started_at", usage["generated_at"])
+        completed_at = usage.get("completed_at", usage["generated_at"])
+        if (not isinstance(max_age, (float, int)) or not 0 < max_age <= 2 * 86400 + 40
+                or not isinstance(observed_at, (float, int)) or not math.isfinite(observed_at)
+                or not isinstance(completed_at, (float, int)) or not math.isfinite(completed_at)
+                or completed_at < observed_at or completed_at > now + 5
+                or usage.get("status", "complete") != "complete"):
+            raise ValueError("Storage accounting is incomplete or invalid; keep the current publication.")
+        if now - observed_at > max_age or observed_at > now + 5:
             raise ValueError("Storage accounting is stale; keep the current publication and retry after the sampler runs.")
-        # A crashed sync's lease eventually expires; normal exits release it in
-        # their trap. Retained corpus generations themselves are never deleted.
-        reservations = {key: value for key, value in reservations.items() if now - value["created_at"] < 86400}
+        # Failed exports release their estimates. Successful publications keep
+        # their charge until a complete scan STARTED after publication. A scan
+        # already in progress might have visited that tree before it changed.
+        # Only uncommitted crashed leases expire by age; published data remains.
+        reservations = {key: value for key, value in reservations.items()
+                        if (value["committed_at"] > observed_at if value.get("committed_at") is not None
+                            else now - value["created_at"] < 86400)}
+        if reservations.get(args.id, {}).get("committed_at") is not None:
+            raise ValueError("A committed storage reservation cannot be reused until complete accounting covers its publication.")
+        if args.action == "check" and args.id not in reservations:
+            raise ValueError("Storage reservation is missing or expired; keep the current publication and retry.")
         estimated = args.bytes
         if args.checkout:
             estimated = estimate_export(args.checkout, args.revision)
@@ -117,36 +368,40 @@ def admission(args):
         return {"reserved_bytes": estimated, "used_bytes": usage["used_bytes"], "budget_bytes": budget, "hard_quota": False}
 
 
-def storage_budget(config_path, environment_path):
-    value = "0"
+def storage_setting(config_path, environment_path, key, default, minimum, maximum):
+    value = str(default)
     for path in (config_path, environment_path):
         try:
             lines = Path(path).read_text().splitlines()
         except FileNotFoundError:
             continue
         for line in lines:
-            key, separator, configured = line.partition("=")
-            if separator and key in {"STORAGE_MAX_GIB", "GETBIBLE_STORAGE_MAX_GIB"} and configured:
+            configured_key, separator, configured = line.partition("=")
+            if separator and configured_key in {key, f"GETBIBLE_{key}"} and configured:
                 value = configured
     # Empty deployment values preserve saved settings, like the manager.
-    if os.environ.get("GETBIBLE_STORAGE_MAX_GIB"):
-        value = os.environ["GETBIBLE_STORAGE_MAX_GIB"]
-    budget = int(value)
-    if not 0 <= budget <= 999999:
-        raise ValueError("STORAGE_MAX_GIB must be between 0 and 999999.")
-    return budget
+    if os.environ.get(f"GETBIBLE_{key}"):
+        value = os.environ[f"GETBIBLE_{key}"]
+    setting = int(value)
+    if not minimum <= setting <= maximum:
+        raise ValueError(f"{key} must be between {minimum} and {maximum}.")
+    return setting
+
+
+def storage_budget(config_path, environment_path):
+    return storage_setting(config_path, environment_path, "STORAGE_MAX_GIB", 0, 0, 999999)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("snapshot", "sample", "reserve", "check", "release"))
+    parser.add_argument("action", choices=("snapshot", "sample", "reserve", "check", "commit", "release"))
     parser.add_argument("--state", default="/var/lib/getbible/storage")
     parser.add_argument("--config", default="/etc/getbible/getbible.conf")
     parser.add_argument("--environment", default="/run/getbible/environment.conf")
     parser.add_argument("--root", action="append")
     parser.add_argument("--id", default="")
     parser.add_argument("--max-gib", type=float, default=0)
-    parser.add_argument("--max-age", type=int, default=120)
+    parser.add_argument("--max-age", type=int, help="Override the completed snapshot's admission freshness window")
     parser.add_argument("--bytes", type=int, default=0)
     parser.add_argument("--checkout")
     parser.add_argument("--revision", default="HEAD")
@@ -156,17 +411,17 @@ def main():
             print(json.dumps({"status": "disabled", "reason": "STORAGE_MAX_GIB=0"}))
             return 0
         if args.action in {"snapshot", "sample"}:
-            report = snapshot(args.root or DEFAULT_ROOTS)
-            write_json(Path(args.state) / "usage.json", report, 0o640)
+            horizon = storage_setting(args.config, args.environment, "STORAGE_SCAN_MAX_SECONDS", SCAN_MAX_SECONDS, 120, 86400)
+            report = sample(args.root or DEFAULT_ROOTS, args.state, max_seconds=horizon)
         else:
             if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,200}", args.id):
                 raise ValueError("Invalid reservation identifier.")
-            if args.max_gib <= 0 and args.action != "release":
+            if args.max_gib <= 0 and args.action not in {"release", "commit"}:
                 return 0
             report = admission(args)
         print(json.dumps(report))
         return 0
-    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+    except (OSError, ValueError, KeyError, sqlite3.Error, subprocess.SubprocessError) as error:
         print(f"Storage admission: {error}", file=sys.stderr)
         return 1
 

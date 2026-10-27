@@ -232,6 +232,103 @@ class ResourceTest(unittest.TestCase):
         self.assertEqual(call.call_count, 1)
         self.assertEqual(call.call_args.args[0][1], "show")
 
+    def realign_args(self, **overrides):
+        return self.args(config=str(self.root / "global.conf"), storage_path=["data=" + str(self.root)],
+                         storage_state=str(self.root / "storage"), telemetry_db=str(self.root / "missing.sqlite3"),
+                         environment=str(self.root / "environment.conf"), **overrides)
+
+    def test_native_realign_recommends_available_memory_less_host_reserve_without_mutation(self):
+        (self.cg / "memory.max").write_text("max")
+        (self.proc / "meminfo").write_text("MemTotal: 8388608 kB\nMemAvailable: 6291456 kB\n")
+        self.endpoint("query.example.test", "query")
+        result = planner.realignment(self.realign_args(mode="native"))
+        self.assertTrue(result["ready"])
+        self.assertEqual(result["memory_budget"]["proposed"], "4096M")
+        self.assertFalse((self.root / "global.conf").exists())
+        self.assertFalse((self.root / "missing.sqlite3").exists())
+        self.assertFalse(self.runtime.exists())
+        self.assertEqual(result["management"]["capacity"]["state"], "unavailable")
+        self.assertEqual(result["hardware"]["storage"][0]["status"], "observed")
+        fresh = planner.realignment(self.realign_args(mode="native", realign_budget="4096M"))
+        self.assertEqual(result["plan_id"], fresh["plan_id"])
+
+    def test_realign_respects_cgroup_headroom_and_environment_ownership(self):
+        (self.proc / "meminfo").write_text("MemTotal: 8388608 kB\nMemAvailable: 7340032 kB\n")
+        (self.cg / "memory.current").write_text(str(2048 * MIB))
+        result = planner.realignment(self.realign_args(mode="native"))
+        self.assertEqual(result["memory_budget"]["proposed"], "1024M")
+        self.assertEqual(result["hardware"]["available_memory_bytes"], 2048 * MIB)
+        blocked = planner.realignment(self.realign_args(mode="native", authoritative=["MEMORY_BUDGET"]))
+        self.assertFalse(blocked["ready"])
+        self.assertIn("environment-controlled", blocked["reason"])
+        self.assertEqual(blocked["memory_budget"]["owner"], "environment")
+
+    def test_realign_keeps_explicit_native_budget_and_clamps_physical_ram(self):
+        (self.cg / "memory.max").write_text("max")
+        (self.proc / "meminfo").write_text("MemTotal: 2097152 kB\nMemAvailable: 1572864 kB\n")
+        result = planner.realignment(self.realign_args(mode="native", budget="3G"))
+        self.assertEqual(result["memory_budget"]["proposed"], "3G")
+        self.assertFalse(result["memory_budget"]["change"])
+        self.assertEqual(result["allocation"]["budget_bytes"], 2048 * MIB)
+
+    def test_realign_cannot_guess_native_budget_or_docker_limit(self):
+        native = planner.realignment(self.realign_args(mode="native"))
+        self.assertFalse(native["ready"])
+        self.assertIn("available memory", native["reason"])
+        (self.cg / "memory.max").write_text("max")
+        (self.proc / "meminfo").write_text("MemTotal: 8388608 kB\nMemAvailable: 7340032 kB\n")
+        docker = planner.realignment(self.realign_args())
+        self.assertFalse(docker["ready"])
+        self.assertIn("finite cgroup v2", docker["reason"])
+
+    def test_realign_reports_budget_failure_and_deliberate_endpoint_policy(self):
+        self.endpoint("search.example.test", "search", WORKERS="2", CPU_QUOTA="125%", MEMORY_MAX="768M")
+        result = planner.realignment(self.realign_args(budget="2G", policy=["SEARCH_WARM_TRANSLATIONS=asv"],
+                                                       authoritative=["SEARCH_WARM_TRANSLATIONS"]))
+        self.assertTrue(result["ready"])
+        row = result["endpoints"][0]
+        self.assertEqual(row["policy_owners"]["CPU_QUOTA"], "endpoint")
+        self.assertEqual(row["policy_owners"]["WARM_TRANSLATIONS"], "environment")
+        self.assertEqual(row["target"]["CPU_QUOTA"], "125%")
+        failed = planner.realignment(self.realign_args(budget="512M"))
+        self.assertFalse(failed["ready"])
+        self.assertIn("cannot fit", failed["reason"])
+
+    def test_realign_unchanged_query_does_not_compare_search_only_concurrency(self):
+        self.endpoint("query.example.test", "query")
+        args = self.realign_args()
+        settings = planner.plan(args)["endpoints"][0]["settings"]
+        selected = {key: value for key, value in settings.items()
+                    if key not in {"WORKERS_MIN", "WORKERS_MAX", "SEARCH_MAX_CONCURRENT", "EXPENSIVE_CONCURRENT"}}
+        with patch.object(planner, "selected_settings", return_value=selected):
+            result = planner.realignment(args)
+        self.assertEqual(result["domains"], [])
+        self.assertEqual(result["endpoints"][0]["differences"], {})
+
+    def test_realign_reads_selected_limits_and_never_emits_unrelated_environment(self):
+        self.endpoint("query.example.test", "query")
+        active = self.runtime / "query/v2/active"
+        active.mkdir(parents=True)
+        (active / "limits.conf").write_text("[Service]\nMemoryMax=512M\nMemoryHigh=400M\nCPUQuota=200%\nTasksMax=64\n")
+        (active / "runtime.env").write_text('QUERY_WORKERS="2"\nQUERY_THREADS="4"\nQUERY_WARM_TRANSLATIONS="kjv"\nPRIVATE_PASSWORD="secret-value"\n')
+        result = planner.realignment(self.realign_args())
+        self.assertEqual(result["endpoints"][0]["selected"]["MEMORY_MAX"], 512 * MIB)
+        self.assertEqual(result["endpoints"][0]["selected"]["WORKERS"], 2)
+        self.assertNotIn("secret-value", json.dumps(result))
+        original = result["plan_id"]
+        (active / "limits.conf").write_text("[Service]\nMemoryMax=768M\n")
+        self.assertNotEqual(planner.realignment(self.realign_args())["plan_id"], original)
+
+    def test_realign_shows_stale_storage_and_progress_without_resampling(self):
+        state = self.root / "storage"
+        state.mkdir()
+        (state / "usage.json").write_text(json.dumps({"generated_at": 1, "used_bytes": 100}))
+        (state / "progress.json").write_text(json.dumps({"status": "in_progress", "updated_at": 50}))
+        with patch.object(planner.time, "time", return_value=1000):
+            result = planner.realignment(self.realign_args())
+        self.assertEqual(result["management"]["storage_accounting"]["state"], "stale")
+        self.assertEqual(result["management"]["storage_accounting"]["progress"]["status"], "in_progress")
+
 
 if __name__ == "__main__":
     unittest.main()

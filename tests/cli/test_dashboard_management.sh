@@ -70,6 +70,14 @@ gb_global_set TELEMETRY_MAX_GIB 25
 grep -qFx 'GETBIBLE_TELEMETRY_MAX_GIB=25' "$GB_RUN/telemetry.env" || fail 'saved retention must reach the collector immediately'
 gb_global_set STORAGE_MAX_GIB 50
 grep -qFx 'GETBIBLE_STORAGE_MAX_GIB=50' "$GB_RUN/storage.env" || fail 'saved storage budget must reach the independent sampler immediately'
+gb_global_set STORAGE_SCAN_MAX_SECONDS 1800
+grep -qFx 'GETBIBLE_STORAGE_SCAN_MAX_SECONDS=1800' "$GB_RUN/storage.env" || fail 'saved scan horizon must reach the resumable sampler'
+GETBIBLE_STORAGE_SCAN_MAX_SECONDS=2400 infrastructure_environment
+grep -qFx 'GETBIBLE_STORAGE_SCAN_MAX_SECONDS=2400' "$GB_RUN/storage.env" || fail 'deployment scan horizon must override the saved value'
+if gb_setting_validate STORAGE_SCAN_MAX_SECONDS 119 2>/dev/null || gb_setting_validate STORAGE_SCAN_MAX_SECONDS 86401 2>/dev/null; then
+    fail 'scan horizon must remain within its finite supported range'
+fi
+infrastructure_environment
 gb_global_set QUERY_WORKERS_MAX 6
 if grep -q '^GETBIBLE_\(QUERY\|SEARCH\)_' "$GB_RUN/adaptive.env"; then
     fail 'saved resource defaults must not become authoritative deployment overrides in the controller'

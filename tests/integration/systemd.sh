@@ -378,5 +378,48 @@ check 'MCP removal retires every managed service' '' "$(systemctl list-units --t
 check 'MCP purge removes its runtime tree' no "$([[ -e "$MCP_ROOT" ]] && echo yes || echo no)"
 check 'MCP removal preserves nginx master' "$NGINX_PID" "$(systemctl show --property=MainPID --value nginx)"
 
+# Exercise hardware alignment against actual serving generations after the
+# rollback fixtures finish. These small fixture ceilings leave room for the
+# existing native search generation and its replacement under a 6-GiB budget.
+"$GB" settings set QUERY_MEMORY_MAX 512M
+"$GB" settings set SEARCH_MEMORY_MAX 1G
+REALIGN_CONFIG="$(sha256sum /etc/getbible/getbible.conf)"
+"$GB" resources realign --memory-budget 6G --json > /srv/getbible-ci/realign-before.json
+check 'hardware preview preserves saved configuration' "$REALIGN_CONFIG" "$(sha256sum /etc/getbible/getbible.conf)"
+REALIGN_PLAN="$(/usr/bin/python3 - /srv/getbible-ci/realign-before.json <<'PYREALIGN'
+import json, sys
+plan = json.load(open(sys.argv[1]))
+assert plan["ready"], plan
+assert len(plan["endpoints"]) == 2 and plan["domains"], plan
+assert plan["memory_budget"]["proposed"] == "6G", plan
+print(plan["plan_id"])
+PYREALIGN
+)"
+start_probe
+"$GB" resources realign --memory-budget 6G --expected-plan "$REALIGN_PLAN" --apply --json > /srv/getbible-ci/realign-applied.json
+stop_probe
+"$GB" resources realign --memory-budget 6G --json > /srv/getbible-ci/realign-after.json
+/usr/bin/python3 - /srv/getbible-ci/realign-applied.json /srv/getbible-ci/realign-after.json <<'PYREALIGN'
+import json, sys
+application = json.load(open(sys.argv[1]))["application"]
+assert application["status"] == "complete" and not application["pending_domains"], application
+assert application["applied_domains"], application
+plan = json.load(open(sys.argv[2]))
+assert plan["ready"] and not plan["domains"], plan
+assert all(not item["differences"] for item in plan["endpoints"]), plan
+print("ok: native hardware alignment applied the reviewed allocation without pending differences")
+PYREALIGN
+REALIGN_QUERY="$(deployment query)"
+REALIGN_SEARCH="$(deployment search)"
+"$GB" resources realign --memory-budget 6G --apply --json > /srv/getbible-ci/realign-noop.json
+/usr/bin/python3 -c 'import json,sys; p=json.load(open(sys.argv[1]))["application"]; assert p["status"] == "complete" and not p["applied_domains"] and not p["pending_domains"],p' /srv/getbible-ci/realign-noop.json
+check 'repeated hardware alignment preserves query generation' "$REALIGN_QUERY" "$(deployment query)"
+check 'repeated hardware alignment preserves search generation' "$REALIGN_SEARCH" "$(deployment search)"
+check 'hardware alignment preserves nginx master' "$NGINX_PID" "$(systemctl show --property=MainPID --value nginx)"
+check 'query enforces aligned fixture memory ceiling' 536870912 "$(systemctl show --property=MemoryMax --value "$(unit query)")"
+check 'search enforces aligned fixture memory ceiling' 1073741824 "$(systemctl show --property=MemoryMax --value "$(unit search)")"
+check 'query remains ready after hardware alignment' '{"status":"ready"}' "$(request "$Q" /readyz | tr -d '\n')"
+check 'search remains ready after hardware alignment' '{"status":"ready"}' "$(request "$S" /readyz | tr -d '\n')"
+
 printf '\n== %d production deployment checks passed ==\n' "$PASS"
 

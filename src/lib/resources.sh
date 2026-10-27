@@ -11,6 +11,9 @@ resources_plan() {
     budget="${GETBIBLE_MEMORY_BUDGET:-$(gb_global MEMORY_BUDGET auto)}"
     args=(--mode "$mode" --budget "$budget" --registry "$GB_ENDPOINTS" --runtime-root "$GB_OPT" --systemctl "$GB_SYSTEMCTL")
     args+=(--adaptive-state "$GB_VAR/adaptive.json")
+    if declare -F gb_environment_managed >/dev/null && gb_environment_managed "$GB_GLOBAL_CONF" MEMORY_BUDGET; then
+        args+=(--authoritative MEMORY_BUDGET)
+    fi
     for key in MEMORY_CACHE_TTL:2592000 CACHE_TTL_JITTER:0 QUERY_CPU_QUOTA:auto SEARCH_CPU_QUOTA:auto \
         QUERY_WORKERS_MIN:1 QUERY_WORKERS_MAX:12 SEARCH_WORKERS_MIN:1 SEARCH_WORKERS_MAX:12 \
         QUERY_THREADS_MIN:1 QUERY_THREADS_MAX:16 SEARCH_THREADS_MIN:1 SEARCH_THREADS_MAX:8 \
@@ -132,6 +135,139 @@ resources_status() {
     if [[ "${1:-}" == --json ]]; then resources_plan --format json; else resources_plan --format text; fi
 }
 
+resources_realign_plan() {
+    local budget="${1:-}" format="${2:-json}"
+    local -a args=(--realign --config "$GB_GLOBAL_CONF" --format "$format"
+        --telemetry-db "$GB_VAR/telemetry/traffic.sqlite3" --environment "$GB_ENVIRONMENT_CONF" --storage-state "$GB_VAR/storage"
+        --storage-path "data=$GB_SRV" --storage-path "runtime=$GB_OPT" --storage-path "telemetry=$GB_VAR"
+        --storage-path "cache=$GB_CACHE")
+    [[ -z "$budget" ]] || args+=(--realign-budget "$budget")
+    resources_plan "${args[@]}"
+}
+
+resources_realign_render() {
+    "$GB_PYTHON" - "$GB_TOOLS/getbible-resources" "$1" <<'PY'
+import importlib.machinery, importlib.util, json, sys
+loader = importlib.machinery.SourceFileLoader("resource_report", sys.argv[1])
+spec = importlib.util.spec_from_loader(loader.name, loader)
+module = importlib.util.module_from_spec(spec)
+loader.exec_module(module)
+module.print_realignment(json.load(open(sys.argv[2])))
+PY
+}
+
+resources_realign_record() {
+    local plan="$1" status="$2" error="$3" budget_saved="$4"
+    shift 4
+    "$GB_PYTHON" - "$plan" "$status" "$error" "$budget_saved" "$@" <<'PY'
+import json, sys
+path, status, error, saved, *applied = sys.argv[1:]
+with open(path) as stream:
+    report = json.load(stream)
+report["application"] = {"status": status, "error": error, "budget_saved": saved == "true",
+                         "applied_domains": applied,
+                         "pending_domains": [name for name in report["domains"] if name not in applied]}
+with open(path, "w") as stream:
+    json.dump(report, stream, indent=2)
+    stream.write("\n")
+PY
+}
+
+resources_realign_apply() {
+    local plan="$1" expected="$2" fresh budget plan_id ready changed domain error='' budget_saved=false
+    local -a fields=() domains=() applied=()
+    [[ "${GB_DRY_RUN:-false}" != true ]] || { resources_realign_render "$plan"; return 0; }
+    gb_require_root
+    [[ -f "$GB_GLOBAL_CONF" ]] || { gb_warn 'Initialize this installation before applying hardware realignment.'; return 1; }
+    mapfile -t fields < <("$GB_PYTHON" -c 'import json,sys; p=json.load(open(sys.argv[1])); print(p["plan_id"]); print(p["memory_budget"]["proposed"]); print(str(p["ready"]).lower()); print(str(p["memory_budget"]["change"]).lower())' "$plan")
+    [[ ${#fields[@]} == 4 ]] || return 1
+    plan_id="${fields[0]}"; budget="${fields[1]}"; ready="${fields[2]}"; changed="${fields[3]}"
+    [[ -z "$expected" || "$expected" == "$plan_id" ]] || { gb_warn 'The reviewed resource plan is stale; review resources realign again.'; return 1; }
+    [[ "$ready" == true ]] || { gb_warn 'Hardware realignment is blocked; resolve the reason in the plan.'; return 1; }
+    gb_management_lock || return "$?"
+    fresh="$(gb_tmpdir)/resources-realign-fresh.json"
+    resources_realign_plan "$budget" json > "$fresh" || return 1
+    "$GB_PYTHON" -c 'import json,sys; p=json.load(open(sys.argv[1])); sys.exit(0 if p["ready"] and p["plan_id"] == sys.argv[2] else 1)' "$fresh" "$plan_id" || {
+        gb_warn 'Hardware or resource settings changed before apply; review resources realign again.'; return 1;
+    }
+    mapfile -t domains < <("$GB_PYTHON" -c 'import json,sys; print("\n".join(json.load(open(sys.argv[1]))["domains"]))' "$plan")
+    # Check the first overlapping candidate under the proposed aggregate cap
+    # before saving anything. Subsequent transactions repeat live admission.
+    if [[ -n "${domains[0]:-}" ]]; then
+        resources_plan --budget "$budget" --candidate-domain "${domains[0]}" --format json >/dev/null || return 1
+    fi
+    tg_notify start 'Hardware realignment started' 'Applying reviewed resource targets through normal runtime generation transactions.'
+    if [[ "$changed" == true ]]; then
+        if gb_global_set MEMORY_BUDGET "$budget"; then
+            budget_saved=true
+        else
+            [[ "$(cfg_get_raw "$GB_GLOBAL_CONF" MEMORY_BUDGET)" != "$budget" ]] || budget_saved=true
+            error='The memory budget could not be saved or its service settings could not be refreshed. Inspect settings environment before retrying.'
+        fi
+    fi
+    if [[ -z "$error" ]]; then
+        local GB_RESOURCE_RECONCILING=true
+        for domain in "${domains[@]}"; do
+            [[ -n "$domain" ]] || continue
+            if endpoint_apply "$domain" && resources_plan --wait-drain "$domain"; then
+                applied+=("$domain")
+            else
+                error="Resource application stopped at $domain; completed domains remain applied and remaining domains are pending. Rerun resources realign to review current state."
+                break
+            fi
+        done
+    fi
+    if [[ -n "$error" ]]; then
+        resources_realign_record "$plan" partial "$error" "$budget_saved" "${applied[@]}" || return 1
+        tg_notify fail 'Hardware realignment incomplete' "$error"
+        gb_warn "$error"
+        return 1
+    fi
+    resources_realign_record "$plan" complete '' "$budget_saved" "${applied[@]}" || return 1
+    tg_notify ok 'Hardware realignment complete' 'Reviewed runtime resource settings were applied; management service limits and deployment caps remain unchanged.'
+}
+
+resources_realign() {
+    local budget='' expected='' apply=false json=false plan result=0
+    while (( $# )); do
+        case "$1" in
+            --memory-budget) [[ $# -ge 2 && -n "$2" ]] || { gb_warn '--memory-budget requires a size.'; return 1; }; budget="$2"; shift 2 ;;
+            --expected-plan) [[ $# -ge 2 && "$2" =~ ^[a-f0-9]{64}$ ]] || { gb_warn '--expected-plan requires a SHA-256 plan identifier.'; return 1; }; expected="$2"; shift 2 ;;
+            --apply) apply=true; shift ;;
+            --json) json=true; shift ;;
+            *) gb_warn 'Usage: getbible resources realign [--memory-budget SIZE] [--json] [--apply] [--expected-plan SHA256]'; return 1 ;;
+        esac
+    done
+    plan="$(gb_tmpdir)/resources-realign.json"
+    resources_realign_plan "$budget" json > "$plan" || return 1
+    [[ "${GB_DRY_RUN:-false}" != true ]] || apply=false
+    if [[ "$apply" == true ]]; then
+        [[ "$json" == true ]] || resources_realign_render "$plan"
+        resources_realign_apply "$plan" "$expected" >&2 || result=$?
+    fi
+    if [[ "$json" == true ]]; then
+        cat "$plan"
+    elif [[ "$apply" != true ]]; then
+        resources_realign_render "$plan"
+    elif (( result == 0 )); then
+        printf 'Hardware realignment completed.\n'
+    fi
+    return "$result"
+}
+
+resources_realign_menu() {
+    local budget plan report expected
+    budget="$(ui_input 'Hardware realignment' 'Memory budget (auto recalculates a native recommendation or uses the Docker allowance)' "$(gb_global MEMORY_BUDGET auto)")" || return 0
+    plan="$(gb_tmpdir)/resources-realign-menu.json"; report="$(gb_tmpdir)/resources-realign-menu.txt"
+    resources_realign_plan "$budget" json > "$plan" || return 1
+    resources_realign_render "$plan" > "$report" || return 1
+    ui_textbox 'Review hardware realignment' "$report"
+    "$GB_PYTHON" -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))["ready"] else 1)' "$plan" || return 0
+    ui_yesno 'Apply hardware realignment' 'Apply this reviewed memory budget and the displayed runtime generation changes?' no || return 0
+    expected="$("$GB_PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1]))["plan_id"])' "$plan")" || return 1
+    ui_run 'Apply hardware realignment' resources_realign_apply "$plan" "$expected"
+}
+
 # Before the outer nginx transaction, shrink other domains when a new endpoint
 # changes the global split. Their old workers drain before the new allocation
 # is consumed. An empty target (after removal) also grows remaining domains.
@@ -175,8 +311,9 @@ resources_cli() {
     case "${1:-show}" in
         show|status) shift || true; resources_status "${1:-}" ;;
         --json) resources_status --json ;;
+        realign) shift; resources_realign "$@" ;;
         apply) resources_apply ;;
-        *) gb_die "Usage: getbible resources [show|apply] [--json]" ;;
+        *) gb_die "Usage: getbible resources [show|apply|realign] [--json]" ;;
     esac
 }
 
@@ -184,8 +321,10 @@ resources_menu() {
     local choice
     while true; do
         choice="$(ui_menu "Runtime resources" "Memory allocation across all enabled runtime endpoints" \
+            realign "Review and align settings with available hardware" \
             show "Show effective resource targets" apply "Apply targets through healthy runtime generations")" || return 0
         case "$choice" in
+            realign) resources_realign_menu || true ;;
             show) ui_run "Runtime resource targets" resources_status || true ;;
             apply) ui_run "Apply runtime resources" resources_apply || true ;;
         esac

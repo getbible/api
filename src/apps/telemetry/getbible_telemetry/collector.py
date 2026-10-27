@@ -28,6 +28,7 @@ from .health import HealthInspector
 from .store import TelemetryStore
 from .settings import SETTING_NAMES, numeric_setting
 from .capacity import CapacityTracker, incident_update
+from .service_alerts import ServiceIncidents, boot_id
 
 
 def read_settings(path: str) -> dict[str, int]:
@@ -73,6 +74,7 @@ class Collector:
         self._committed_records = 0
         self._instance = uuid.uuid4().hex
         self._capacity = CapacityTracker(store)
+        self._service_incidents = ServiceIncidents(store.path.parent / "service-alerts")
         self._history_max_bytes = 10 * 1024**3
         self._lock = None
         self._storage_alert_at = 0.0
@@ -469,7 +471,7 @@ class Collector:
                           - self.store.db.execute("PRAGMA freelist_count").fetchone()[0]) * page
         problems = {row[0]: json.loads(row[1]) for row in self.store.db.execute(
             "SELECT key,value FROM metadata WHERE key LIKE 'blocked_source:%' OR key LIKE 'source_error:%' "
-            "OR key IN ('nginx_reopen_failed','spool_cleanup')")}
+            "OR key IN ('nginx_reopen_failed','spool_cleanup','service_alert_error')")}
         return {"spool_bytes": total, "unread_bytes": unread, "spool_max_bytes": self.spool_max_bytes,
                 "budgeted_spool_bytes": budgeted, "active_bytes": active, "active_files": active_files,
                 "rotated_spool_bytes": rotated_bytes, "consumed_rotated_bytes": consumed,
@@ -594,12 +596,41 @@ class Collector:
             "telemetry_spool": (usage, allowance, details),
         }
         services = sample.get("services", {})
-        if services.get("available"):
-            for key in alerts:
-                if key.startswith(("service:", "sync:")):
-                    conditions[key] = (0, 1, "Previously reported service condition cleared.")
+        fresh_services = services.get("available") and 0 <= now - services.get("sampled_at", now) <= 90
+        if fresh_services:
             for key, condition in services.get("conditions", {}).items():
-                conditions[key] = (int(condition["unhealthy"]), 1, condition["message"])
+                if key.startswith("sync:"):
+                    conditions[key] = (int(condition["unhealthy"]), 1, condition["message"])
+        # Share OnFailure's durable incident instead of sending a second alert
+        # through the generic capacity path. Absence from list-units --failed
+        # means retrying or unknown, never proof of a successful execution.
+        try:
+            incidents = self._service_incidents.snapshot()
+            service_keys = {key for key in alerts if key.startswith("service:")}
+            service_keys.update("service:" + unit for unit in incidents)
+            if fresh_services:
+                service_keys.update(key for key in services.get("conditions", {}) if key.startswith("service:"))
+            for key in sorted(service_keys):
+                unit = key.removeprefix("service:")
+                condition = services.get("conditions", {}).get(key, {}) if fresh_services else {}
+                values = condition.get("unit_state")
+                current, event = self._service_incidents.observe(
+                    unit, values, failed=bool(condition.get("unhealthy")), now=now,
+                    monotonic=services.get("monotonic", time.monotonic()), boot=services.get("boot_id") or boot_id(),
+                    hold=self.alert_settings["ALERT_HOLD_SECONDS"], cooldown=self.alert_settings["ALERT_COOLDOWN_SECONDS"],
+                    reminder=self.alert_settings["ALERT_REMINDER_SECONDS"], legacy=alerts.get(key))
+                alerts[key] = current
+                if event == "recovered":
+                    self._notify("info", "getBible recovered: " + key,
+                                 "A successful execution after the failure has been confirmed.")
+                elif event:
+                    self._notify("fail", "Service failed: " + unit, current["message"]
+                                 + (" Persistent incident reminder." if event == "reminder" else ""))
+            with self.store.db:
+                self.store.db.execute("DELETE FROM metadata WHERE key='service_alert_error'")
+        except (OSError, ValueError, TypeError) as exc:
+            with self.store.db:
+                self.store.set_metadata("service_alert_error", {"time": now, "error": str(exc)[:512]})
         for key, (value, threshold, message) in conditions.items():
             if value is None:
                 continue  # Missing sensors are not evidence of recovery.
@@ -627,7 +658,8 @@ class Collector:
         self.lock()
         self._history_max_bytes = max_bytes
         sampler = MetricsSampler(cgroup_root=cgroup_root, disks=[str(self.root), str(self.store.path.parent)])
-        inspector = HealthInspector(systemctl)
+        inspector = HealthInspector(systemctl, incident_directory=self._service_incidents.directory,
+                                    storage_directory=self.store.path.parent.parent / "storage")
         next_metric = next_prune = next_cleanup = next_rotate = next_settings = 0.0
         next_ingest = next_rollup = 0.0
         try:

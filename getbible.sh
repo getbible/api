@@ -137,6 +137,9 @@ Platform
   settings environment                  show configuration values and their sources (secrets hidden)
   settings set KEY VALUE                set a system setting; explicit environment values take priority
   resources [show|apply] [--json]         inspect or apply the shared runtime memory budget
+  resources realign [--json]             review hardware, ownership and proposed allocation
+                    [--memory-budget SIZE] [--apply] [--expected-plan SHA256]
+                                         apply a reviewed plan through healthy generations
   telegram enable|disable|test
   cloudflare ...                         see: getbible.sh cloudflare help
   doctor                                 check this host
@@ -546,7 +549,11 @@ main() {
             local GB_IMAGE_UPDATE_WAIT=true
             gb_management_lock || return "$?"
             update_image "$@" ;;
-        resources) gb_system_init; resources_cli "$@" ;;
+        resources)
+            # Hardware planning is read-only and must not initialize services,
+            # acquire the deployment lock or save defaults merely to inspect.
+            if [[ "${1:-}" != realign ]]; then gb_system_init; fi
+            resources_cli "$@" ;;
         dashboard) gb_system_init; dashboard_cli "$@" ;;
         mcp) gb_system_init; mcp_cli "$@" ;;
         list) ep_list ;;
