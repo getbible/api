@@ -187,6 +187,35 @@ class ServiceAlertsTest(unittest.TestCase):
         self.assertTrue(state["active"])
         self.assertIsNone(event)
 
+    def test_failure_during_later_health_queries_cannot_be_cleared_by_earlier_success(self):
+        self.observe({**observation(exit_at=30), "InvocationID": "first-failure"}, now=30)
+        inspector = HealthInspector(incident_directory=self.incidents.directory)
+        old = {**observation(state="inactive", result="success", code="1", status="0", exit_at=50),
+               "InvocationID": "previous-success"}
+        clock = 90
+
+        def command(*args):
+            nonlocal clock
+            if args[0] == "show":
+                return "\n".join(f"{key}={value}" for key, value in old.items())
+            if args[0] == "list-timers":
+                # OnFailure sees a new failed invocation after the inspector
+                # has already read the previous successful execution.
+                self.observe({**observation(), "InvocationID": "new-failure"}, now=100)
+                clock = 110
+            return ""
+
+        with patch.object(inspector, "_run", side_effect=command), \
+                patch("getbible_telemetry.health.time.monotonic", side_effect=lambda: clock), \
+                patch("getbible_telemetry.health.boot_id", return_value="boot-one"):
+            sample = inspector.sample(now=90)
+        values = sample["conditions"]["service:" + UNIT]["unit_state"]
+        state, event = self.incidents.observe(UNIT, values, now=120, monotonic=sample["monotonic"],
+                                              boot=sample["boot_id"])
+        self.assertTrue(state["active"])
+        self.assertEqual(state["failure_invocation"], "new-failure")
+        self.assertIsNone(event)
+
     def test_legacy_incident_requires_execution_after_import(self):
         old = observation(state="inactive", result="success", code="1", status="0", exit_at=50)
         state, event = self.observe(old, now=100, legacy={"active": True, "last_sent": 40})

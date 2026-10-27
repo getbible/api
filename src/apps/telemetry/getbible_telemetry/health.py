@@ -48,6 +48,10 @@ class HealthInspector:
         if now < self.next_check:
             return self.last_sample
         self.next_check = now + 60
+        # Unit details may precede a new OnFailure incident while later timer
+        # queries are still running. Date observations before querying them so
+        # an older successful invocation cannot clear that newer failure.
+        observed_monotonic = time.monotonic()
         failed = self._run("list-units", "--all", "--type=service", "--state=failed", "--plain", "--no-legend", "--no-pager", "getbible-*", "nginx.service")
         if failed is None:
             self.last_sample = {"available": False, "conditions": {}, "reason": "systemd state unavailable"}
@@ -116,5 +120,5 @@ class HealthInspector:
             conditions["sync:" + service] = {"unhealthy": stale,
                                              "message": "Scheduled sync has no successful LAST_CHECK after its timer trigger: " + service}
         self.last_sample = {"available": True, "conditions": conditions, "syncs": syncs, "sampled_at": now,
-                            "monotonic": time.monotonic(), "boot_id": boot_id()}
+                            "monotonic": observed_monotonic, "boot_id": boot_id()}
         return self.last_sample
