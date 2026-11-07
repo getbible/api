@@ -117,8 +117,8 @@ in flight during a reload; `aio threads` is enabled only from nginx 1.25.4.
 Runtime Python is separate from the host's management Python. First deployment
 downloads a checksum-verified standalone CPython distribution and installs
 packages into a new release. `auto` selects the reviewed 3.12 family on Ubuntu
-24.04 and 3.14 on Ubuntu 26.04; `--python 3.13` or an exact catalog patch can
-override it. The selected exact patch is recorded per endpoint. No timer
+24.04 and 3.14 on Ubuntu 26.04; `--python 3.13`, `--python 3.15` or an exact
+catalog patch can override it. The selected exact patch is recorded per endpoint. No timer
 upgrades runtime Python or its packages, and host Python upgrades do not
 replace either its interpreter or standard library.
 

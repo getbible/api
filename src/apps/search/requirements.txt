@@ -1,14 +1,14 @@
 # Exact runtime set for the search endpoint. Bump deliberately, then run
 # `getbible.sh update` so every release is rebuilt from this file.
 Flask==3.1.3
-getbible==3.0.0
+getbible==3.1.0
 gunicorn==26.2.0
 blinker==1.9.0
 certifi==2026.10.23
 charset-normalizer==3.5.2
 click==8.5.0
-# Keep the last advisory-free 3.x release allowed by getbible 3.0.0.
-filelock==3.20.3
+# Patched file locking; keep aligned with the librarian security minimum.
+filelock==4.2.9
 idna==3.20
 itsdangerous==2.2.0
 Jinja2==3.1.6

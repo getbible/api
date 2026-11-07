@@ -19,7 +19,7 @@ build_root="$(mktemp -d "$bundle/.build.XXXXXXXX")"
 trap 'rm -rf -- "$build_root"; gb_cleanup' EXIT
 GB_OPT="$build_root/managed"
 declare -a selections=() versions=()
-IFS=', ' read -r -a selections <<< "${GETBIBLE_IMAGE_PYTHONS:-3.12 3.13 3.14}"
+IFS=', ' read -r -a selections <<< "${GETBIBLE_IMAGE_PYTHONS:-3.12 3.13 3.14 3.15}"
 [[ ${#selections[@]} -gt 0 ]] || gb_die "GETBIBLE_IMAGE_PYTHONS must select at least one reviewed Python version."
 for selection in "${selections[@]}"; do
     versions+=("$(py_resolve_version "$selection")")
