@@ -165,6 +165,7 @@ sed -n '/^cmd_settings() {$/,/^}$/p' "$ROOT/getbible.sh" > "$TEST_ROOT/settings-
 check test -s "$TEST_ROOT/settings-cli.sh"
 # shellcheck source=/dev/null
 source "$TEST_ROOT/settings-cli.sh"
+# shellcheck disable=SC2218 # Production definition is sourced above, before the fixture override below.
 gb_environment_keys > "$TEST_ROOT/keys"
 python3 - "$TEST_ROOT/keys" <<'PY'
 from pathlib import Path
