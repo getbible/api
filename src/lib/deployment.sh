@@ -204,7 +204,8 @@ gb_settings_menu() {
             resources) resources_menu ;;
             edit)
                 key="$(ui_input 'System setting' "Setting name (for example TLS_MODE, TRUSTED_PROXY_CIDRS, MEMORY_BUDGET)" '')" || continue
-                if ! gb_environment_keys | grep -qxF "$key" || [[ "$(gb_environment_file "$key")" != "$GB_GLOBAL_CONF" ]]; then
+                # Drain every key so pipefail does not reject a valid early match.
+                if ! gb_environment_keys | grep -xF -- "$key" >/dev/null || [[ "$(gb_environment_file "$key")" != "$GB_GLOBAL_CONF" ]]; then
                     ui_msg 'System setting' 'Choose a system key from the configuration report. Credentials have their own settings menus.'; continue
                 fi
                 if gb_environment_managed "$GB_GLOBAL_CONF" "$key"; then
