@@ -181,7 +181,7 @@ with their package manager. Managed runtimes cover x86_64 and aarch64 with
 glibc 2.28 or newer.
 
 Runtime CPython is installed under `/opt/getbible/python` from a reviewed,
-SHA-256-verified catalog covering Python 3.12, 3.13 and 3.14. Interpreter,
+SHA-256-verified catalog covering Python 3.12, 3.13, 3.14 and 3.15. Interpreter,
 standard library and virtual environments belong to the application, so
 distro Python updates do not replace them. Updates are explicit:
 
