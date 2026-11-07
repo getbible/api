@@ -157,4 +157,80 @@ check test "$(gb_global DEFAULT_CLOUDFLARE_MODE)" = proxied
 check test "$(gb_global DEFAULT_CLOUDFLARE_CACHE)" = respect
 check test "$(gb_global DEFAULT_QUERY_WORKERS)" = 3
 check test "$(cfg_get_raw "$GB_GLOBAL_CONF" DEFAULT_QUERY_WORKERS)" = auto
+
+# Exercise the actual CLI handler and menu with enough trailing key data to
+# exceed pipe capacity. An early-exit consumer deterministically breaks this
+# producer instead of relying on the scheduler to expose the normal short list.
+sed -n '/^cmd_settings() {$/,/^}$/p' "$ROOT/getbible.sh" > "$TEST_ROOT/settings-cli.sh"
+check test -s "$TEST_ROOT/settings-cli.sh"
+# shellcheck source=/dev/null
+source "$TEST_ROOT/settings-cli.sh"
+# shellcheck disable=SC2218 # Production definition is sourced above, before the fixture override below.
+gb_environment_keys > "$TEST_ROOT/keys"
+python3 - "$TEST_ROOT/keys" <<'PY'
+from pathlib import Path
+import sys
+with Path(sys.argv[1]).open('a') as stream:
+    stream.write('UNRELATED_FIXTURE_KEY\n' * 131072)
+PY
+gb_environment_keys() {
+    cat -- "$TEST_ROOT/keys" || return
+    (( KEY_SOURCE_STATUS == 0 )) || return "$KEY_SOURCE_STATUS"
+    : > "$TEST_ROOT/keys-complete"
+}
+GB_GLOBAL_CONF="$GB_ETC/settings-keys.conf"
+export GETBIBLE_EXECUTION_MODE=native
+KEY_SOURCE_STATUS=0
+settings_cli() { (trap - EXIT; cmd_settings set "$@"); }
+check settings_cli QUERY_MEMORY_MAX 512M
+check test "$(cfg_get_raw "$GB_GLOBAL_CONF" QUERY_MEMORY_MAX)" = 512M
+check test -f "$TEST_ROOT/keys-complete"
+for key in UNKNOWN_QUERY_MEMORY_MAX -eQUERY_MEMORY_MAX --help; do
+    before="$(sha256sum "$GB_GLOBAL_CONF")"
+    reject settings_cli "$key" 1G
+    check grep -Fq -- "Unknown system setting: $key" "$TEST_ROOT/rejected.out"
+    check test "$(sha256sum "$GB_GLOBAL_CONF")" = "$before"
+done
+
+# Menu answers use files because command substitutions run in child shells.
+next_answer() {
+    local answer
+    IFS= read -r answer < "$1" || return 1
+    sed '1d' "$1" > "$1.next"
+    mv -- "$1.next" "$1"
+    printf '%s\n' "$answer"
+}
+ui_menu() { next_answer "$TEST_ROOT/menu-choices"; }
+ui_input() { next_answer "$TEST_ROOT/menu-answers"; }
+ui_msg() { printf '%s\n' "$@" >> "$TEST_ROOT/menu-messages"; }
+ui_run() { shift; "$@"; }
+printf 'edit\nback\n' > "$TEST_ROOT/menu-choices"
+printf 'QUERY_MEMORY_MAX\n1G\n' > "$TEST_ROOT/menu-answers"
+rm -f "$TEST_ROOT/keys-complete"
+check gb_settings_menu
+check test "$(cfg_get_raw "$GB_GLOBAL_CONF" QUERY_MEMORY_MAX)" = 1G
+check test -f "$TEST_ROOT/keys-complete"
+for key in UNKNOWN_QUERY_MEMORY_MAX -eQUERY_MEMORY_MAX --help; do
+    before="$(sha256sum "$GB_GLOBAL_CONF")"
+    printf 'edit\nback\n' > "$TEST_ROOT/menu-choices"
+    printf '%s\nunused-value\n' "$key" > "$TEST_ROOT/menu-answers"
+    : > "$TEST_ROOT/menu-messages"
+    check gb_settings_menu
+    check test "$(cat "$TEST_ROOT/menu-answers")" = unused-value
+    check grep -Fq 'Choose a system key' "$TEST_ROOT/menu-messages"
+    check test "$(sha256sum "$GB_GLOBAL_CONF")" = "$before"
+done
+
+# A failed key producer must remain a failure even when it emitted a match.
+KEY_SOURCE_STATUS=7
+before="$(sha256sum "$GB_GLOBAL_CONF")"
+reject settings_cli QUERY_MEMORY_MAX 2G
+check test "$(sha256sum "$GB_GLOBAL_CONF")" = "$before"
+printf 'edit\nback\n' > "$TEST_ROOT/menu-choices"
+printf 'QUERY_MEMORY_MAX\nunused-value\n' > "$TEST_ROOT/menu-answers"
+: > "$TEST_ROOT/menu-messages"
+check gb_settings_menu
+check test "$(cat "$TEST_ROOT/menu-answers")" = unused-value
+check grep -Fq 'Choose a system key' "$TEST_ROOT/menu-messages"
+check test "$(sha256sum "$GB_GLOBAL_CONF")" = "$before"
 printf 'Deployment environment: %s assertions passed\n' "$passed"

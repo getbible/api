@@ -490,7 +490,8 @@ cmd_settings() {
         set)
             key="${2:?setting key}"
             value="${3?setting value}"
-            gb_environment_keys | grep -qxF "$key" || gb_die "Unknown system setting: $key"
+            # Drain every key so an early match cannot SIGPIPE the producer.
+            gb_environment_keys | grep -xF -- "$key" >/dev/null || gb_die "Unknown system setting: $key"
             [[ "$(gb_environment_file "$key")" == "$GB_GLOBAL_CONF" ]] || gb_die "Use the Cloudflare or Telegram settings for credentials."
             gb_global_set "$key" "$value" ;;
         "")
