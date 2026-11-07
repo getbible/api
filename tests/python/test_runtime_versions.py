@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+import hashlib
+import io
+import json
 import shutil
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
 
 from getbible_query_api.app import create_app as query_app
+from getbible_query_api.check import main as query_check
 from getbible_search_api.app import create_app as search_app
+from getbible_search_api.check import main as search_check
 
 from tests.python.support import FIXTURE_REPOSITORY
 
@@ -23,17 +30,20 @@ class RuntimeVersionTest(unittest.TestCase):
         # the librarian owns parsing and preservation of the source verse data.
         shutil.copytree(Path(FIXTURE_REPOSITORY) / "v2", self.root / "v3")
 
-    def app(self, kind: str):
-        environment = {
-            "GETBIBLE_REPOSITORY": str(self.root),
+    def environment(self, kind: str, repository: Path | None = None) -> dict[str, str]:
+        repository = repository or self.root
+        return {
+            "GETBIBLE_REPOSITORY": str(repository),
             "GETBIBLE_VERSION": "v3",
-            "GETBIBLE_CACHE_DIR": str(self.root / "cache" / kind),
-            "GETBIBLE_APP_LOG": str(self.root / f"{kind}.log"),
+            "GETBIBLE_CACHE_DIR": str(repository / "cache" / kind),
+            "GETBIBLE_APP_LOG": str(repository / f"{kind}.log"),
             "QUERY_DEFAULT_TRANSLATION": "test",
             "SEARCH_DEFAULT_TRANSLATION": "test",
             "QUERY_DEFAULT_REFERENCE": "Ge1:1",
         }
-        with patch.dict("os.environ", environment, clear=True):
+
+    def app(self, kind: str, repository: Path | None = None):
+        with patch.dict("os.environ", self.environment(kind, repository), clear=True):
             app = (query_app if kind == "query" else search_app)()
         self.addCleanup(app.extensions["getbible"].close)
         app.testing = True
@@ -54,6 +64,58 @@ class RuntimeVersionTest(unittest.TestCase):
                 self.assertNotIn("Location", response.headers)
         self.assertEqual(client.get("/v2/test/Ge1:1").get_json()["code"], "unknown_version")
         self.assertEqual(client.get("/readyz").status_code, 200)
+
+    def test_nested_v3_metadata_survives_startup_warming_and_http(self) -> None:
+        baseline = self.app("query").get("/v3/test/Ge1:1").get_json()
+        search_baseline = self.app("search").get("/v3/test/beginning").get_json()["results"]
+        for depth in (9, 72):
+            repository = self.root / f"depth-{depth}"
+            shutil.copytree(self.root / "v3", repository / "v3")
+            nested = "Synthetic source annotation"
+            for level in range(depth):
+                nested = {"content": nested} if level % 2 else [nested]
+
+            translation_path = repository / "v3/test.json"
+            chapter_path = repository / "v3/test/1/1.json"
+            translation = json.loads(translation_path.read_text())
+            chapter = json.loads(chapter_path.read_text())
+            for value in (translation["books"][0]["chapters"][0], chapter):
+                value["editorial"] = nested
+                value["verses"][0]["annotations"] = nested
+            for path, payload in ((translation_path, translation), (chapter_path, chapter)):
+                raw = json.dumps(payload).encode("utf-8")
+                path.write_bytes(raw)
+                path.with_suffix(".sha").write_text(hashlib.sha1(raw, usedforsecurity=False).hexdigest())
+
+            expected = deepcopy(baseline)
+            expected["test_1_1"]["verses"][0]["annotations"] = nested
+            expected_search = deepcopy(search_baseline)
+            expected_search["test_1_1"]["verses"][0]["annotations"] = nested
+            for kind, check in (("query", query_check), ("search", search_check)):
+                with self.subTest(depth=depth, kind=kind):
+                    environment = self.environment(kind, repository)
+                    environment["SEARCH_WARM_TRANSLATIONS"] = "test"
+                    with patch.dict("os.environ", environment, clear=True), redirect_stdout(io.StringIO()):
+                        self.assertEqual(check(), 0)
+
+                    client = self.app(kind, repository)
+                    control = client.application.extensions["getbible_control"]
+                    # Exercise the same source refresh and warm path used by
+                    # Gunicorn before workers fork, using only synthetic data.
+                    control.refresh_source(force=True)
+                    self.assertEqual(control.warm("test")["abbreviation"], "test")
+                    self.assertEqual(client.get("/readyz").status_code, 200)
+                    response = client.get("/v3/test/Ge1:1")
+                    self.assertEqual(response.status_code, 200)
+                    body = response.get_json()
+                    self.assertEqual(body if kind == "query" else body["results"], expected)
+                    if kind == "search":
+                        self.assertEqual(client.get("/probez").status_code, 200)
+                        response = client.get("/v3/test/beginning")
+                        self.assertEqual(response.status_code, 200)
+                        self.assertEqual(set(response.get_json()), {"query", "results", "matches"})
+                        self.assertEqual(response.get_json()["query"]["kind"], "search")
+                        self.assertEqual(response.get_json()["results"], expected_search)
 
     def test_search_get_post_and_reference_use_selected_version(self) -> None:
         client = self.app("search")

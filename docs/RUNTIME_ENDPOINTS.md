@@ -45,6 +45,13 @@ still checks any published checksums it encounters while loading data and
 uses content hashes for its cache; removing that library behavior requires
 a public librarian option.
 
+Query and search require Librarian 3.1.1 or newer so nested source metadata
+does not encounter the older fixed nesting-depth ceiling during startup or
+requests. The library handles metadata traversal; runtime resource allocation
+and response contracts remain unchanged. Deploy the updated manager or image
+through the normal update process to install the corrected dependency in a new
+generation, replacing any temporary edits to an older installation.
+
 ## Endpoints: one service per version
 
 A runtime domain's endpoints are its versions. Every endpoint is its own
