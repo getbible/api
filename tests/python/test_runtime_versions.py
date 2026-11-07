@@ -117,6 +117,82 @@ class RuntimeVersionTest(unittest.TestCase):
                         self.assertEqual(response.get_json()["query"]["kind"], "search")
                         self.assertEqual(response.get_json()["results"], expected_search)
 
+    def test_deep_v3_annotations_survive_source_refresh_and_http(self) -> None:
+        depth = 600
+        annotation = "Synthetic refreshed annotation"
+        for level in range(depth):
+            annotation = {"content": annotation} if level % 2 else [annotation]
+
+        for kind in ("query", "search"):
+            with self.subTest(kind=kind):
+                repository = self.root / f"refreshed-{kind}"
+                shutil.copytree(self.root / "v3", repository / "initial")
+                shutil.copytree(self.root / "v3", repository / "refreshed")
+                (repository / "v3").symlink_to("initial", target_is_directory=True)
+                client = self.app(kind, repository)
+                control = client.application.extensions["getbible_control"]
+                control.refresh_source(force=True)
+                self.assertEqual(control.warm("test")["abbreviation"], "test")
+                paths = ["/v3/test/Ge1:1"]
+                if kind == "search":
+                    paths.append("/v3/test/beginning")
+                baseline = {}
+                for path in paths:
+                    response = client.get(path)
+                    self.assertEqual(response.status_code, 200)
+                    baseline[path] = response.get_json()
+
+                translation_path = repository / "refreshed/test.json"
+                chapter_path = repository / "refreshed/test/1/1.json"
+                translation = json.loads(translation_path.read_text())
+                chapter = json.loads(chapter_path.read_text())
+                for value in (translation["books"][0]["chapters"][0], chapter):
+                    value["verses"][0]["annotations"] = annotation
+                for path, payload in ((translation_path, translation), (chapter_path, chapter)):
+                    raw = json.dumps(payload).encode("utf-8")
+                    path.write_bytes(raw)
+                    path.with_suffix(".sha").write_text(hashlib.sha1(raw, usedforsecurity=False).hexdigest())
+
+                # Publish new source data over an already warmed, usable cache,
+                # as the static publisher does when replacing its version link.
+                replacement = repository / "next"
+                replacement.symlink_to("refreshed", target_is_directory=True)
+                replacement.replace(repository / "v3")
+                self.assertTrue(control.refresh_source(force=True))
+                self.assertEqual(control.warm("test")["abbreviation"], "test")
+                for path in paths:
+                    with self.subTest(path=path):
+                        response = client.get(path)
+                        self.assertEqual(response.status_code, 200)
+                        body = response.get_json()
+                        results = body if kind == "query" else body["results"]
+                        verse = results["test_1_1"]["verses"][0]
+                        self.assertIn("annotations", verse)
+                        cursor = verse.pop("annotations")
+                        # Traverse iteratively so the assertion itself does not
+                        # impose deepcopy's recursion limit on valid JSON.
+                        for level in reversed(range(depth)):
+                            if level % 2:
+                                self.assertIsInstance(cursor, dict)
+                                self.assertEqual(set(cursor), {"content"})
+                                cursor = cursor["content"]
+                            else:
+                                self.assertIsInstance(cursor, list)
+                                self.assertEqual(len(cursor), 1)
+                                cursor = cursor[0]
+                        self.assertEqual(cursor, "Synthetic refreshed annotation")
+                        if kind == "search" and body["query"]["kind"] == "search":
+                            expected = baseline[path]["query"]
+                            self.assertEqual(body["query"]["sha"], translation_path.with_suffix(".sha").read_text())
+                            self.assertNotEqual(body["query"]["sha"], expected["sha"])
+                            self.assertGreaterEqual(body["query"]["cache"]["checked_at"], expected["cache"]["checked_at"])
+                            expected["sha"] = body["query"]["sha"]
+                            expected["cache"]["checked_at"] = body["query"]["cache"]["checked_at"]
+                        self.assertEqual(body, baseline[path])
+                self.assertEqual(client.get("/readyz").status_code, 200)
+                if kind == "search":
+                    self.assertEqual(client.get("/probez").status_code, 200)
+
     def test_search_get_post_and_reference_use_selected_version(self) -> None:
         client = self.app("search")
         for response in (
