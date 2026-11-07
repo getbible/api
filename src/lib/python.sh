@@ -31,7 +31,7 @@ py_selection_prompt() {
     if gb_is_docker; then
         printf 'Bundled Python version (%s)' "$(awk '$1 !~ /^#/ && NF {print $1}' "$(py_distributions_file)" | sort -Vu | paste -sd ',')"
     else
-        printf 'Managed Python version (3.12, 3.13, 3.14 or a catalog patch)'
+        printf 'Managed Python version (3.12, 3.13, 3.14, 3.15 or a catalog patch)'
     fi
 }
 
@@ -62,10 +62,10 @@ py_resolve_version() {
             requested="$(awk '$1 !~ /^#/ && NF {print $1}' "$(py_distributions_file)" | sort -V | tail -n1)"
         fi
     fi
-    [[ "$requested" =~ ^3\.(12|13|14)(\.[0-9]+)?$ ]] \
-        || gb_die "Python must be auto, 3.12, 3.13, 3.14, or an exact reviewed patch."
+    [[ "$requested" =~ ^3\.(12|13|14|15)(\.[0-9]+)?$ ]] \
+        || gb_die "Python must be auto, 3.12, 3.13, 3.14, 3.15, or an exact reviewed patch."
     resolved="$(awk -v wanted="$requested" '$1 !~ /^#/ && ($1 == wanted || index($1, wanted ".") == 1) {print $1}' "$(py_distributions_file)" | sort -Vu | tail -n1)"
-    if [[ -z "$resolved" && "$requested" =~ ^3\.(12|13|14)\.[0-9]+$ && -n "$(py_installed_distribution "$requested")" ]]; then
+    if [[ -z "$resolved" && "$requested" =~ ^3\.(12|13|14|15)\.[0-9]+$ && -n "$(py_installed_distribution "$requested")" ]]; then
         resolved="$requested"
     fi
     if [[ -z "$resolved" ]]; then

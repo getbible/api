@@ -14,14 +14,16 @@ assert_eq() { [[ "$1" == "$2" ]] || { printf 'FAIL: %s (got %s, expected %s)\n' 
 export GB_OS_RELEASE="$TEST_ROOT/os-release"
 printf 'ID=ubuntu\nVERSION_ID="24.04"\nPRETTY_NAME="Ubuntu 24.04 LTS"\n' > "$GB_OS_RELEASE"
 assert_eq "$(platform_default_python)" 3.12 'Ubuntu 24 selects the reviewed 3.12 family'
-assert_eq "$(py_resolve_version auto)" 3.12.14 'family resolves to exact reviewed patch'
+assert_eq "$(py_resolve_version auto)" 3.12.16 'family resolves to exact reviewed patch'
 printf 'ID=ubuntu\nVERSION_ID="26.04"\n' > "$GB_OS_RELEASE"
-assert_eq "$(py_resolve_version auto)" 3.14.7 'Ubuntu 26 selects reviewed Python 3.14'
+assert_eq "$(py_resolve_version auto)" 3.14.10 'Ubuntu 26 selects reviewed Python 3.14'
 printf 'ID=debian\nVERSION_ID="13"\n' > "$GB_OS_RELEASE"
-assert_eq "$(py_resolve_version auto)" 3.14.7 'other glibc Linux is not coupled to system Python'
-assert_eq "$(py_resolve_version 3.13)" 3.13.15 'explicit family works on another distro'
-assert_eq "$(py_resolve_version 3.12.14)" 3.12.14 'exact selection survives OS change'
-if (py_resolve_version 3.15) >/dev/null 2>&1; then echo 'FAIL: unreviewed Python accepted' >&2; exit 1; fi
+assert_eq "$(py_resolve_version auto)" 3.14.10 'other glibc Linux is not coupled to system Python'
+assert_eq "$(py_resolve_version 3.13)" 3.13.18 'explicit family works on another distro'
+assert_eq "$(py_resolve_version 3.12.16)" 3.12.16 'exact selection survives OS change'
+assert_eq "$(py_resolve_version 3.15)" 3.15.2 'explicit Python 3.15 family resolves to its reviewed patch'
+assert_eq "$(py_resolve_version 3.15.2)" 3.15.2 'exact Python 3.15 patch is accepted'
+if (py_resolve_version 3.16) >/dev/null 2>&1; then echo 'FAIL: unreviewed Python accepted' >&2; exit 1; fi
 if (py_resolve_version 3.14.999) >/dev/null 2>&1; then echo 'FAIL: nonexistent patch accepted' >&2; exit 1; fi
 # Deliberately hostile data must never be executed.
 # shellcheck disable=SC2016

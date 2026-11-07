@@ -15,7 +15,7 @@ trap 'rm -rf -- "$TEST_ROOT"; gb_cleanup' EXIT
 check() { "$@" || { printf 'FAILED: %s\n' "$*" >&2; exit 1; }; }
 
 platform_detect
-row="$(awk -v arch="$PLATFORM_ARCH" '$1 == "3.12.14" && $2 == arch {print; exit}' "$GB_SRC/python/distributions.lock")"
+row="$(awk -v arch="$PLATFORM_ARCH" '$1 == "3.15.2" && $2 == arch {print; exit}' "$GB_SRC/python/distributions.lock")"
 IFS=' ' read -r version arch build digest url <<< "$row"
 identity="cpython-$version-$build-$arch-${digest:0:16}"
 distribution="$GB_RUNTIME_BUNDLE/python/$identity"
@@ -51,12 +51,12 @@ printf 'getbible==2.0.0 --hash=sha256:%064d\n' 0 > "$wheels/packages.requirement
 py_inputs_hash query "$version" > "$wheels/.inputs"
 
 check test "$(py_resolve_version auto)" = "$version"
-check test "$(py_resolve_version 3.12)" = "$version"
+check test "$(py_resolve_version 3.15)" = "$version"
 if (py_resolve_version 3.14) >/dev/null 2>&1; then echo 'Unavailable image Python accepted' >&2; exit 1; fi
 check test "$(py_catalog | tail -n1 | awk '{print $1}')" = "$version"
 
 endpoint_root="$GB_OPT/query/v2"
-release="$(py_build_release "$endpoint_root" query.example.test 3.12 query)"
+release="$(py_build_release "$endpoint_root" query.example.test 3.15 query)"
 check test -x "$release/.venv/bin/python"
 check test -x "$GB_OPT/python/$identity/bin/python3"
 check test "$(cat "$release/.python-distribution")" = "$row"
@@ -69,7 +69,7 @@ if grep -q 'NETWORK ATTEMPT' "$BUNDLE_CALLS"; then echo 'Docker deployment attem
 # An incomplete or stale image payload must leave the current release intact.
 py_switch_release "$endpoint_root" "$release"
 printf 'stale\n' > "$wheels/.inputs"
-if (py_build_release "$endpoint_root" query.example.test 3.12 query) >/dev/null 2>&1; then
+if (py_build_release "$endpoint_root" query.example.test 3.15 query) >/dev/null 2>&1; then
     echo 'Stale bundle inputs accepted' >&2; exit 1
 fi
 check test "$(py_current_release "$endpoint_root")" = "$release"
