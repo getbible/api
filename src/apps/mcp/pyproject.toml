@@ -13,7 +13,7 @@ dependencies = [
   "getbible-mcp==2.1.4",
   "httpx==0.28.1",
   "starlette==1.10.0",
-  "gunicorn==26.2.0",
+  "gunicorn==27.0.1",
   "uvicorn-worker==0.4.0",
 ]
 
